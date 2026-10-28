@@ -177,6 +177,14 @@ export default function (pi) {
   assert.deepEqual(newSessionToolOptions.activeTools, ['read'], 'the configured tool set should apply to new smoke sessions');
   assert.deepEqual(newSessionToolOptions.newSessionToolNames, ['read'], 'the worker should report its configured new-chat default');
 
+  const sessionListRequestId = 'b'.repeat(32);
+  const sessionListPromise = waitForWorkerMessage((message) => message?.type === 'sessions'
+    && message.requestId === sessionListRequestId, 'Command Palette session list');
+  worker.postMessage({ type: 'listSessions', query: '', allWorkspaces: false, requestId: sessionListRequestId });
+  const sessionList = await sessionListPromise;
+  assert.equal(sessionList.allWorkspaces, false, 'the session picker request should remain scoped to the current workspace');
+  assert.ok(Array.isArray(sessionList.sessions), 'the session picker should receive a validated session list');
+
   const modelSnapshot = waitForWorkerMessage((message) => message?.type === 'snapshot'
     && message.model === 'pi-chat-smoke smoke-model', 'model selection');
   worker.postMessage({ type: 'setModel', provider: 'pi-chat-smoke', modelId: 'smoke-model' });

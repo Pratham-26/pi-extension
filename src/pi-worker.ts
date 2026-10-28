@@ -3040,7 +3040,7 @@ function sessionSupplementalSearchMatches(path: string, query: string): boolean 
   return matches;
 }
 
-async function listSessions(query = sessionQuery, allWorkspaces = sessionSearchAllWorkspaces): Promise<void> {
+async function listSessions(query = sessionQuery, allWorkspaces = sessionSearchAllWorkspaces, requestId?: string): Promise<void> {
   sessionListController?.abort();
   const controller = new AbortController();
   sessionListController = controller;
@@ -3078,10 +3078,14 @@ async function listSessions(query = sessionQuery, allWorkspaces = sessionSearchA
         modified: item.modified instanceof Date ? item.modified.getTime() : 0,
         ...(supplementalMatch ? { searchMatch: 'thinking-or-tool-activity' } : {}),
       })),
+      ...(requestId ? { requestId } : {}),
     });
   } catch (error) {
     if (!controller.signal.aborted) {
-      send('runtime-error', { message: error instanceof Error ? error.message : 'Could not read Pi sessions.' });
+      send('runtime-error', {
+        message: error instanceof Error ? error.message : 'Could not read Pi sessions.',
+        ...(requestId ? { requestId } : {}),
+      });
     }
   } finally {
     if (sessionListController === controller) sessionListController = undefined;
@@ -3922,11 +3926,17 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'listSessions':
+        {
+        const requestId = typeof input.requestId === 'string' && /^[a-f0-9]{32}$/.test(input.requestId)
+          ? input.requestId
+          : undefined;
         await listSessions(
           typeof input.query === 'string' ? input.query : sessionQuery,
           typeof input.allWorkspaces === 'boolean' ? input.allWorkspaces : sessionSearchAllWorkspaces,
+          requestId,
         );
         return;
+        }
       case 'getOptions':
         sendOptions();
         return;

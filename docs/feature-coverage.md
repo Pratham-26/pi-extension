@@ -7,7 +7,7 @@ This checklist tracks implemented and pending product capabilities as of 29 Octo
 - [x] Use Pi's SDK and the user's existing Pi configuration, credentials, extensions, skills, prompt templates, and workspace session files; request trust before loading project-local Pi resources.
 - [x] Pick an available model before the first prompt; show provider, context-window size, and image support.
 - [x] Set the current model as Pi's global default for new sessions through an explicit model-control action.
-- [x] Search models by provider, name, ID, or vision support; refresh manually and watch `models.json` for updates.
+- [x] Search models by provider, name, ID, or vision support; refresh manually and watch `models.json` for updates. Open the model picker or a supported thinking-level picker from the VS Code Command Palette.
 - [x] Limit model cycling to a session-only ordered scope, load saved `enabledModels` patterns from Pi settings, and save an explicit scope back to global Pi settings; cycle to the next available model from the composer.
 - [x] Choose a thinking level supported by the selected model.
 - [x] Save, rename, remove, reorder, and use model/thinking presets.
@@ -35,7 +35,7 @@ This checklist tracks implemented and pending product capabilities as of 29 Octo
 
 ## Sessions
 
-- [x] Create, list, search, rename, pin, color, reorder, sort manually/by activity/by title, reopen, clone, export, and delete workspace sessions; opt-in search reaches sessions across Pi workspaces, and a foreign result opens in its own VS Code window after confirmation.
+- [x] Create, list, search, rename, pin, color, reorder, sort manually/by activity/by title, reopen, clone, export, and delete workspace sessions; opt-in search reaches sessions across Pi workspaces, and a foreign result opens in its own VS Code window after confirmation. Switch among current-workspace sessions from the VS Code Command Palette.
 - [~] Fork from a user message, edit earlier text/context/image prompts into a new branch, and navigate the current branch history. Editor chat tabs restore their session when it is still listed in the same workspace.
 - [~] Transcript search includes visible thinking and tool output; session search indexes names, messages, assistant thinking, tool calls, and tool outputs in the current workspace by default, with an opt-in all-workspaces search. Foreign sessions load in the matching workspace so Pi applies that folder's tool paths and trust rules.
 - [~] Open the latest session when the chat view starts is optional; multiple independent chat editor tabs, persisted same-workspace session restore, and new chat beside the active file are available through **Pi Chat: Open New Chat Beside Active Editor**. If a saved session is missing or belongs to another workspace, the editor opens a fresh session.

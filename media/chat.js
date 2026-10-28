@@ -86,6 +86,7 @@ const state = {
   thinkingLevel: '',
   thinkingLevels: [],
   supportsThinking: false,
+  pendingModelPicker: false,
   skills: [],
   prompts: [],
   resourceDiagnostics: [],
@@ -4713,6 +4714,10 @@ window.addEventListener('message', (event) => {
     case 'dismiss-composer-popovers':
       closeComposerPopovers();
       break;
+    case 'open-model-picker':
+      if (ui.modelToggle.disabled) state.pendingModelPicker = true;
+      else if (ui.modelPopover.hidden) ui.modelToggle.click();
+      break;
     case 'queue-default-action':
       state.deliverAs = data.action === 'steer' ? 'steer' : 'followUp';
       updateControls();
@@ -4863,6 +4868,10 @@ window.addEventListener('message', (event) => {
       renderTools();
       updateControls();
       renderModelChoices(data);
+      if (state.pendingModelPicker && !ui.modelToggle.disabled) {
+        state.pendingModelPicker = false;
+        ui.modelToggle.click();
+      }
       break;
     case 'model-scope-saved':
       state.modelScopeSaving = false;

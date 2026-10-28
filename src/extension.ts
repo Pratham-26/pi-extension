@@ -140,6 +140,12 @@ type TurnFileCapture = {
   baseline: Promise<TurnFileBaseline | undefined>;
 };
 
+type PendingSessionListRequest = {
+  worker: Worker;
+  resolve: (sessions: Array<Record<string, unknown>> | undefined) => void;
+  timer: NodeJS.Timeout;
+};
+
 type TurnFileSummaryEntry = {
   path: string;
   changeType: 'Added' | 'Modified' | 'Deleted';
@@ -385,6 +391,9 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     }),
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
+    vscode.commands.registerCommand('piChat.switchSession', () => provider.switchSessionFromCommandPalette()),
+    vscode.commands.registerCommand('piChat.chooseModel', () => provider.chooseModelFromCommandPalette()),
+    vscode.commands.registerCommand('piChat.chooseThinkingLevel', () => provider.chooseThinkingLevelFromCommandPalette()),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piChat.createWorktree', () => provider.createGitWorktreeSession()),
     vscode.commands.registerCommand('piChat.removeWorktree', () => provider.removeGitWorktreeSession()),
@@ -435,6 +444,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private queuedWorkCount = 0;
   private runtimeActivity = 'Working in Pi';
   private sessionListForRunningStatus: Array<Record<string, unknown>> = [];
+  private pendingSessionListRequests = new Map<string, PendingSessionListRequest>();
   private readonly runningSessionsDirectory: string;
   private readonly runningSessionRecordPath: string;
   private readonly runningSessionPoller: NodeJS.Timeout;
@@ -457,6 +467,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private knownResourcePaths = new Set<string>();
   private availableProviders: ProviderSetup[] = [];
   private availableProviderIds: string[] = [];
+  private availableThinkingLevels: string[] = [];
+  private currentThinkingLevel = '';
   private availableToolNames = new Set<string>();
   private contextFileChoices: ContextFileChoice[] = [];
   private contextFilesTruncated = false;
@@ -508,6 +520,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   dispose(): void {
     clearInterval(this.runningSessionPoller);
+    this.cancelPendingSessionListRequests();
     this.clearRunningSessionLease();
     this.cancelPackageSearch(false);
     this.cancelProviderAuthPrompts();
@@ -525,6 +538,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownResourcePaths.clear();
     this.availableProviders = [];
     this.availableProviderIds = [];
+    this.availableThinkingLevels = [];
+    this.currentThinkingLevel = '';
     this.availableToolNames.clear();
     this.contextFileChoices = [];
     this.contextFilesTruncated = false;
@@ -600,6 +615,144 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       type: 'newSession',
       autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
     });
+  }
+
+  async switchSessionFromCommandPalette(): Promise<void> {
+    await vscode.commands.executeCommand('workbench.view.extension.piChat');
+    if (!this.worker) await this.ensureRuntime();
+    const worker = this.worker;
+    if (!worker) {
+      void vscode.window.showInformationMessage('Pi Chat is not ready. Open a workspace and try again.');
+      return;
+    }
+    if (this.runtimeBusy) {
+      void vscode.window.showInformationMessage('Wait for Pi to finish before switching sessions.');
+      return;
+    }
+
+    const sessions = await this.requestSessionListForCommandPalette(worker);
+    if (this.worker !== worker || !sessions) {
+      void vscode.window.showInformationMessage('Pi Chat could not refresh the session list. Try again in a moment.');
+      return;
+    }
+    const currentWorkspacePath = this.workerWorkspace;
+    const currentWorkspaceKey = currentWorkspacePath ? this.normalizeSessionPath(currentWorkspacePath) : '';
+    const choicesSource = sessions
+      .filter((item) => item.isCurrentWorkspace === true && this.isKnownSessionPath(item.path))
+      .filter((item) => {
+        if (!currentWorkspaceKey || typeof item.workspacePath !== 'string') return false;
+        try {
+          return this.normalizeSessionPath(item.workspacePath) === currentWorkspaceKey;
+        } catch {
+          return false;
+        }
+      })
+      .slice(0, 1000);
+    if (!choicesSource.length) {
+      void vscode.window.showInformationMessage('No sessions are available in this workspace yet. Refresh the session list and try again.');
+      return;
+    }
+    const choices = choicesSource.map((item) => {
+      const title = typeof item.title === 'string' ? item.title : 'Untitled session';
+      const modified = Number(item.modified);
+      const date = Number.isFinite(modified) && modified > 0 ? new Date(modified).toLocaleString() : 'No activity time';
+      return {
+        label: title.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 96) || 'Untitled session',
+        description: `${item.pinned === true ? 'Pinned · ' : ''}${date}`,
+        detail: item.searchMatch === 'thinking-or-tool-activity' ? 'Matched thinking or tool activity' : undefined,
+        path: item.path as string,
+      };
+    });
+    const selected = await vscode.window.showQuickPick(choices, {
+      title: 'Switch Pi Chat Session',
+      placeHolder: 'Search sessions in the current workspace',
+      matchOnDescription: true,
+      matchOnDetail: true,
+      ignoreFocusOut: true,
+    });
+    if (!selected) return;
+    if (this.worker !== worker || this.runtimeBusy || !this.isKnownSessionPath(selected.path)) {
+      void vscode.window.showInformationMessage('The session list changed. Refresh it and try again.');
+      return;
+    }
+    const sessionWorkspace = this.sessionWorkspaceByPath.get(this.normalizeSessionPath(selected.path));
+    if (!sessionWorkspace || !this.workerWorkspace
+      || this.normalizeSessionPath(sessionWorkspace) !== this.normalizeSessionPath(this.workerWorkspace)) {
+      void vscode.window.showInformationMessage('That session no longer belongs to the current workspace.');
+      return;
+    }
+    this.sessionInteractionStarted = true;
+    this.clearTurnFileCapture(worker);
+    worker.postMessage({ type: 'openSession', path: selected.path });
+  }
+
+  async chooseModelFromCommandPalette(): Promise<void> {
+    await vscode.commands.executeCommand('workbench.view.extension.piChat');
+    this.post({ type: 'open-model-picker' });
+  }
+
+  async chooseThinkingLevelFromCommandPalette(): Promise<void> {
+    await vscode.commands.executeCommand('workbench.view.extension.piChat');
+    if (!this.worker) await this.ensureRuntime();
+    const worker = this.worker;
+    if (!worker || !this.availableThinkingLevels.length) {
+      this.post({ type: 'notice', message: 'No thinking levels are available for the current Pi model.' });
+      return;
+    }
+    if (this.runtimeBusy) {
+      void vscode.window.showInformationMessage('Wait for Pi to finish before changing the thinking level.');
+      return;
+    }
+    const choices = this.availableThinkingLevels.map((level) => ({
+      label: level,
+      description: level === this.currentThinkingLevel ? 'Current level' : undefined,
+      value: level,
+    }));
+    const selected = await vscode.window.showQuickPick(choices, {
+      title: 'Choose Pi Thinking Level',
+      placeHolder: 'Thinking levels supported by the current model',
+      ignoreFocusOut: true,
+    });
+    if (!selected || this.worker !== worker || this.runtimeBusy
+      || !this.availableThinkingLevels.includes(selected.value)) return;
+    worker.postMessage({ type: 'setThinkingLevel', thinkingLevel: selected.value });
+  }
+
+  private requestSessionListForCommandPalette(worker: Worker): Promise<Array<Record<string, unknown>> | undefined> {
+    const requestId = randomBytes(16).toString('hex');
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.finishPendingSessionListRequest(requestId, worker, undefined);
+      }, 10_000);
+      timer.unref?.();
+      this.pendingSessionListRequests.set(requestId, { worker, resolve, timer });
+      try {
+        worker.postMessage({ type: 'listSessions', query: '', allWorkspaces: false, requestId });
+      } catch {
+        this.finishPendingSessionListRequest(requestId, worker, undefined);
+      }
+    });
+  }
+
+  private finishPendingSessionListRequest(
+    requestId: unknown,
+    worker: Worker,
+    sessions: Array<Record<string, unknown>> | undefined,
+  ): boolean {
+    if (typeof requestId !== 'string' || !/^[a-f0-9]{32}$/.test(requestId)) return false;
+    const pending = this.pendingSessionListRequests.get(requestId);
+    if (!pending || pending.worker !== worker) return false;
+    this.pendingSessionListRequests.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(sessions);
+    return true;
+  }
+
+  private cancelPendingSessionListRequests(worker?: Worker): void {
+    for (const [requestId, pending] of this.pendingSessionListRequests) {
+      if (worker && pending.worker !== worker) continue;
+      this.finishPendingSessionListRequest(requestId, pending.worker, undefined);
+    }
   }
 
   async cloneSession(): Promise<void> {
@@ -1071,6 +1224,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.runtimeStartGeneration += 1;
     const previous = this.worker;
     this.clearTurnFileCapture();
+    this.cancelPendingSessionListRequests(previous);
     this.workerAgentDirSetting = '';
     this.workerOfflineModeSetting = 'inherit';
     this.workerExtensionUiModeSetting = 'rpc';
@@ -1090,6 +1244,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownResourcePaths.clear();
     this.availableProviders = [];
     this.availableProviderIds = [];
+    this.availableThinkingLevels = [];
+    this.currentThinkingLevel = '';
     this.availableToolNames.clear();
     this.contextFileChoices = [];
     this.contextFilesTruncated = false;
@@ -1192,6 +1348,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
     const previous = this.worker;
     this.clearTurnFileCapture(previous);
+    this.cancelPendingSessionListRequests(previous);
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
@@ -1210,6 +1367,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownResourcePaths.clear();
     this.availableProviders = [];
     this.availableProviderIds = [];
+    this.availableThinkingLevels = [];
+    this.currentThinkingLevel = '';
     this.modelsConfigPath = '';
     this.settingsConfigPath = '';
     this.mcpConfigPath = '';
@@ -1308,7 +1467,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       if (message.type === 'extension-ui-reset') this.pendingExtensionUiRequestIds.clear();
-      if (message.type === 'runtime-error') this.recordDiagnostic('Pi runtime error');
+      if (message.type === 'runtime-error') {
+        this.recordDiagnostic('Pi runtime error');
+        this.finishPendingSessionListRequest(message.requestId, worker, undefined);
+      }
       else if (message.type === 'notice' && message.isError === true) this.recordDiagnostic('Pi operation error');
       if (message.type === 'run-started') {
         this.runtimeBusy = true;
@@ -1421,7 +1583,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.sessionListForRunningStatus = sortedSessions;
         void this.refreshRunningSessionStatuses();
         this.consumePendingSessionHandoff(worker);
-        this.post({
+        const sessionListWasRequestedInternally = this.finishPendingSessionListRequest(
+          message.requestId,
+          worker,
+          sortedSessions,
+        );
+        if (!sessionListWasRequestedInternally) this.post({
           ...message,
           sessions: sortedSessions,
           groupRunningSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('groupRunning', false),
@@ -1482,6 +1649,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const runtimeSettings = message.runtimeSettings && typeof message.runtimeSettings === 'object'
           ? message.runtimeSettings as Record<string, unknown>
           : {};
+        this.availableThinkingLevels = Array.isArray(message.thinkingLevels)
+          ? [...new Set(message.thinkingLevels.filter((level): level is string => typeof level === 'string'
+            && /^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(level)))].slice(0, 16)
+          : [];
+        this.currentThinkingLevel = typeof message.thinkingLevel === 'string'
+          && this.availableThinkingLevels.includes(message.thinkingLevel)
+          ? message.thinkingLevel
+          : '';
         this.availableToolNames = new Set(Array.isArray(message.tools)
           ? (message.tools as Array<Record<string, unknown>>).slice(0, 1000).flatMap((tool) =>
             typeof tool.name === 'string' && tool.name.length > 0 && tool.name.length <= 128

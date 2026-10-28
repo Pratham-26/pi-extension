@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.107",
+  "version": "0.1.108",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -52,6 +52,21 @@
         "title": "New Pi Chat",
         "category": "Pi Chat",
         "icon": "$(add)"
+      },
+      {
+        "command": "piChat.switchSession",
+        "title": "Switch Session",
+        "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.chooseModel",
+        "title": "Choose Model",
+        "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.chooseThinkingLevel",
+        "title": "Choose Thinking Level",
+        "category": "Pi Chat"
       },
       {
         "command": "piChat.newEditorChat",
