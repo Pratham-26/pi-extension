@@ -4839,9 +4839,10 @@ function closeComposerPopovers() {
 document.addEventListener('pointerdown', (event) => {
   const target = event.target;
   if (!(target instanceof Element)) return;
-  if (target.closest('.control-popover, #model-toggle, #tools-toggle, #skills-toggle, #delivery-mode')) return;
+  if (target.closest('.control-popover, #model-toggle, #tools-toggle, #skills-toggle')) return;
   closeComposerPopovers();
-});
+}, true);
+window.addEventListener('blur', closeComposerPopovers);
 
 ui.modelToggle.addEventListener('click', () => {
   const open = ui.modelPopover.hidden;
