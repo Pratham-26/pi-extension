@@ -328,9 +328,9 @@ function isExplorationToolMessage(message) {
   return message?.role === 'tool' && EXPLORATION_TOOL_NAMES.has(String(message.toolName || '').toLowerCase());
 }
 
-function toolExpansionPreference(toolName, isError = false) {
+function toolExpansionPreference(toolName, isError = false, defaultOpen = isError) {
   const name = String(toolName || 'tool').slice(0, 128);
-  return Object.prototype.hasOwnProperty.call(state.toolExpansion, name) ? state.toolExpansion[name] : isError;
+  return Object.prototype.hasOwnProperty.call(state.toolExpansion, name) ? state.toolExpansion[name] : defaultOpen;
 }
 
 function currentSessionKey() {
@@ -1310,19 +1310,23 @@ function renderMessages(shouldFollow = true) {
       let groupEnd = messageIndex;
       while (groupEnd < state.messages.length
         && isTranscriptMessageVisible(state.messages[groupEnd])
-        && isExplorationToolMessage(state.messages[groupEnd])) {
+        && state.messages[groupEnd].role === 'tool') {
         groupMessages.push({ message: state.messages[groupEnd], index: groupEnd });
         groupEnd += 1;
       }
       if (groupMessages.length > 1) {
         const hasError = groupMessages.some(({ message: item }) => item.isError === true);
+        const isExplorationGroup = groupMessages.every(({ message: item }) => isExplorationToolMessage(item));
+        const groupKey = isExplorationGroup ? 'exploration' : 'activity';
         const group = document.createElement('details');
-        group.className = 'tool-exploration-group';
-        group.open = toolExpansionPreference('exploration', hasError);
+        group.className = isExplorationGroup ? 'tool-exploration-group' : 'tool-activity-group';
+        group.open = toolExpansionPreference(groupKey, hasError, !isExplorationGroup);
         const summary = document.createElement('summary');
-        summary.textContent = `Explored ${groupMessages.length} items`;
-        const toolNames = [...new Set(groupMessages.map(({ message: item }) => String(item.toolName || 'tool')))];
-        summary.title = `Show ${groupMessages.length} file exploration calls: ${toolNames.join(', ')}`;
+        summary.textContent = isExplorationGroup
+          ? `Explored ${groupMessages.length} items`
+          : `Pi used ${groupMessages.length} tools`;
+        const toolNames = [...new Set(groupMessages.map(({ message: item }) => String(item.toolName || 'tool').slice(0, 80)))];
+        summary.title = `Show ${groupMessages.length} tool calls: ${toolNames.join(', ').slice(0, 400)}`;
         group.append(summary);
         for (const item of groupMessages) {
           const node = item.message.node instanceof HTMLElement ? item.message.node : createHistoricalToolCard(item.message);
@@ -2120,13 +2124,15 @@ ui.messageList.addEventListener('click', (event) => {
     requestSubagentChildStop(stopButton);
     return;
   }
-  const groupSummary = event.target.closest('.tool-exploration-group > summary');
+  const groupSummary = event.target.closest('.tool-exploration-group > summary, .tool-activity-group > summary');
   const group = groupSummary?.parentElement;
   if (group instanceof HTMLDetailsElement) {
     const open = !group.open;
-    state.toolExpansion.exploration = open;
+    const groupKey = group.classList.contains('tool-exploration-group') ? 'exploration' : 'activity';
+    state.toolExpansion[groupKey] = open;
     persistWebviewState();
-    for (const peer of ui.messageList.querySelectorAll('.tool-exploration-group')) {
+    const peerSelector = groupKey === 'exploration' ? '.tool-exploration-group' : '.tool-activity-group';
+    for (const peer of ui.messageList.querySelectorAll(peerSelector)) {
       if (peer !== group) peer.open = open;
     }
     return;
@@ -2170,8 +2176,8 @@ function updateChatSearch(moveToCurrent = false) {
   ui.chatSearchCount.textContent = state.chatSearchIndex < 0 ? (query ? '0 of 0' : '') : `${state.chatSearchIndex + 1} of ${state.chatSearchHits.length}`;
   if (moveToCurrent && state.chatSearchIndex >= 0) {
     const row = ui.messageList.querySelector(`[data-message-index="${state.chatSearchHits[state.chatSearchIndex]}"]`);
-    const explorationGroup = row?.closest('.tool-exploration-group');
-    if (explorationGroup instanceof HTMLDetailsElement) explorationGroup.open = true;
+    const toolGroup = row?.closest('.tool-exploration-group, .tool-activity-group');
+    if (toolGroup instanceof HTMLDetailsElement) toolGroup.open = true;
     const toolCard = row?.closest('.tool-card');
     if (toolCard instanceof HTMLDetailsElement) toolCard.open = true;
     row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
