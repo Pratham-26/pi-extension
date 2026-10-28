@@ -390,6 +390,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private knownResourcePaths = new Set<string>();
   private availableProviders: ProviderSetup[] = [];
   private availableProviderIds: string[] = [];
+  private availableToolNames = new Set<string>();
   private contextFileChoices: ContextFileChoice[] = [];
   private contextFilesTruncated = false;
   private pendingContextFileSelection?: { worker: Worker; requestId: string; previousDisabled: string[] };
@@ -451,6 +452,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownResourcePaths.clear();
     this.availableProviders = [];
     this.availableProviderIds = [];
+    this.availableToolNames.clear();
     this.contextFileChoices = [];
     this.contextFilesTruncated = false;
     this.pendingContextFileSelection = undefined;
@@ -1002,6 +1004,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownResourcePaths.clear();
     this.availableProviders = [];
     this.availableProviderIds = [];
+    this.availableToolNames.clear();
     this.contextFileChoices = [];
     this.contextFilesTruncated = false;
     this.pendingContextFileSelection = undefined;
@@ -1172,6 +1175,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
           autoRefreshModels: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
           mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
+          newSessionToolNames: this.readNewSessionToolNames(),
           disabledContextFiles: this.readDisabledContextFiles(),
           extensionUiMode,
         },
@@ -1381,6 +1385,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const runtimeSettings = message.runtimeSettings && typeof message.runtimeSettings === 'object'
           ? message.runtimeSettings as Record<string, unknown>
           : {};
+        this.availableToolNames = new Set(Array.isArray(message.tools)
+          ? (message.tools as Array<Record<string, unknown>>).slice(0, 1000).flatMap((tool) =>
+            typeof tool.name === 'string' && tool.name.length > 0 && tool.name.length <= 128
+              && !/[\u0000-\u001f\u007f]/.test(tool.name)
+              ? [tool.name]
+              : [])
+          : []);
         this.availableProviderIds = Array.isArray(message.providerIds)
           ? [...new Set(message.providerIds.filter((providerId): providerId is string => typeof providerId === 'string'
             && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(providerId)))].slice(0, 500)
@@ -1770,6 +1781,32 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'openDiagram':
         this.openDiagramPanel(message.svg);
         return;
+      case 'setNewChatToolDefault': {
+        const requested = Array.isArray(message.toolNames) ? message.toolNames : undefined;
+        if (!requested || requested.length > 256
+          || requested.some((name) => typeof name !== 'string' || name.length === 0 || name.length > 128 || /[\u0000-\u001f\u007f]/.test(name))) {
+          this.post({ type: 'notice', message: 'The new-chat tool selection was invalid.', isError: true });
+          return;
+        }
+        const usePiDefaults = requested.length === 1 && requested[0] === '*';
+        const names = [...new Set(requested as string[])];
+        if (!usePiDefaults && (names.includes('*') || names.some((name) => !this.availableToolNames.has(name)))) {
+          this.post({ type: 'notice', message: 'Refresh the Pi tools and try saving the new-chat selection again.', isError: true });
+          return;
+        }
+        try {
+          await vscode.workspace.getConfiguration('piChat.tools').update(
+            'defaultToolNames',
+            usePiDefaults ? ['*'] : names,
+            vscode.ConfigurationTarget.Global,
+          );
+          this.worker?.postMessage({ type: 'setNewChatToolDefault', toolNames: usePiDefaults ? ['*'] : names });
+          this.post({ type: 'notice', message: usePiDefaults ? 'New chats will use Pi’s configured default tools.' : 'New chats will use this tool selection.' });
+        } catch (error) {
+          this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the new-chat tool selection.', isError: true });
+        }
+        return;
+      }
       case 'setModel':
       case 'setThinkingLevel':
       case 'setTools':
@@ -4033,6 +4070,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       && item.length <= 4096 && path.isAbsolute(item) && !/[\u0000-\u001f\u007f]/.test(item)))].slice(0, 2000);
   }
 
+  private readNewSessionToolNames(): string[] {
+    const value = vscode.workspace.getConfiguration('piChat.tools').get<unknown>('defaultToolNames', ['*']);
+    if (!Array.isArray(value) || value.length > 256) return ['*'];
+    if (value.length === 1 && value[0] === '*') return ['*'];
+    return [...new Set(value.filter((name): name is string => typeof name === 'string'
+      && name.length > 0 && name.length <= 128 && name !== '*' && !/[\u0000-\u001f\u007f]/.test(name)))].slice(0, 256);
+  }
+
   private async manageContextFiles(): Promise<void> {
     const worker = this.worker;
     if (!worker) {
@@ -5398,6 +5443,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <button type="button" data-tool-preset="default">Pi defaults</button>
                 <button type="button" data-tool-preset="readonly">Read-only</button>
                 <button type="button" data-tool-preset="none">None</button>
+              </div>
+              <div class="tool-default-actions">
+                <span id="new-chat-tool-default-label" aria-live="polite">New chats: Pi defaults</span>
+                <div>
+                  <button id="save-tool-default" class="text-button" type="button" title="Use the current tool selection for new chats">Save current</button>
+                  <button id="reset-tool-default" class="text-button" type="button" title="Use Pi’s configured default tools for new chats">Pi defaults</button>
+                </div>
               </div>
               <div id="tool-list" class="option-list"></div>
             </section>

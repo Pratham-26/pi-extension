@@ -316,6 +316,7 @@ let defaultTools: string[] = [];
 let sessionExtensionsBound = false;
 let sessionToolNames: string[] | undefined;
 let sessionDefaultToolNames: string[] | undefined;
+let newSessionToolNames: string[] | undefined;
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
 let sessionQuery = '';
@@ -373,6 +374,13 @@ function parseSavedToolNames(value: unknown): string[] | undefined {
   }
   return names;
 }
+
+const configuredNewSessionToolNames = parseSavedToolNames(
+  (workerData as Record<string, unknown> | undefined)?.newSessionToolNames,
+);
+newSessionToolNames = configuredNewSessionToolNames?.length === 1 && configuredNewSessionToolNames[0] === '*'
+  ? undefined
+  : configuredNewSessionToolNames;
 
 function applySavedSessionToolNames(activeSession: SessionLike | undefined = session): void {
   if (sessionToolNames === undefined || !activeSession?.setActiveToolsByName) return;
@@ -2735,6 +2743,7 @@ function sendOptions(): void {
     tools,
     activeTools: session.getActiveToolNames?.() ?? [],
     defaultTools,
+    newSessionToolNames: newSessionToolNames === undefined ? null : [...newSessionToolNames],
     disabledSkills: [...disabledSkills],
     branchPoints,
   });
@@ -3710,6 +3719,16 @@ async function createSessionInternal(path?: string): Promise<boolean> {
       defaultTools = createdSession.getActiveToolNames?.() ?? defaultTools;
       sessionDefaultToolNames = [...defaultTools];
     }
+    if (!path && sessionToolNames === undefined && newSessionToolNames !== undefined) {
+      const selectableToolNames = new Set((createdSession.getAllTools?.() ?? []).flatMap((tool) =>
+        typeof tool.name === 'string' && tool.name.length > 0 && tool.name.length <= 128
+          && (!tool.exposure || tool.exposure === 'direct' || tool.exposure === 'model-only')
+          ? [tool.name]
+          : []));
+      sessionToolNames = newSessionToolNames.filter((name) => selectableToolNames.has(name));
+      applySavedSessionToolNames(createdSession);
+      saveSessionSettings();
+    }
     applySavedSessionToolNames(createdSession);
     snapshot();
     watchModelConfig();
@@ -4282,6 +4301,29 @@ async function handle(input: WorkerInput): Promise<void> {
         sessionToolNames = requestedToolNames.filter((name) => selectableToolNames.has(name));
         session.setActiveToolsByName([...sessionToolNames]);
         saveSessionSettings();
+        sendOptions();
+        return;
+      }
+      case 'setNewChatToolDefault': {
+        const requestedToolNames = parseSavedToolNames(input.toolNames);
+        if (requestedToolNames === undefined) {
+          send('notice', { message: 'The new-chat tool selection was invalid.', isError: true });
+          return;
+        }
+        if (requestedToolNames.length === 1 && requestedToolNames[0] === '*') {
+          newSessionToolNames = undefined;
+        } else {
+          const selectableToolNames = new Set((session?.getAllTools?.() ?? []).flatMap((tool) =>
+            typeof tool.name === 'string' && tool.name.length > 0 && tool.name.length <= 128
+              && (!tool.exposure || tool.exposure === 'direct' || tool.exposure === 'model-only')
+              ? [tool.name]
+              : []));
+          if (requestedToolNames.includes('*') || requestedToolNames.some((name) => !selectableToolNames.has(name))) {
+            send('notice', { message: 'Refresh the Pi tools and try saving the new-chat selection again.', isError: true });
+            return;
+          }
+          newSessionToolNames = requestedToolNames;
+        }
         sendOptions();
         return;
       }

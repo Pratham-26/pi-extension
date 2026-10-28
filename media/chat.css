@@ -569,6 +569,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-presets { display: flex; gap: 4px; padding: 0 6px 7px; border-bottom: 1px solid var(--line); }
 .tool-presets button { padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
 .tool-presets button:hover { color: var(--text); border-color: var(--focus); }
+.tool-default-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 6px; border-bottom: 1px solid var(--line); }
+.tool-default-actions > span { min-width: 0; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.tool-default-actions > div { display: flex; flex: 0 0 auto; gap: 3px; }
+.tool-default-actions .text-button { padding: 3px 5px; font-size: 9px; }
+.tool-default-actions button:disabled { opacity: .5; cursor: default; }
 .skill-option { display: flex; align-items: center; gap: 3px; min-width: 0; }
 .skill-option .command-option { flex: 1; }
 .skill-auto-toggle { flex: 0 0 auto; margin: 0 6px; accent-color: var(--accent); }

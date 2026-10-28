@@ -80,6 +80,7 @@ const state = {
   tools: [],
   activeTools: [],
   defaultTools: [],
+  newSessionToolNames: null,
   disabledSkills: [],
   branchPoints: [],
   gitChanges: [],
@@ -235,6 +236,9 @@ const ui = {
   toolsToggle: el('tools-toggle'),
   toolsPopover: el('tools-popover'),
   toolList: el('tool-list'),
+  newChatToolDefaultLabel: el('new-chat-tool-default-label'),
+  saveToolDefault: el('save-tool-default'),
+  resetToolDefault: el('reset-tool-default'),
   skillsToggle: el('skills-toggle'),
   skillsPopover: el('skills-popover'),
   skillList: el('skill-list'),
@@ -527,6 +531,8 @@ function updateControls() {
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
   ui.skillsToggle.disabled = !state.hasSession;
   ui.toolsPopover.querySelectorAll('input').forEach((input) => { input.disabled = state.busy; });
+  ui.saveToolDefault.disabled = !state.hasSession || state.busy;
+  ui.resetToolDefault.disabled = !state.hasWorkspace || state.busy || state.newSessionToolNames === null;
   ui.skillsPopover.querySelectorAll('.skill-auto-toggle').forEach((input) => {
     const skill = state.skills.find((item) => item.name === input.getAttribute('data-skill-name'));
     input.disabled = state.busy || !skill?.canEnableAutoInvoke;
@@ -2987,6 +2993,17 @@ function renderPresets() {
 
 function renderTools() {
   ui.toolList.replaceChildren();
+  const configuredToolNames = state.newSessionToolNames;
+  ui.newChatToolDefaultLabel.textContent = configuredToolNames === null
+    ? 'New chats: Pi defaults'
+    : configuredToolNames.length === 0
+      ? 'New chats: no tools'
+      : `New chats: ${configuredToolNames.length} saved tool${configuredToolNames.length === 1 ? '' : 's'}`;
+  ui.newChatToolDefaultLabel.title = configuredToolNames === null
+    ? 'New chats use the configured Pi default tools.'
+    : configuredToolNames.length === 0
+      ? 'New chats start with no model tools enabled.'
+      : configuredToolNames.join(', ');
   if (!state.tools.length) {
     const empty = document.createElement('div');
     empty.className = 'option-empty';
@@ -4359,6 +4376,16 @@ window.addEventListener('message', (event) => {
       applySnapshot(data);
       break;
     case 'options':
+      state.tools = Array.isArray(data.tools) ? data.tools.filter((tool) => tool && typeof tool.name === 'string') : [];
+      state.activeTools = Array.isArray(data.activeTools) ? data.activeTools.filter((name) => typeof name === 'string') : [];
+      state.defaultTools = Array.isArray(data.defaultTools) ? data.defaultTools.filter((name) => typeof name === 'string') : [];
+      state.newSessionToolNames = data.newSessionToolNames === null
+        ? null
+        : Array.isArray(data.newSessionToolNames)
+          ? data.newSessionToolNames.filter((name) => typeof name === 'string').slice(0, 256)
+          : null;
+      renderTools();
+      updateControls();
       renderModelChoices(data);
       break;
     case 'model-scope-saved':
@@ -5184,6 +5211,12 @@ document.querySelectorAll('[data-tool-preset]').forEach((button) => {
     renderTools();
     post('setTools', { toolNames: names });
   });
+});
+ui.saveToolDefault.addEventListener('click', () => {
+  post('setNewChatToolDefault', { toolNames: state.activeTools });
+});
+ui.resetToolDefault.addEventListener('click', () => {
+  post('setNewChatToolDefault', { toolNames: ['*'] });
 });
 ui.deliveryMode.addEventListener('click', () => {
   state.deliverAs = state.deliverAs === 'steer' ? 'followUp' : 'steer';

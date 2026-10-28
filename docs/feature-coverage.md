@@ -55,7 +55,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 ## Pi tools, skills, prompts, extensions, and packages
 
-- [x] Choose Pi defaults, a read-only built-in tool set, no tools, or individual direct/model-only tools per session. Saved choices and the session's Pi-default tool set are branch-local metadata, restored when that branch opens, and saved choices are reapplied before prompts and queued steer/follow-up messages; Pi extensions can still change the tool set for an individual turn.
+- [x] Choose Pi defaults, a read-only built-in tool set, no tools, or individual direct/model-only tools per session. Save the current set as a default for new chats or reset to Pi defaults. Saved choices and the session's Pi-default tool set are branch-local metadata, restored when that branch opens, and saved choices are reapplied before prompts and queued steer/follow-up messages; Pi extensions can still change the tool set for an individual turn.
 - [x] Browse/invoke skills and persist per-session switches for automatic skill invocation.
 - [x] Browse/invoke Pi slash prompt templates.
 - [x] Prompt-template argument forms/previews; create project templates; edit loaded templates; show extension, skill, prompt, and theme diagnostics; explicitly reload Pi resources.

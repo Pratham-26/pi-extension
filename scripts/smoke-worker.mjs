@@ -205,6 +205,7 @@ try {
       autoNameSessions: false,
       autoRefreshModels: false,
       mcpEnabled: false,
+      newSessionToolNames: ['read'],
       disabledContextFiles: [],
       extensionUiMode: 'rpc',
     },
@@ -225,10 +226,15 @@ try {
   const optionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
     && Array.isArray(message.models)
     && message.models.some((model) => model.provider === 'pi-chat-smoke' && model.id === 'smoke-model'), 'configured model discovery');
+  const newSessionToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
+    && Array.isArray(message.newSessionToolNames) && message.newSessionToolNames.includes('read')
+    && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'new-session tool defaults');
   worker.postMessage({ type: 'initializeSession' });
-  const discoveredOptions = await optionsPromise;
+  const [discoveredOptions, newSessionToolOptions] = await Promise.all([optionsPromise, newSessionToolOptionsPromise]);
   assert.equal(discoveredOptions.providers.find((provider) => provider.id === 'pi-chat-smoke')?.configured, true,
     'the temporary Pi configuration should provide a local test credential');
+  assert.deepEqual(newSessionToolOptions.activeTools, ['read'], 'the configured tool set should apply to new smoke sessions');
+  assert.deepEqual(newSessionToolOptions.newSessionToolNames, ['read'], 'the worker should report its configured new-chat default');
 
   const modelSnapshot = waitForWorkerMessage((message) => message?.type === 'snapshot'
     && message.model === 'pi-chat-smoke smoke-model', 'model selection');
@@ -255,10 +261,10 @@ try {
   assert.equal(typeof sessionFile, 'string', 'the smoke session should expose its persisted path');
   assert.ok(resolve(sessionFile).startsWith(resolve(temporaryRoot) + sep), 'the persisted session should stay inside temporary smoke data');
   const selectedToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
-    && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'per-session tool selection');
-  worker.postMessage({ type: 'setTools', toolNames: ['read'] });
+    && Array.isArray(message.activeTools) && message.activeTools.length === 0, 'per-session tool selection');
+  worker.postMessage({ type: 'setTools', toolNames: [] });
   const selectedToolOptions = await selectedToolOptionsPromise;
-  assert.deepEqual(selectedToolOptions.activeTools, ['read'], 'the selected tool should be active in the smoke session');
+  assert.deepEqual(selectedToolOptions.activeTools, [], 'an explicit per-session empty tool set should be saved');
 
   await worker.terminate();
   worker = undefined;
@@ -271,6 +277,7 @@ try {
       autoNameSessions: false,
       autoRefreshModels: false,
       mcpEnabled: false,
+      newSessionToolNames: ['read'],
       disabledContextFiles: [],
       extensionUiMode: 'rpc',
     },
@@ -279,12 +286,19 @@ try {
   const reopenedSnapshotPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
     && message.sessionFile === sessionFile, 'reopened smoke session');
   const restoredToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
-    && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'restored per-session tool selection');
+    && Array.isArray(message.activeTools) && message.activeTools.length === 0, 'restored per-session tool selection');
   worker.postMessage({ type: 'openSession', path: sessionFile });
   const [, restoredToolOptions] = await Promise.all([reopenedSnapshotPromise, restoredToolOptionsPromise]);
   assert.deepEqual(restoredToolOptions.defaultTools, [], 'the session choice should not replace Pi defaults');
+  assert.deepEqual(restoredToolOptions.activeTools, [], 'the saved session choice should override the new-chat default');
 
-  console.log('Worker smoke check passed: session opened, local model selected, assistant reply streamed and persisted, and the selected tool set survived a worker restart.');
+  const freshSessionToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
+    && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'new chat tool defaults');
+  worker.postMessage({ type: 'newSession', autoNameSessions: false });
+  const freshSessionToolOptions = await freshSessionToolOptionsPromise;
+  assert.deepEqual(freshSessionToolOptions.activeTools, ['read'], 'new chats should use the configured default tool set');
+
+  console.log('Worker smoke check passed: assistant reply streamed and persisted; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   if (server) await new Promise((resolveClose) => server.close(() => resolveClose()));

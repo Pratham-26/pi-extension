@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.90",
+  "version": "0.1.91",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -208,6 +208,14 @@
           "type": "boolean",
           "default": false,
           "description": "Connect enabled servers from Pi MCP configuration after an explicit confirmation."
+        },
+        "piChat.tools.defaultToolNames": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "maxItems": 256,
+          "default": ["*"],
+          "scope": "machine",
+          "description": "Choose the default tools for new Pi chats. Use the single value * to keep Pi's configured defaults, an empty list for no tools, or registered tool names for a custom set."
         },
         "piChat.models.autoRefresh": {
           "type": "boolean",
