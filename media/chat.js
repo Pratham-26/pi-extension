@@ -4805,6 +4805,13 @@ document.addEventListener('keyup', (event) => handleExtensionEditorKeyboard(even
 document.addEventListener('keydown', (event) => handleExtensionWidgetKeyboard(event, 1), true);
 document.addEventListener('keyup', (event) => handleExtensionWidgetKeyboard(event, 3), true);
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && (!ui.modelPopover.hidden || !ui.toolsPopover.hidden || !ui.skillsPopover.hidden)) {
+    const activeToggle = [ui.modelToggle, ui.toolsToggle, ui.skillsToggle]
+      .find((toggle) => toggle.getAttribute('aria-expanded') === 'true');
+    closeComposerPopovers();
+    activeToggle?.focus();
+    event.preventDefault();
+  }
   if (event.key === 'Escape' && !ui.promptTemplateLayer.hidden) closePromptTemplateForm();
   if (event.key === 'Escape' && !ui.dialogLayer.hidden) finishExtensionDialog(undefined);
   if (event.key === 'Escape' && !ui.chatSearchBar.hidden) {
@@ -4837,12 +4844,20 @@ function closeComposerPopovers() {
   ui.runtimeSettingsToggle.setAttribute('aria-expanded', 'false');
 }
 
-document.addEventListener('pointerdown', (event) => {
-  const target = event.target;
-  if (!(target instanceof Element)) return;
-  if (target.closest('.control-popover, #model-toggle, #tools-toggle, #skills-toggle')) return;
+const composerPopoverBoundary = '.control-popover, #model-toggle, #tools-toggle, #skills-toggle';
+function dismissComposerPopoversFromOutside(event) {
+  if (ui.modelPopover.hidden && ui.toolsPopover.hidden && ui.skillsPopover.hidden) return;
+  const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+  if (eventPath.some((item) => item instanceof Element && item.matches(composerPopoverBoundary))) return;
   closeComposerPopovers();
-}, true);
+}
+
+document.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
+document.addEventListener('click', dismissComposerPopoversFromOutside, true);
+document.addEventListener('focusin', dismissComposerPopoversFromOutside, true);
+document.documentElement.addEventListener('pointerleave', (event) => {
+  if (event.relatedTarget === null) closeComposerPopovers();
+});
 window.addEventListener('blur', closeComposerPopovers);
 
 ui.modelToggle.addEventListener('click', () => {
