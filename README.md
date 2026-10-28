@@ -8,7 +8,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Dedicated Pi chat editors beside the active file, each with an independent worker and session; editor tabs restore their prior session after VS Code restarts when it is still available in the same workspace. Open one with **Pi Chat: Open New Chat Beside Active Editor**
 - Streamed assistant text, bounded previews for user, assistant, and tool-result images, KaTeX math and Mermaid diagrams, collapsible thinking blocks, a focused transcript toggle, live and persisted tool-call/result cards with Pi's call/result renderers shown through a bounded safe text bridge, consecutive tool runs grouped into collapsible activity sections and file exploration shown in its own group, configurable successful-card expansion with errors kept open, saved per-tool and per-group expansion preferences, line-level Pi-context edit diffs, editable follow-up/steering queues with a configurable default send action, and stop controls
 - Adjustable transcript appearance: align or tint user messages, raise text/separator contrast, choose compact/normal/relaxed spacing, show turn separators, set a base font size or follow VS Code, and enable smooth navigation while respecting reduced-motion preferences
-- Searchable model catalog with provider sign-in, guided custom endpoint setup for six Pi API formats and API identifiers registered by loaded Pi extensions, API keys in VS Code SecretStorage, custom `models.json` editing, Pi runtime controls, per-workspace selection of discovered `AGENTS.md` context files, an option to suppress all context-file loading, confirmed manual refresh, optional confirmed refresh at runtime startup (skipped offline), thinking levels and presets; model and thinking pickers are also available from the Command Palette
+- Searchable model catalog with provider sign-in, guided custom endpoint setup for six Pi API formats and API identifiers registered by loaded Pi extensions, API keys in VS Code SecretStorage, custom `models.json` editing, Pi runtime controls for default reasoning, provider transport, and image handling, per-workspace selection of discovered `AGENTS.md` context files, an option to suppress all context-file loading, confirmed manual refresh, optional confirmed refresh at runtime startup (skipped offline), thinking levels and presets; model and thinking pickers are also available from the Command Palette
 - Per-session tool selection restored with the session, save/reset controls for the default tool set on new chats, skill invocation, extension command suggestions, opt-in MCP servers with per-server enablement and exposure controls, confirmed Pi package install/update/remove, and per-resource enable/disable controls; prompt template argument forms, previews, create/edit, and resource diagnostics/reload
 - User-configured system prompt overrides and appended prompt text/files, extra local extension/skill/prompt-template paths, and switches for automatic resource discovery
 - Workspace `@` file search, file/folder/image attachments with expandable text-context previews, selected-line and active-file context, a persistent active-file pin, diagnostics, Git status, and selected Git diff quoting; optional automatic diagnostics/Git context and numbered line ranges, plus a setting to prevent Pi from loading workspace instruction files
@@ -54,10 +54,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.114.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.115.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.114.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.115.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.

@@ -2812,6 +2812,10 @@ function sendOptions(): void {
       autoCompaction: typeof globalSettings?.compaction?.enabled === 'boolean' ? globalSettings.compaction.enabled : true,
       autoRetry: typeof globalSettings?.retry?.enabled === 'boolean' ? globalSettings.retry.enabled : true,
       cacheWarming: session.settingsManager?.getCacheWarmingMode?.() ?? 'off',
+      defaultThinkingLevel: session.settingsManager?.getDefaultThinkingLevel?.() ?? 'medium',
+      transport: session.settingsManager?.getTransport?.() ?? 'auto',
+      imageAutoResize: session.settingsManager?.getImageAutoResize?.() !== false,
+      blockImages: session.settingsManager?.getBlockImages?.() === true,
       steeringMode: globalSettings?.steeringMode === 'all' ? 'all' : 'one-at-a-time',
       followUpMode: globalSettings?.followUpMode === 'all' ? 'all' : 'one-at-a-time',
       hideThinkingBlock: globalSettings?.hideThinkingBlock === true,
@@ -4353,6 +4357,21 @@ async function handle(input: WorkerInput): Promise<void> {
           && (input.value === 'auto' || input.value === 'gist' || input.value === 'radius')
           && session.settingsManager?.setSessionShareDestination) {
           session.settingsManager.setSessionShareDestination(input.value);
+        } else if (input.setting === 'defaultThinkingLevel'
+          && (input.value === 'off' || input.value === 'minimal' || input.value === 'low'
+            || input.value === 'medium' || input.value === 'high' || input.value === 'xhigh' || input.value === 'max')
+          && session.settingsManager?.setDefaultThinkingLevel) {
+          session.settingsManager.setDefaultThinkingLevel(input.value);
+        } else if (input.setting === 'transport'
+          && (input.value === 'auto' || input.value === 'sse' || input.value === 'websocket' || input.value === 'websocket-cached')
+          && session.settingsManager?.setTransport) {
+          session.settingsManager.setTransport(input.value);
+        } else if (input.setting === 'imageAutoResize' && typeof input.value === 'boolean'
+          && session.settingsManager?.setImageAutoResize) {
+          session.settingsManager.setImageAutoResize(input.value);
+        } else if (input.setting === 'blockImages' && typeof input.value === 'boolean'
+          && session.settingsManager?.setBlockImages) {
+          session.settingsManager.setBlockImages(input.value);
         } else {
           send('notice', { message: 'That Pi runtime setting is unavailable or invalid.', isError: true });
           sendOptions();

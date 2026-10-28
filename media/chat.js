@@ -67,6 +67,10 @@ const state = {
     autoRetry: false,
     cacheWarming: 'off',
     offlineMode: 'inherit',
+    defaultThinkingLevel: 'medium',
+    transport: 'auto',
+    imageAutoResize: true,
+    blockImages: false,
     steeringMode: 'one-at-a-time',
     followUpMode: 'one-at-a-time',
     hideThinkingBlock: false,
@@ -245,6 +249,10 @@ const ui = {
   restartPiRuntime: el('restart-pi-runtime'),
   runtimeSettingsToggle: el('runtime-settings-toggle'),
   runtimeSettings: el('runtime-settings'),
+  defaultThinkingLevel: el('default-thinking-level'),
+  transport: el('pi-transport'),
+  imageAutoResize: el('image-auto-resize'),
+  blockImages: el('block-images'),
   autoCompaction: el('auto-compaction'),
   autoRetry: el('auto-retry'),
   cacheWarming: el('cache-warming'),
@@ -746,6 +754,10 @@ function updateControls() {
   ui.choosePiAgentDir.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
   ui.restartPiRuntime.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
   ui.runtimeSettingsToggle.disabled = !state.hasSession || state.busy;
+  ui.defaultThinkingLevel.disabled = !state.hasSession || state.busy;
+  ui.transport.disabled = !state.hasSession || state.busy;
+  ui.imageAutoResize.disabled = !state.hasSession || state.busy;
+  ui.blockImages.disabled = !state.hasSession || state.busy;
   ui.autoCompaction.disabled = !state.hasSession || state.busy;
   ui.autoRetry.disabled = !state.hasSession || state.busy;
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
@@ -2956,6 +2968,14 @@ function renderModelChoices(data) {
     autoRetry: runtimeSettings.autoRetry === true,
     cacheWarming: ['off', 'streaming', 'idle'].includes(runtimeSettings.cacheWarming) ? runtimeSettings.cacheWarming : 'off',
     offlineMode: ['inherit', 'offline', 'online'].includes(runtimeSettings.offlineMode) ? runtimeSettings.offlineMode : 'inherit',
+    defaultThinkingLevel: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(runtimeSettings.defaultThinkingLevel)
+      ? runtimeSettings.defaultThinkingLevel
+      : 'medium',
+    transport: ['auto', 'sse', 'websocket', 'websocket-cached'].includes(runtimeSettings.transport)
+      ? runtimeSettings.transport
+      : 'auto',
+    imageAutoResize: runtimeSettings.imageAutoResize !== false,
+    blockImages: runtimeSettings.blockImages === true,
     steeringMode: runtimeSettings.steeringMode === 'all' ? 'all' : 'one-at-a-time',
     followUpMode: runtimeSettings.followUpMode === 'all' ? 'all' : 'one-at-a-time',
     hideThinkingBlock: runtimeSettings.hideThinkingBlock === true,
@@ -2969,6 +2989,10 @@ function renderModelChoices(data) {
   ui.autoRetry.checked = state.runtimeSettings.autoRetry;
   ui.cacheWarming.value = state.runtimeSettings.cacheWarming;
   ui.offlineMode.value = state.runtimeSettings.offlineMode;
+  ui.defaultThinkingLevel.value = state.runtimeSettings.defaultThinkingLevel;
+  ui.transport.value = state.runtimeSettings.transport;
+  ui.imageAutoResize.checked = state.runtimeSettings.imageAutoResize;
+  ui.blockImages.checked = state.runtimeSettings.blockImages;
   ui.steeringMode.value = state.runtimeSettings.steeringMode;
   ui.followUpMode.value = state.runtimeSettings.followUpMode;
   ui.hideThinkingBlocks.checked = state.runtimeSettings.hideThinkingBlock;
@@ -5756,6 +5780,22 @@ ui.notificationSound.addEventListener('change', () => {
   updateControls();
   post('setNotificationSound', { enabled: state.notificationSoundEnabled });
 });
+ui.defaultThinkingLevel.addEventListener('change', () => post('updatePiSetting', {
+  setting: 'defaultThinkingLevel',
+  value: ui.defaultThinkingLevel.value,
+}));
+ui.transport.addEventListener('change', () => post('updatePiSetting', {
+  setting: 'transport',
+  value: ui.transport.value,
+}));
+ui.imageAutoResize.addEventListener('change', () => post('updatePiSetting', {
+  setting: 'imageAutoResize',
+  value: ui.imageAutoResize.checked,
+}));
+ui.blockImages.addEventListener('change', () => post('updatePiSetting', {
+  setting: 'blockImages',
+  value: ui.blockImages.checked,
+}));
 ui.testNotificationSound.addEventListener('click', () => {
   resumeNotificationAudio();
   playNotificationSound();

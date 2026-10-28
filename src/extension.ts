@@ -2465,7 +2465,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           || (message.setting === 'followUpMode'
             && (message.value === 'all' || message.value === 'one-at-a-time'))
           || (message.setting === 'sessionShareDestination'
-            && (message.value === 'auto' || message.value === 'gist' || message.value === 'radius'));
+            && (message.value === 'auto' || message.value === 'gist' || message.value === 'radius'))
+          || (message.setting === 'defaultThinkingLevel'
+            && (message.value === 'off' || message.value === 'minimal' || message.value === 'low'
+              || message.value === 'medium' || message.value === 'high' || message.value === 'xhigh' || message.value === 'max'))
+          || (message.setting === 'transport'
+            && (message.value === 'auto' || message.value === 'sse' || message.value === 'websocket' || message.value === 'websocket-cached'))
+          || ((message.setting === 'imageAutoResize' || message.setting === 'blockImages') && typeof message.value === 'boolean');
         if (!valid) {
           worker.postMessage({ type: 'getOptions' });
           return;
@@ -6314,6 +6320,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <label class="runtime-setting cache-warming-setting" for="offline-mode"><span>Startup network mode</span><select id="offline-mode"><option value="inherit">Use Pi environment</option><option value="offline">Offline startup</option><option value="online">Allow startup checks</option></select></label>
                 <p class="runtime-settings-note">Offline mode disables automatic startup network operations. Model requests still need a connection. Restart Pi to apply changes.</p>
                 <p class="runtime-settings-note">These choices affect Pi sessions using your global settings. Cache warming sends extra provider requests and may cost money.</p>
+                <div class="popover-heading extension-command-heading"><strong>Model defaults and requests</strong><span>Global Pi defaults</span></div>
+                <label class="runtime-setting" for="default-thinking-level"><span>Default reasoning for new chats</span><select id="default-thinking-level"><option value="off">Off</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></label>
+                <label class="runtime-setting" for="pi-transport"><span>Provider transport</span><select id="pi-transport"><option value="auto">Automatic</option><option value="sse">Server-sent events</option><option value="websocket">WebSocket</option><option value="websocket-cached">WebSocket with cache</option></select></label>
+                <label class="runtime-setting"><input id="image-auto-resize" type="checkbox"><span>Resize images before sending</span></label>
+                <label class="runtime-setting"><input id="block-images" type="checkbox"><span>Block images in model requests</span></label>
+                <p class="runtime-settings-note">Image controls apply to future prompts. Blocking images keeps image attachments out of model requests. Provider transport applies to subsequent requests.</p>
                 <div class="popover-heading extension-command-heading"><strong>Conversation behavior</strong><span>Global Pi defaults</span></div>
                 <label class="runtime-setting" for="steering-mode"><span>Queued steering messages</span><select id="steering-mode"><option value="one-at-a-time">One at a time</option><option value="all">All at once</option></select></label>
                 <label class="runtime-setting" for="follow-up-mode"><span>Queued follow-ups</span><select id="follow-up-mode"><option value="one-at-a-time">One at a time</option><option value="all">All at once</option></select></label>

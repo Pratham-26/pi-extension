@@ -97,6 +97,10 @@ try {
   assert.equal(options.runtimeSettings.showCacheMissNotices, false, 'cache-miss notices should be off by default');
   assert.equal(options.runtimeSettings.enableInstallTelemetry, true, 'Pi install/update telemetry should follow the documented default');
   assert.equal(options.runtimeSettings.sessionShareDestination, 'auto', 'the share destination should default to automatic');
+  assert.equal(options.runtimeSettings.defaultThinkingLevel, 'off', 'the configured default reasoning level should be reported');
+  assert.equal(options.runtimeSettings.transport, 'auto', 'provider transport should default to automatic');
+  assert.equal(options.runtimeSettings.imageAutoResize, true, 'image resize should follow the documented default');
+  assert.equal(options.runtimeSettings.blockImages, false, 'image blocking should be off by default');
 
   const changes = [
     ['steeringMode', 'all'],
@@ -105,6 +109,10 @@ try {
     ['showCacheMissNotices', true],
     ['enableInstallTelemetry', false],
     ['sessionShareDestination', 'radius'],
+    ['defaultThinkingLevel', 'high'],
+    ['transport', 'websocket-cached'],
+    ['imageAutoResize', false],
+    ['blockImages', true],
   ];
   for (const [setting, value] of changes) {
     const expectedOptions = waitForWorkerMessage((message) => message?.type === 'options'
@@ -120,6 +128,10 @@ try {
   assert.equal(persisted.showCacheMissNotices, true, 'cache-miss notice preference should persist through Pi’s settings manager');
   assert.equal(persisted.enableInstallTelemetry, false, 'Pi install/update telemetry preference should persist through Pi’s settings manager');
   assert.equal(persisted.sessionShareDestination, 'radius', 'share destination should persist through Pi’s settings manager');
+  assert.equal(persisted.defaultThinkingLevel, 'high', 'the default reasoning level should persist through Pi’s settings manager');
+  assert.equal(persisted.transport, 'websocket-cached', 'provider transport should persist through Pi’s settings manager');
+  assert.deepEqual(persisted.images, { autoResize: false, blockImages: true },
+    'image request preferences should persist through Pi’s settings manager');
 
   const invalidSetting = waitForWorkerMessage((message) => message?.type === 'notice'
     && message.isError === true && String(message.message).includes('unavailable or invalid'), 'invalid Pi setting rejection');
@@ -128,7 +140,7 @@ try {
   const unchanged = JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'));
   assert.equal(unchanged.sessionShareDestination, 'radius', 'invalid setting values must not reach Pi settings.json');
 
-  console.log('Runtime settings smoke check passed: six allowlisted Pi preferences were reported, saved, and read back; an invalid value was rejected without changing settings.json.');
+  console.log('Runtime settings smoke check passed: ten allowlisted Pi preferences were reported, saved, and read back; an invalid value was rejected without changing settings.json.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   const resolvedTemporaryRoot = resolve(temporaryRoot);
