@@ -118,7 +118,8 @@ const ui = {
   queueList: el('queue-list'),
   queueEmpty: el('queue-empty'),
   notice: el('notice'),
-  extensionWidgets: el('extension-widgets'),
+  extensionWidgetsAbove: el('extension-widgets-above'),
+  extensionWidgetsBelow: el('extension-widgets-below'),
   extensionStatus: el('extension-status'),
   dialogLayer: el('extension-dialog-layer'),
   dialogTitle: el('extension-dialog-title'),
@@ -3059,18 +3060,22 @@ function replaceQueue(next) {
 }
 
 function renderExtensionWidgets() {
-  ui.extensionWidgets.replaceChildren();
+  ui.extensionWidgetsAbove.replaceChildren();
+  ui.extensionWidgetsBelow.replaceChildren();
   for (const [key, widget] of state.extensionWidgets) {
     const details = document.createElement('details');
     details.className = 'extension-widget';
-    details.open = Boolean(widget.options?.alwaysVisible);
+    details.open = widget.options?.alwaysVisible !== false;
     const summary = document.createElement('summary');
     summary.textContent = widget.options?.title || key;
     const content = document.createElement('div');
     content.className = 'extension-widget-content';
-    content.textContent = widget.content.join('\n');
+    const rendered = createTuiOutput(widget.lines, 'extension-widget-renderer-output');
+    if (rendered) content.append(rendered);
+    else content.textContent = widget.content.join('\n');
     details.append(summary, content);
-    ui.extensionWidgets.append(details);
+    const target = widget.options?.placement === 'belowEditor' ? ui.extensionWidgetsBelow : ui.extensionWidgetsAbove;
+    target.append(details);
   }
 }
 
@@ -3403,10 +3408,15 @@ window.addEventListener('message', (event) => {
       showNotice(data.message || 'Pi extension notification', data.level === 'error' || data.level === 'warning');
       break;
     case 'extension-widget':
-      state.extensionWidgets.set(String(data.key || 'extension'), {
+      state.extensionWidgets.set(String(data.key || 'extension').slice(0, 128), {
         content: Array.isArray(data.content) ? data.content.map(String) : [String(data.content || '')],
-        options: data.options || {},
+        lines: Array.isArray(data.lines) ? data.lines.slice(0, 120) : undefined,
+        options: data.options && typeof data.options === 'object' ? data.options : {},
       });
+      renderExtensionWidgets();
+      break;
+    case 'extension-widgets-reset':
+      state.extensionWidgets.clear();
       renderExtensionWidgets();
       break;
     case 'extension-widget-remove':

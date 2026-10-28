@@ -244,6 +244,8 @@ const MAX_SESSION_SEARCH_CACHE_CHARS = 2_000_000;
 const MAX_SESSION_SEARCH_INDEX_CHARS = 128_000;
 const MAX_PENDING_UI_REQUESTS = 64;
 const MAX_EXTENSION_UI_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const MAX_EXTENSION_WIDGETS = 32;
+const extensionWidgetKeys = new Set<string>();
 let uiRequestSequence = 0;
 let modelWatcher: FSWatcher | undefined;
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -751,6 +753,68 @@ function renderPiCustomEntry(current: SessionLike, entry: unknown): SafeTuiLine[
   }
 }
 
+function createStaticTuiContext(): any {
+  const children: unknown[] = [];
+  const noChange = () => undefined;
+  return {
+    mode: 'regular',
+    children,
+    terminal: { columns: 80, rows: 24, width: 80, height: 24 },
+    fullRedraws: 0,
+    render: () => [],
+    invalidate: noChange,
+    handleInput: noChange,
+    handleMouse: noChange,
+    requestRender: noChange,
+    renderNow: noChange,
+    addChild: (component: unknown) => { if (component && !children.includes(component)) children.push(component); },
+    removeChild: (component: unknown) => { const index = children.indexOf(component); if (index >= 0) children.splice(index, 1); },
+    clear: () => { children.length = 0; },
+    getShowHardwareCursor: () => false,
+    setShowHardwareCursor: noChange,
+    getClearOnShrink: () => false,
+    setClearOnShrink: noChange,
+    setFocus: noChange,
+    showOverlay: () => undefined,
+    hideOverlay: noChange,
+    hasOverlay: () => false,
+    addInputListener: () => noChange,
+    removeInputListener: noChange,
+    onTerminalColorSchemeChange: () => noChange,
+    setTerminalColorSchemeNotifications: noChange,
+    queryTerminalColors: async () => ({ foreground: '#ffffff', background: '#000000', colors: [] }),
+  };
+}
+
+function renderPiWidgetComponent(current: SessionLike, factory: (tui: any, theme: unknown) => unknown): SafeTuiLine[] | undefined {
+  let component: unknown;
+  try {
+    component = factory(createStaticTuiContext(), getCurrentToolRendererTheme(current));
+    return safeTuiLines(component);
+  } catch {
+    return undefined;
+  } finally {
+    try {
+      const dispose = component && typeof component === 'object' ? (component as { dispose?: unknown }).dispose : undefined;
+      if (typeof dispose === 'function') dispose.call(component);
+    } catch {
+      // Static widgets have no live lifecycle after their bounded snapshot is rendered.
+    }
+  }
+}
+
+function safeExtensionWidgetOptions(value: unknown, key: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { title: key, placement: 'aboveEditor', alwaysVisible: true };
+  const options = value as Record<string, unknown>;
+  const rawTitle = typeof options.title === 'string' ? options.title : key;
+  const title = rawTitle.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 128) || key;
+  return {
+    title,
+    placement: options.placement === 'belowEditor' ? 'belowEditor' : 'aboveEditor',
+    alwaysVisible: options.alwaysVisible !== false,
+  };
+}
+
 function toolRendererState(toolCallId: string, args: unknown): ToolRendererState {
   let current = toolRendererStates.get(toolCallId);
   if (current) return current;
@@ -1032,9 +1096,29 @@ function installExtensionUi(current: SessionLike): void {
     setWorkingMessage: (message?: string) => send('activity', { message: message || 'Pi is working' }),
     setWorkingVisible: (visible: boolean) => send('working-visible', { visible }),
     setTitle: (title: string) => send('extension-title', { title }),
-    setWidget: (key: string, content: string[] | undefined, options?: unknown) => {
-      if (content === undefined) send('extension-widget-remove', { key });
-      else send('extension-widget', { key, content, options });
+    setWidget: (key: string, content: string[] | ((tui: any, theme: unknown) => unknown) | undefined, options?: unknown) => {
+      const safeKey = typeof key === 'string' ? key.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 128) : '';
+      if (!safeKey) return;
+      if (content === undefined) {
+        extensionWidgetKeys.delete(safeKey);
+        send('extension-widget-remove', { key: safeKey });
+        return;
+      }
+      if (!extensionWidgetKeys.has(safeKey) && extensionWidgetKeys.size >= MAX_EXTENSION_WIDGETS) {
+        send('extension-ui-notice', { message: `Pi extensions can show up to ${MAX_EXTENSION_WIDGETS} sidebar widgets at once.`, level: 'warning' });
+        return;
+      }
+      extensionWidgetKeys.add(safeKey);
+      const safeOptions = safeExtensionWidgetOptions(options, safeKey);
+      if (Array.isArray(content)) {
+        const total = { chars: 0 };
+        const lines = content.slice(0, MAX_TUI_RENDER_LINES).map((line) => safeTuiLine(boundedUiText(line, 2_000), total));
+        send('extension-widget', { key: safeKey, lines, options: safeOptions });
+      } else if (typeof content === 'function') {
+        const lines = renderPiWidgetComponent(current, content);
+        if (lines?.length) send('extension-widget', { key: safeKey, lines, options: safeOptions });
+        else send('extension-ui-notice', { message: 'A Pi extension widget could not be rendered in the sidebar.', level: 'warning' });
+      }
     },
     setEditorText: (text: string) => send('extension-editor-text', { text }),
     pasteToEditor: (text: string) => send('extension-editor-text', { text, append: true }),
@@ -1501,6 +1585,8 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   unsubscribe?.();
   session?.dispose();
   session = next;
+  extensionWidgetKeys.clear();
+  send('extension-widgets-reset');
   streamingAssistantMarkdown = '';
   streamingMarkdownOverflow = false;
   lastStreamingMarkdownTransformAt = 0;

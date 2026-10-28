@@ -4750,7 +4750,6 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       </aside>
 
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
-      <div id="extension-widgets" class="extension-widgets" aria-label="Pi extension widgets"></div>
       <section id="extension-dialog-layer" class="extension-dialog-layer" aria-label="Pi extension dialog" hidden>
         <div class="extension-dialog" role="dialog" aria-modal="true">
           <h2 id="extension-dialog-title"></h2>
@@ -4796,6 +4795,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       </main>
 
       <footer class="composer-wrap">
+        <div id="extension-widgets-above" class="extension-widgets" aria-label="Pi extension widgets above the editor"></div>
         <div id="attachments" class="attachments" aria-label="Attached workspace context"></div>
         <div id="mention-panel" class="mention-panel" role="listbox" aria-label="Workspace files" hidden></div>
         <div class="composer">
@@ -4876,6 +4876,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             </button>
           </div>
         </div>
+        <div id="extension-widgets-below" class="extension-widgets extension-widgets-below" aria-label="Pi extension widgets below the editor"></div>
         <div id="context-meter" class="context-meter" role="meter" aria-label="Pi context usage" aria-valuemin="0" aria-valuemax="100" hidden>
           <span id="context-meter-fill" class="context-meter-fill"></span>
           <span id="context-meter-label" class="context-meter-label"></span>
