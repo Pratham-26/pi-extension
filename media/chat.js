@@ -5029,16 +5029,22 @@ function closeComposerPopovers() {
 }
 
 function dismissComposerPopoversFromOutside(event) {
-  const openPopover = [
+  const openPopovers = [
     [ui.modelPopover, ui.modelToggle],
     [ui.toolsPopover, ui.toolsToggle],
     [ui.skillsPopover, ui.skillsToggle],
-  ].find(([popover]) => !popover.hidden);
-  if (!openPopover) return;
+  ].filter(([popover]) => !popover.hidden);
+  if (!openPopovers.length) return;
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
-  const [popover, toggle] = openPopover;
-  if (eventPath.includes(popover) || eventPath.includes(toggle)) return;
+  const target = event.target;
+  const isInside = (element) => eventPath.includes(element)
+    || (target instanceof Node && element.contains(target));
+  if (openPopovers.some(([popover, toggle]) => isInside(popover) || isInside(toggle))) return;
   closeComposerPopovers();
+}
+
+function dismissComposerPopoversWhenPointerLeavesWebview(event) {
+  if (event.relatedTarget == null) closeComposerPopovers();
 }
 
 // Capture at window level so a webview control cannot stop the outside event
@@ -5050,6 +5056,11 @@ window.addEventListener('focusin', dismissComposerPopoversFromOutside, true);
 // Leaving the webview for the VS Code workbench can still provide a relatedTarget.
 // Any pointer exit from this document is outside the composer controls.
 document.documentElement.addEventListener('pointerleave', closeComposerPopovers);
+document.addEventListener('pointerout', dismissComposerPopoversWhenPointerLeavesWebview, true);
+document.addEventListener('mouseleave', closeComposerPopovers);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) closeComposerPopovers();
+});
 window.addEventListener('blur', closeComposerPopovers);
 
 ui.modelToggle.addEventListener('click', () => {
