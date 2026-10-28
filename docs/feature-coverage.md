@@ -26,7 +26,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Offer Pi context compaction near the context limit, with an explicit confirmation and cancellation through Stop.
 - [x] Export the active session as HTML or JSONL.
 - [~] Render headings, emphasis, lists, task lists, quotes, tables, fenced code, and allowlisted external Markdown links without raw HTML; math, Mermaid, image output, thinking blocks, and extension renderers remain unsupported.
-- [~] Tool cards show live activity and reconstruct persisted calls/results with bounded argument/output previews; per-tool expansion preferences persist in the webview, while edit diffs, exploration grouping, and focused transcript mode remain unavailable.
+- [~] Tool cards show live activity and reconstruct persisted calls/results with bounded argument/output previews; per-tool expansion preferences and line-level Pi-context edit diffs are available, while exploration grouping and focused transcript mode remain unavailable.
 - [~] Code blocks can be copied; symbol links and model-generated prompt suggestions are missing. Message quoting, bookmarks, persistent context edits, and context compaction are available.
 - [x] Export a redacted diagnostic report with software versions and generic error categories; the report excludes prompt/transcript content, workspace/session paths, file names, provider IDs, credentials, and environment variables.
 - [ ] Run shell commands from `!` messages. The required direct command execution was rejected by the automatic security review, so this remains unavailable.

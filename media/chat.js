@@ -839,6 +839,7 @@ function renderMessages(shouldFollow = true) {
     if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text);
     else body.textContent = message.text;
     row.append(body);
+    if (message.contextStatus === 'edited') row.append(createContextDiff(message.text, message.contextEditText));
     const quoteIds = quoteSourceIds(message.context);
     if (quoteIds.length) {
       const references = document.createElement('div');
@@ -1036,6 +1037,67 @@ function updateChatSearch(moveToCurrent = false) {
     const row = ui.messageList.querySelector(`[data-message-index="${state.chatSearchHits[state.chatSearchIndex]}"]`);
     row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
+}
+
+function createContextDiff(originalText, editedText) {
+  const originalSource = String(originalText || '');
+  const editedSource = String(editedText || '');
+  const maxChars = 12000;
+  const maxLines = 160;
+  const originalLines = originalSource.slice(0, maxChars).split('\n');
+  const editedLines = editedSource.slice(0, maxChars).split('\n');
+  const truncated = originalSource.length > maxChars || editedSource.length > maxChars
+    || originalLines.length > maxLines || editedLines.length > maxLines;
+  originalLines.length = Math.min(originalLines.length, maxLines);
+  editedLines.length = Math.min(editedLines.length, maxLines);
+
+  const lengths = Array.from({ length: originalLines.length + 1 }, () => new Uint16Array(editedLines.length + 1));
+  for (let originalIndex = originalLines.length - 1; originalIndex >= 0; originalIndex -= 1) {
+    for (let editedIndex = editedLines.length - 1; editedIndex >= 0; editedIndex -= 1) {
+      lengths[originalIndex][editedIndex] = originalLines[originalIndex] === editedLines[editedIndex]
+        ? lengths[originalIndex + 1][editedIndex + 1] + 1
+        : Math.max(lengths[originalIndex + 1][editedIndex], lengths[originalIndex][editedIndex + 1]);
+    }
+  }
+
+  const diff = document.createElement('details');
+  diff.className = 'context-diff';
+  const summary = document.createElement('summary');
+  const output = document.createElement('pre');
+  output.className = 'context-diff-output';
+  const lines = document.createDocumentFragment();
+  let originalIndex = 0;
+  let editedIndex = 0;
+  let changes = 0;
+  const addLine = (kind, prefix, text) => {
+    const line = document.createElement('span');
+    line.className = `context-diff-line ${kind}`;
+    line.textContent = `${prefix} ${text}\n`;
+    lines.append(line);
+  };
+
+  while (originalIndex < originalLines.length || editedIndex < editedLines.length) {
+    if (originalIndex < originalLines.length && editedIndex < editedLines.length
+      && originalLines[originalIndex] === editedLines[editedIndex]) {
+      addLine('unchanged', ' ', originalLines[originalIndex]);
+      originalIndex += 1;
+      editedIndex += 1;
+    } else if (originalIndex < originalLines.length
+      && (editedIndex >= editedLines.length || lengths[originalIndex + 1][editedIndex] >= lengths[originalIndex][editedIndex + 1])) {
+      addLine('removed', '−', originalLines[originalIndex]);
+      originalIndex += 1;
+      changes += 1;
+    } else {
+      addLine('added', '+', editedLines[editedIndex]);
+      editedIndex += 1;
+      changes += 1;
+    }
+  }
+  if (truncated) addLine('truncated', '…', 'Diff preview is truncated');
+  summary.textContent = `Pi context diff · ${changes} ${changes === 1 ? 'change' : 'changes'}`;
+  output.append(lines);
+  diff.append(summary, output);
+  return diff;
 }
 
 function stepChatSearch(direction) {
