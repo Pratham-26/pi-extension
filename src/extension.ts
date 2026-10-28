@@ -69,6 +69,15 @@ type GitFileStatus = {
   isUntracked: boolean;
 };
 
+type PiResourceType = 'extensions' | 'skills' | 'prompts' | 'themes';
+
+type PiResourceChoice = vscode.QuickPickItem & {
+  id: string;
+  type: PiResourceType;
+  scope: 'user' | 'project';
+  enabled: boolean;
+};
+
 const VIEW_ID = 'piChat.chatView';
 const MAX_ATTACHMENT_BYTES = 1024 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -128,6 +137,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private settingsConfigPath = '';
   private mcpConfigPath = '';
   private pendingMcpSetting?: { worker: Worker; requestId: string; enabled: boolean; previous: boolean };
+  private pendingPiResourcePicker?: { worker: Worker; requestId: string };
   private providerAuthPromptCancels = new Map<string, { worker: Worker; cancel: () => void }>();
   private activeEditorSubscription: vscode.Disposable;
   private selectionSubscription: vscode.Disposable;
@@ -153,6 +163,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.webviewMessageSubscription = undefined;
     const worker = this.worker;
     this.worker = undefined;
+    this.pendingPiResourcePicker = undefined;
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
@@ -241,6 +252,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const previous = this.worker;
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.worker = undefined;
+    this.pendingPiResourcePicker = undefined;
     this.workerWorkspace = undefined;
     this.knownSessionPaths.clear();
     this.knownPromptPaths.clear();
@@ -276,6 +288,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const previous = this.worker;
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.worker = undefined;
+    this.pendingPiResourcePicker = undefined;
     this.failPendingMcpSetting(previous);
     if (previous) this.stopWorker(previous);
     this.knownSessionPaths.clear();
@@ -362,6 +375,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             }
           }
         }
+      } else if (message.type === 'pi-resources') {
+        const pending = this.pendingPiResourcePicker;
+        if (!pending || pending.worker !== worker || pending.requestId !== message.requestId) return;
+        this.pendingPiResourcePicker = undefined;
+        void this.openPiResourcePicker(worker, message);
       } else if (message.type === 'options') {
         this.availableProviders = Array.isArray(message.providers)
           ? (message.providers as Array<Record<string, unknown>>).slice(0, 200).flatMap((provider) => {
@@ -420,6 +438,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     worker.on('exit', (code: number) => {
       if (this.worker === worker) {
         this.worker = undefined;
+        this.pendingPiResourcePicker = undefined;
         this.cancelProviderAuthPrompts(worker);
       }
       this.failPendingMcpSetting(worker);
@@ -704,6 +723,18 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (answer === 'Reload Pi resources') this.worker?.postMessage({ type: 'reloadResources' });
         return;
       }
+      case 'managePiResources': {
+        const worker = this.worker;
+        if (!worker) return;
+        if (this.pendingPiResourcePicker) {
+          this.post({ type: 'notice', message: 'The Pi resource list is already opening.' });
+          return;
+        }
+        const requestId = randomBytes(16).toString('hex');
+        this.pendingPiResourcePicker = { worker, requestId };
+        worker.postMessage({ type: 'listPiResources', requestId });
+        return;
+      }
       case 'installPackage':
       case 'managePackage': {
         const worker = this.worker;
@@ -868,6 +899,64 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       type: 'attachment',
       attachment: { id: randomBytes(8).toString('hex'), label, path: relativePath, context: contextText } satisfies Attachment,
     });
+  }
+
+  private async openPiResourcePicker(worker: Worker, message: RuntimeMessage): Promise<void> {
+    if (this.worker !== worker) return;
+    if (message.available !== true) {
+      this.post({ type: 'notice', message: 'Pi could not read the configured resources. Refresh Pi resources and try again.', isError: true });
+      return;
+    }
+    const resources: PiResourceChoice[] = Array.isArray(message.resources)
+      ? message.resources.slice(0, 500).flatMap((value): PiResourceChoice[] => {
+        if (!value || typeof value !== 'object') return [];
+        const item = value as Record<string, unknown>;
+        if (typeof item.id !== 'string' || !/^[a-f0-9]{24}$/.test(item.id)
+          || !['extensions', 'skills', 'prompts', 'themes'].includes(String(item.type))
+          || (item.scope !== 'user' && item.scope !== 'project')
+          || typeof item.enabled !== 'boolean'
+          || typeof item.label !== 'string' || typeof item.sourceLabel !== 'string' || typeof item.pattern !== 'string') return [];
+        return [{
+          id: item.id,
+          type: item.type as PiResourceType,
+          scope: item.scope,
+          enabled: item.enabled,
+          label: item.label.slice(0, 160),
+          description: `${item.type} · ${item.scope} settings · ${item.enabled ? 'enabled' : 'disabled'}`,
+          detail: `${item.sourceLabel.slice(0, 180)} · ${item.pattern.slice(0, 512)}`,
+          picked: item.enabled,
+        }];
+      })
+      : [];
+    if (!resources.length) {
+      this.post({ type: 'notice', message: 'No configurable Pi resources were found in the trusted settings.' });
+      return;
+    }
+    const selected = await vscode.window.showQuickPick(resources, {
+      canPickMany: true,
+      ignoreFocusOut: true,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      title: 'Configure Pi resources',
+      placeHolder: 'Checked resources are enabled. Changes apply after reloading Pi resources.',
+    });
+    if (selected === undefined || this.worker !== worker) return;
+    const selectedIds = new Set(selected.map((item) => item.id));
+    const changes = resources
+      .filter((item) => item.enabled !== selectedIds.has(item.id))
+      .map((item) => ({ id: item.id, enabled: selectedIds.has(item.id), expectedEnabled: item.enabled }));
+    if (!changes.length) return;
+    const enablingExtensions = changes.filter((change) => change.enabled
+      && resources.some((item) => item.id === change.id && item.type === 'extensions')).length;
+    if (enablingExtensions) {
+      const answer = await vscode.window.showWarningMessage(
+        `Enable ${enablingExtensions} Pi extension${enablingExtensions === 1 ? '' : 's'}? The settings will be saved now; extension code runs only after Pi resources are reloaded or a new session starts.`,
+        { modal: true },
+        'Save resource settings',
+      );
+      if (answer !== 'Save resource settings' || this.worker !== worker) return;
+    }
+    worker.postMessage({ type: 'setPiResourceStates', resourceChanges: changes });
   }
 
   private async attachLineRange(): Promise<void> {
@@ -2489,7 +2578,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div class="popover-heading prompt-heading"><strong>Prompt templates</strong><div class="prompt-heading-actions"><button id="new-prompt-template" class="text-button" type="button" title="Create a project prompt template">New</button><button id="reload-pi-resources" class="text-button" type="button" title="Reload extensions, skills, prompts, and themes">Reload</button></div></div>
               <div id="prompt-list" class="option-list"></div>
               <div id="resource-diagnostics" class="resource-diagnostics"></div>
-              <div class="package-heading"><strong>Pi packages</strong><div class="package-heading-actions"><button id="refresh-packages" class="text-button" type="button" title="Refresh the configured package list">Refresh</button><button id="update-packages" class="text-button" type="button" title="Update configured packages">Update all</button></div></div>
+              <div class="package-heading"><strong>Pi packages</strong><div class="package-heading-actions"><button id="manage-pi-resources" class="text-button" type="button" title="Enable or disable configured Pi extensions, skills, prompts, and themes">Resources</button><button id="refresh-packages" class="text-button" type="button" title="Refresh the configured package list">Refresh</button><button id="update-packages" class="text-button" type="button" title="Update configured packages">Update all</button></div></div>
               <div class="package-install-form"><input id="package-source" type="text" maxlength="512" aria-label="Package source" placeholder="npm:@scope/package or git:host/path"><select id="package-scope" aria-label="Package installation scope"><option value="user">User</option><option value="project">Project</option></select><button id="install-package" class="text-button" type="button">Install</button></div>
               <p class="package-safety-note">Review package sources before installing. Package managers may run code, and enabled extensions can execute inside Pi. Project scope requires workspace trust.</p>
               <div id="package-status" class="package-status" aria-live="polite"></div>

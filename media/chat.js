@@ -180,6 +180,7 @@ const ui = {
   packageSource: el('package-source'),
   packageScope: el('package-scope'),
   installPackage: el('install-package'),
+  managePiResources: el('manage-pi-resources'),
   updatePackages: el('update-packages'),
   newPromptTemplate: el('new-prompt-template'),
   reloadResources: el('reload-pi-resources'),
@@ -366,6 +367,7 @@ function updateControls() {
   ui.packageSource.disabled = !state.hasSession || state.busy;
   ui.packageScope.disabled = !state.hasSession || state.busy;
   ui.installPackage.disabled = !state.hasSession || state.busy || !ui.packageSource.value.trim();
+  ui.managePiResources.disabled = !state.hasSession || state.busy;
   ui.updatePackages.disabled = !state.hasSession || state.busy || state.packages.length === 0;
   ui.packageList.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
@@ -3159,6 +3161,7 @@ ui.installPackage.addEventListener('click', () => post('installPackage', {
   source: ui.packageSource.value.slice(0, 512),
   scope: ui.packageScope.value,
 }));
+ui.managePiResources.addEventListener('click', () => post('managePiResources'));
 ui.updatePackages.addEventListener('click', () => post('managePackage', { action: 'update' }));
 el('refresh-packages').addEventListener('click', () => post('listPackages'));
 el('prompt-template-cancel').addEventListener('click', closePromptTemplateForm);

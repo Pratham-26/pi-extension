@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { watch, type FSWatcher } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { isPiPackageSource } from './package-source';
 import {
   createAgentSession,
@@ -41,6 +42,7 @@ type WorkerInput = {
   disabledSkills?: string[];
   source?: string;
   scope?: string;
+  resourceChanges?: unknown[];
   autoNameSessions?: boolean;
   steering?: string[];
   followUp?: string[];
@@ -136,8 +138,23 @@ let mcpEnabled = workerOptions?.mcpEnabled === true;
 let autoNameSessions = workerOptions?.autoNameSessions !== false;
 const MAX_TOOL_UI_CHARS = 100_000;
 const MAX_TOOL_DETAILS_CHARS = 24_000;
+const PI_RESOURCE_TYPES = ['extensions', 'skills', 'prompts', 'themes'] as const;
+type PiResourceType = typeof PI_RESOURCE_TYPES[number];
+type ConfiguredPiResource = {
+  id: string;
+  type: PiResourceType;
+  path: string;
+  pattern: string;
+  source: string;
+  scope: 'user' | 'project';
+  origin: 'package' | 'top-level';
+  enabled: boolean;
+  label: string;
+  sourceLabel: string;
+};
 let session: SessionLike | undefined;
 let packageManager: DefaultPackageManager | undefined;
+let configuredPiResources = new Map<string, ConfiguredPiResource>();
 let unsubscribe: (() => void) | undefined;
 let busy = false;
 let compacting = false;
@@ -855,6 +872,193 @@ function sendConfiguredPackages(): void {
   send('packages', { available: Boolean(packageManager), projectTrusted, packages });
 }
 
+async function collectConfiguredPiResources(): Promise<ConfiguredPiResource[]> {
+  const manager = packageManager;
+  if (!manager) return [];
+  const resolved = await manager.resolve(async () => 'skip');
+  const resources = new Map<string, ConfiguredPiResource>();
+  for (const type of PI_RESOURCE_TYPES) {
+    for (const item of resolved[type]) {
+      const { path: resourcePath, enabled, metadata } = item;
+      if (typeof resourcePath !== 'string' || !resourcePath || resourcePath.length > 4096
+        || (metadata.scope !== 'user' && metadata.scope !== 'project')
+        || (metadata.origin !== 'package' && metadata.origin !== 'top-level')) continue;
+      const scope = metadata.scope;
+      const source = String(metadata.source ?? '').slice(0, 512);
+      const baseDir = metadata.origin === 'package'
+        ? metadata.packageRoot ?? metadata.baseDir ?? dirname(resourcePath)
+        : metadata.baseDir ?? (scope === 'project' ? join(cwd, '.pi') : getAgentDir());
+      const rawPattern = metadata.source === 'builtin' ? resourcePath : relative(baseDir, resourcePath);
+      const pattern = rawPattern || basename(resourcePath);
+      const normalizedPattern = pattern.replace(/\\/g, '/');
+      if (metadata.origin === 'package'
+        && (isAbsolute(pattern) || normalizedPattern === '..' || normalizedPattern.startsWith('../'))) continue;
+      const id = createHash('sha256')
+        .update(`${type}\0${scope}\0${metadata.origin}\0${source}\0${resourcePath}`)
+        .digest('hex')
+        .slice(0, 24);
+      const sourceLabel = source === 'auto' ? 'Auto-discovered'
+        : source === 'local' ? 'Pi settings'
+          : source === 'builtin' ? 'Built-in'
+            : /^(?:npm:|git:|https?:\/\/)/.test(source) ? source : basename(source) || 'Local package';
+      resources.set(id, {
+        id,
+        type,
+        path: resourcePath,
+        pattern,
+        source,
+        scope,
+        origin: metadata.origin,
+        enabled: enabled === true,
+        label: (resourcePath.startsWith('builtin:') ? resourcePath.slice('builtin:'.length)
+          : type === 'skills' && basename(resourcePath).toLowerCase() === 'skill.md' ? basename(dirname(resourcePath))
+            : basename(resourcePath)).slice(0, 160),
+        sourceLabel: sourceLabel.slice(0, 180),
+      });
+    }
+  }
+  const typeOrder = new Map(PI_RESOURCE_TYPES.map((type, index) => [type, index]));
+  const result = [...resources.values()].sort((left, right) =>
+    (typeOrder.get(left.type) ?? 0) - (typeOrder.get(right.type) ?? 0)
+      || left.label.localeCompare(right.label));
+  configuredPiResources = new Map(result.map((resource) => [resource.id, resource]));
+  return result.slice(0, 500);
+}
+
+async function sendPiResources(requestId?: string): Promise<void> {
+  const settingsManager = session?.settingsManager;
+  if (!packageManager || !settingsManager) {
+    send('pi-resources', { ...(requestId ? { requestId } : {}), available: false, projectTrusted: false, resources: [] });
+    return;
+  }
+  try {
+    const resources = await collectConfiguredPiResources();
+    send('pi-resources', {
+      ...(requestId ? { requestId } : {}),
+      available: true,
+      projectTrusted: settingsManager.isProjectTrusted(),
+      resources: resources.map(({ id, type, scope, enabled, label, sourceLabel, pattern }) => ({ id, type, scope, enabled, label, sourceLabel, pattern })),
+    });
+  } catch (error) {
+    configuredPiResources.clear();
+    send('pi-resources', {
+      ...(requestId ? { requestId } : {}),
+      available: false,
+      projectTrusted: settingsManager.isProjectTrusted(),
+      resources: [],
+      error: error instanceof Error ? error.message.slice(0, 500) : 'Could not read configured Pi resources.',
+    });
+  }
+}
+
+function updateResourcePatterns(current: unknown, pattern: string, enabled: boolean): string[] {
+  const entries = Array.isArray(current)
+    ? current.filter((entry): entry is string => typeof entry === 'string' && entry.length <= 4096)
+    : [];
+  const updated = entries.filter((entry) => {
+    const target = /^[!+-]/.test(entry) ? entry.slice(1) : entry;
+    return target.replace(/\\/g, '/') !== pattern.replace(/\\/g, '/');
+  });
+  updated.push(`${enabled ? '+' : '-'}${pattern}`);
+  return updated;
+}
+
+function persistPiResourceState(settingsManager: SettingsManager, resource: ConfiguredPiResource, enabled: boolean): void {
+  const settings = (resource.scope === 'project' ? settingsManager.getProjectSettings() : settingsManager.getGlobalSettings()) as unknown as Record<string, unknown>;
+  if (resource.origin === 'package') {
+    const packages = Array.isArray(settings.packages) ? [...settings.packages] : [];
+    const packageIndex = packages.findIndex((entry) => {
+      if (typeof entry === 'string') return entry === resource.source;
+      return Boolean(entry && typeof entry === 'object' && (entry as Record<string, unknown>).source === resource.source);
+    });
+    if (packageIndex < 0) throw new Error('That Pi package is no longer configured. Refresh the resource list and try again.');
+    const existing = packages[packageIndex];
+    const packageSettings: Record<string, unknown> = typeof existing === 'string'
+      ? { source: existing }
+      : { ...(existing as Record<string, unknown>) };
+    const existingPatterns = packageSettings[resource.type];
+    if (enabled && Array.isArray(existingPatterns) && existingPatterns.length === 0) {
+      const excludeOthers = [...configuredPiResources.values()]
+        .filter((candidate) => candidate.id !== resource.id
+          && candidate.type === resource.type
+          && candidate.scope === resource.scope
+          && candidate.origin === 'package'
+          && candidate.source === resource.source)
+        .map((candidate) => `-${candidate.pattern}`);
+      packageSettings[resource.type] = [`+${resource.pattern}`, ...excludeOthers];
+    } else {
+      packageSettings[resource.type] = updateResourcePatterns(existingPatterns, resource.pattern, enabled);
+    }
+    const hasResourceFilters = PI_RESOURCE_TYPES.some((type) => packageSettings[type] !== undefined);
+    packages[packageIndex] = !hasResourceFilters && packageSettings.autoload !== false
+      ? resource.source
+      : packageSettings;
+    if (resource.scope === 'project') settingsManager.setProjectPackages(packages as never);
+    else settingsManager.setPackages(packages as never);
+    return;
+  }
+
+  const updated = updateResourcePatterns(settings[resource.type], resource.pattern, enabled);
+  if (resource.scope === 'project') {
+    if (resource.type === 'extensions') settingsManager.setProjectExtensionPaths(updated);
+    else if (resource.type === 'skills') settingsManager.setProjectSkillPaths(updated);
+    else if (resource.type === 'prompts') settingsManager.setProjectPromptTemplatePaths(updated);
+    else settingsManager.setProjectThemePaths(updated);
+  } else {
+    if (resource.type === 'extensions') settingsManager.setExtensionPaths(updated);
+    else if (resource.type === 'skills') settingsManager.setSkillPaths(updated);
+    else if (resource.type === 'prompts') settingsManager.setPromptTemplatePaths(updated);
+    else settingsManager.setThemePaths(updated);
+  }
+}
+
+async function setPiResourceStates(input: WorkerInput): Promise<void> {
+  if (busy || reloadingResources) {
+    send('notice', { message: 'Wait for the current Pi operation to finish before changing resource settings.' });
+    return;
+  }
+  const settingsManager = session?.settingsManager;
+  if (!packageManager || !settingsManager) {
+    send('notice', { message: 'Open a Pi session before changing resource settings.', isError: true });
+    return;
+  }
+  const rawChanges = Array.isArray(input.resourceChanges) ? input.resourceChanges : [];
+  if (rawChanges.length === 0 || rawChanges.length > 500) return;
+  const changes: Array<{ id: string; enabled: boolean; expectedEnabled: boolean }> = [];
+  const seen = new Set<string>();
+  for (const value of rawChanges) {
+    if (!value || typeof value !== 'object') return;
+    const item = value as Record<string, unknown>;
+    if (typeof item.id !== 'string' || !/^[a-f0-9]{24}$/.test(item.id)
+      || typeof item.enabled !== 'boolean' || typeof item.expectedEnabled !== 'boolean'
+      || seen.has(item.id)) return;
+    seen.add(item.id);
+    changes.push({ id: item.id, enabled: item.enabled, expectedEnabled: item.expectedEnabled });
+  }
+  try {
+    await collectConfiguredPiResources();
+    const validated = changes.map((change) => {
+      const resource = configuredPiResources.get(change.id);
+      if (!resource || resource.enabled !== change.expectedEnabled) {
+        throw new Error('The Pi resource list changed. Reopen it and try again.');
+      }
+      if (resource.scope === 'project' && !settingsManager.isProjectTrusted()) {
+        throw new Error('Trust this workspace before changing project-scoped Pi resources.');
+      }
+      return { resource, enabled: change.enabled };
+    }).filter(({ resource, enabled }) => resource.enabled !== enabled);
+    for (const { resource, enabled } of validated) persistPiResourceState(settingsManager, resource, enabled);
+    if (validated.length === 0) return;
+    await settingsManager.flush();
+    send('notice', {
+      message: `Saved ${validated.length} Pi resource setting${validated.length === 1 ? '' : 's'}. Reload Pi resources or open a new session to apply the changes.`,
+    });
+    sendConfiguredPackages();
+  } catch (error) {
+    send('notice', { message: error instanceof Error ? error.message.slice(0, 500) : 'Could not update Pi resource settings.', isError: true });
+  }
+}
+
 async function manageConfiguredPackage(input: WorkerInput): Promise<void> {
   if (busy) {
     send('notice', { message: 'Wait for the current Pi operation to finish before managing packages.' });
@@ -1430,6 +1634,14 @@ async function handle(input: WorkerInput): Promise<void> {
       }
       case 'listPackages':
         sendConfiguredPackages();
+        return;
+      case 'listPiResources': {
+        const requestId = typeof input.requestId === 'string' && input.requestId.length <= 128 ? input.requestId : undefined;
+        await sendPiResources(requestId);
+        return;
+      }
+      case 'setPiResourceStates':
+        await setPiResourceStates(input);
         return;
       case 'managePackage':
         await manageConfiguredPackage(input);
