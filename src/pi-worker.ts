@@ -11,6 +11,7 @@ type WorkerInput = {
   name?: string;
   entryId?: string;
   entryIds?: unknown[];
+  action?: string;
   requestId?: string;
   value?: unknown;
   provider?: string;
@@ -62,12 +63,13 @@ type SessionLike = {
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
   sessionManager?: {
-    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown } }>;
-    getBranch: () => Array<{ id: string }>;
+    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown } }>;
     appendCustomEntry: (customType: string, data?: unknown) => string;
     createBranchedSession: (leafId: string) => string | undefined;
     appendSessionInfo: (name: string) => string;
-    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown } }>;
+    appendContextEdit?: (targetId: string, replacement: { content: unknown } | null) => string;
+    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
@@ -85,6 +87,7 @@ type SessionLike = {
   abortCompaction?: () => void;
   reload?: () => Promise<void>;
   messages?: Array<{ role?: string; content?: unknown }>;
+  refreshContext?: () => void;
   subscribe: (listener: (event: any) => void) => () => void;
   prompt: (text: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }> }) => Promise<void>;
   abort: () => Promise<void>;
@@ -234,6 +237,12 @@ function toUiMessage(message: { role?: string; content?: unknown }): { role: str
   return { role: message.role, text: raw, hasImages };
 }
 
+function withContext(text: string, context?: string): string {
+  if (!context) return text;
+  const block = `--- pi-extension-context:start ---\n<workspace-context>\n${context}\n</workspace-context>\n--- pi-extension-context:end ---`;
+  return text.startsWith('/') ? `${text}\n\n${block}` : `${block}\n\n${text}`;
+}
+
 function getSessionBookmarks(): string[] {
   const branchEntries = session?.sessionManager?.buildContextEntries() ?? [];
   const validBookmarkIds = new Set(branchEntries.filter((entry) => entry.type === 'message'
@@ -249,26 +258,23 @@ function getSessionBookmarks(): string[] {
 function snapshot(): void {
   if (!session) return;
   const model = session.model;
-  const messages = (session.messages ?? [])
-    .map((message) => toUiMessage(message))
-    .filter((message): message is NonNullable<typeof message> => Boolean(message));
-  const branchMessages = session.sessionManager?.buildContextEntries()
-    .filter((entry) => entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant'))
-    .map((entry) => ({
-      entryId: entry.id,
-      role: entry.message?.role,
-      text: entry.message ? (toUiMessage(entry.message)?.text ?? contentText(entry.message.content)) : '',
-    })) ?? [];
-  const usedMessageEntries = new Set<string>();
-  for (const message of messages) {
-    const match = branchMessages.find((item) => item.role === message.role
-      && !usedMessageEntries.has(item.entryId)
-      && (item.text === message.text || (message.text.length > 0 && item.text.includes(message.text))));
-    if (match) {
-      (message as { entryId?: string }).entryId = match.entryId;
-      usedMessageEntries.add(match.entryId);
-    }
+  const branchEntries = session.sessionManager?.buildContextEntries() ?? [];
+  const contextEdits = new Map<string, { content?: unknown } | null>();
+  for (const entry of branchEntries) {
+    if (entry.type === 'context_edit' && typeof entry.targetId === 'string') contextEdits.set(entry.targetId, entry.replacement ?? null);
   }
+  const messages = branchEntries.flatMap((entry) => {
+    if (entry.type !== 'message' || !entry.message || (entry.message.role !== 'user' && entry.message.role !== 'assistant')) return [];
+    const display = toUiMessage(entry.message);
+    if (!display) return [];
+    if (!contextEdits.has(entry.id)) return [{ ...display, entryId: entry.id }];
+    const replacement = contextEdits.get(entry.id);
+    if (replacement === null) return [{ ...display, entryId: entry.id, contextStatus: 'omitted' }];
+    const edited = replacement && 'content' in replacement
+      ? toUiMessage({ role: entry.message.role, content: replacement.content })
+      : undefined;
+    return [{ ...display, entryId: entry.id, contextStatus: 'edited', contextEditText: edited?.text ?? contentText(replacement?.content) }];
+  });
   send('snapshot', {
     sessionId: session.sessionId,
     sessionFile: session.sessionFile,
@@ -714,6 +720,48 @@ async function handle(input: WorkerInput): Promise<void> {
         const restored = toUiMessage(entry.message);
         const text = restored?.text ?? contentText(entry.message.content);
         send('extension-editor-text', { text, context: restored?.context });
+        snapshot();
+        return;
+      }
+      case 'setMessageContext': {
+        const manager = session?.sessionManager;
+        if (!manager?.appendContextEdit || busy || typeof input.entryId !== 'string' || input.entryId.length > 256) return;
+        const entry = manager.buildContextEntries().find((candidate) => candidate.id === input.entryId);
+        if (entry?.type !== 'message' || !entry.message || (entry.message.role !== 'user' && entry.message.role !== 'assistant')) return;
+        const replacement = input.action === 'omit' ? null
+          : input.action === 'restore' ? { content: entry.message.content }
+            : undefined;
+        if (replacement === undefined) return;
+        manager.appendContextEdit(input.entryId, replacement);
+        session?.refreshContext?.();
+        snapshot();
+        return;
+      }
+      case 'editMessageContext': {
+        const manager = session?.sessionManager;
+        if (!manager?.appendContextEdit || busy || typeof input.entryId !== 'string' || input.entryId.length > 256
+          || typeof input.text !== 'string') return;
+        if (input.text.length > 100_000) {
+          send('notice', { message: 'Edited context is too long; keep it under 100,000 characters.', isError: true });
+          return;
+        }
+        const entry = manager.buildContextEntries().find((candidate) => candidate.id === input.entryId);
+        if (entry?.type !== 'message' || !entry.message || (entry.message.role !== 'user' && entry.message.role !== 'assistant')) return;
+        if (toUiMessage(entry.message)?.hasImages) {
+          send('notice', { message: 'Messages with images cannot be edited for model context.' });
+          return;
+        }
+        const edits = manager.buildContextEntries().filter((candidate) => candidate.type === 'context_edit' && candidate.targetId === input.entryId);
+        const latest = edits.at(-1);
+        const currentContent = latest && latest.replacement !== null && latest.replacement && 'content' in latest.replacement
+          ? latest.replacement.content
+          : entry.message.content;
+        const currentMessage = toUiMessage({ role: entry.message.role, content: currentContent });
+        const replacementText = entry.message.role === 'user'
+          ? withContext(input.text, currentMessage?.context ?? toUiMessage(entry.message)?.context)
+          : input.text;
+        manager.appendContextEdit(input.entryId, { content: replacementText });
+        session?.refreshContext?.();
         snapshot();
         return;
       }

@@ -287,6 +287,7 @@ function updateControls() {
   ui.editModelsConfig.disabled = !state.hasWorkspace || state.busy;
   ui.editPiSettings.disabled = !state.hasWorkspace || state.busy;
   ui.pinActiveFile.disabled = !state.hasWorkspace;
+  for (const button of ui.messageList.querySelectorAll('.context-action')) button.disabled = state.busy;
   ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
   ui.reloadResources.disabled = !state.hasSession || state.busy;
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
@@ -521,6 +522,39 @@ function renderMarkdown(container, text) {
   flushList();
 }
 
+function openMessageContextEditor(row, message) {
+  if (state.busy || row.querySelector('.context-edit-form')) return;
+  const form = document.createElement('div');
+  form.className = 'context-edit-form';
+  const input = document.createElement('textarea');
+  input.className = 'context-edit-input';
+  input.maxLength = 100000;
+  input.rows = 6;
+  input.setAttribute('aria-label', 'Text to include in Pi model context');
+  input.value = message.contextStatus === 'edited' ? String(message.contextEditText || '') : String(message.text || '');
+  const controls = document.createElement('div');
+  controls.className = 'context-edit-controls';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'branch-button context-action';
+  save.textContent = 'Save context edit';
+  save.addEventListener('click', () => {
+    post('editMessageContext', { entryId: message.entryId, text: input.value });
+    form.remove();
+  });
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'branch-button';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => form.remove());
+  controls.append(save, cancel);
+  form.append(input, controls);
+  const actions = row.querySelector('.message-actions');
+  if (actions) row.insertBefore(form, actions);
+  else row.append(form);
+  input.focus();
+}
+
 function renderMessages(shouldFollow = true) {
   const nearBottom = ui.messageArea.scrollHeight - ui.messageArea.scrollTop - ui.messageArea.clientHeight < 80;
   ui.messageList.replaceChildren();
@@ -540,6 +574,12 @@ function renderMessages(shouldFollow = true) {
     role.className = 'message-role';
     role.textContent = message.role === 'user' ? 'YOU' : 'PI';
     row.append(role);
+    if (message.contextStatus === 'omitted' || message.contextStatus === 'edited') {
+      const status = document.createElement('span');
+      status.className = `message-context-state ${message.contextStatus}`;
+      status.textContent = message.contextStatus === 'omitted' ? 'Omitted from Pi context' : 'Edited for Pi context';
+      row.append(status);
+    }
 
     const labels = contextLabels(message.context);
     if (String(message.context || '').includes('<quote-context>')) labels.push('Quoted passage');
@@ -580,6 +620,52 @@ function renderMessages(shouldFollow = true) {
         edit.addEventListener('click', () => post('editUserMessage', { entryId: message.entryId }));
         actions.append(edit);
       }
+    }
+    if (message.entryId) {
+      const contextMenu = document.createElement('details');
+      contextMenu.className = 'message-context-menu';
+      const summary = document.createElement('summary');
+      summary.className = 'branch-button';
+      summary.textContent = 'Context';
+      summary.title = 'Change what Pi receives from this message';
+      const contextControls = document.createElement('div');
+      contextControls.className = 'message-context-controls';
+      const contextAction = document.createElement('button');
+      contextAction.type = 'button';
+      contextAction.className = 'branch-button context-action';
+      contextAction.textContent = message.contextStatus === 'omitted' ? 'Restore context' : 'Omit from context';
+      contextAction.title = message.contextStatus === 'omitted'
+        ? 'Include this original message in future Pi requests'
+        : 'Keep this transcript message but exclude it from future Pi requests';
+      contextAction.disabled = state.busy;
+      contextAction.addEventListener('click', () => post('setMessageContext', {
+        entryId: message.entryId,
+        action: message.contextStatus === 'omitted' ? 'restore' : 'omit',
+      }));
+      contextControls.append(contextAction);
+
+      if (!message.hasImages) {
+        const editContext = document.createElement('button');
+        editContext.type = 'button';
+        editContext.className = 'branch-button context-action';
+        editContext.textContent = 'Edit for context';
+        editContext.title = 'Change the text Pi receives while preserving the transcript';
+        editContext.disabled = state.busy;
+        editContext.addEventListener('click', () => openMessageContextEditor(row, message));
+        contextControls.append(editContext);
+      }
+      if (message.contextStatus === 'edited') {
+        const resetContext = document.createElement('button');
+        resetContext.type = 'button';
+        resetContext.className = 'branch-button context-action';
+        resetContext.textContent = 'Reset context edit';
+        resetContext.title = 'Use this message’s original content in future Pi requests';
+        resetContext.disabled = state.busy;
+        resetContext.addEventListener('click', () => post('setMessageContext', { entryId: message.entryId, action: 'restore' }));
+        contextControls.append(resetContext);
+      }
+      contextMenu.append(summary, contextControls);
+      actions.append(contextMenu);
     }
     const quote = document.createElement('button');
     quote.type = 'button';

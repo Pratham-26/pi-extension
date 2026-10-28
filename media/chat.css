@@ -279,6 +279,17 @@ button:focus-visible, textarea:focus-visible {
 .message-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; width: 100%; }
 .message-row.user .message-actions { justify-content: flex-end; }
 .message-row.assistant .message-actions { justify-content: flex-start; }
+.message-context-state { align-self: flex-start; padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 9px; }
+.message-context-state.omitted { color: var(--vscode-editorWarning-foreground, var(--muted)); }
+.message-context-state.edited { color: var(--accent); }
+.message-context-menu { flex: 0 0 auto; }
+.message-context-menu[open] { flex-basis: 100%; }
+.message-context-menu summary { list-style: none; cursor: pointer; }
+.message-context-menu summary::-webkit-details-marker { display: none; }
+.message-context-controls { display: flex; flex-wrap: wrap; gap: 5px; padding-top: 5px; }
+.context-edit-form { display: grid; gap: 5px; width: 100%; }
+.context-edit-input { width: 100%; min-height: 90px; resize: vertical; padding: 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; }
+.context-edit-controls { display: flex; gap: 5px; }
 .message-row.search-match { outline: 1px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 4px; border-radius: 3px; }
 .message-row.search-current { outline: 2px solid var(--focus); outline-offset: 4px; border-radius: 3px; }
 .message-row.bookmark-flash { background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 5px; transition: background 1400ms ease-out; }

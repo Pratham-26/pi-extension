@@ -21,12 +21,13 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Search the current transcript and step through matches in messages and visible tool output.
 - [x] Persist drafts and prompt history by Pi session; quote a message or selected passage into the next prompt.
 - [x] Bookmark transcript messages with persistent branch-local bookmarks and jump back to bookmarked messages.
+- [x] Omit, edit, or restore user and assistant text in future model context using append-only Pi session edits; the original transcript remains visible.
 - [x] Show estimated context usage and warn visually near the model's context limit.
 - [x] Offer Pi context compaction near the context limit, with an explicit confirmation and cancellation through Stop.
 - [x] Export the active session as HTML or JSONL.
 - [~] Render a safe Markdown subset; full Markdown, math, Mermaid, image output, thinking blocks, and extension renderers are not supported.
 - [~] Tool cards show live activity; historical tool cards, edit diffs, exploration grouping, focused transcript mode, and per-tool expansion settings are not restored/rendered.
-- [~] Code blocks can be copied; symbol links and model-generated prompt suggestions are missing. Message quoting, bookmark lists, and context compaction are available.
+- [~] Code blocks can be copied; symbol links and model-generated prompt suggestions are missing. Message quoting, bookmarks, persistent context edits, and context compaction are available.
 - [ ] Redacted diagnostic/bug-report export.
 - [ ] Run shell commands from `!` messages. The required direct command execution was rejected by the automatic security review, so this remains unavailable.
 
