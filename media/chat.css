@@ -618,6 +618,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-card summary { min-width: 0; padding: 6px 8px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; cursor: pointer; }
 .tool-card[open] summary { color: var(--text); border-bottom: 1px solid var(--line); }
 .tool-card.tool-error summary { color: var(--danger); }
+.tool-inline-diff { margin: 0 8px 8px; border-top: 1px solid var(--line); }
+.tool-inline-diff > summary { padding: 6px 0; color: var(--muted); font-size: 10px; cursor: pointer; }
+.tool-inline-diff[open] > summary { color: var(--text); }
+.tool-inline-diff-output { max-height: 360px; margin: 0; padding: 4px 0; overflow: auto; color: var(--vscode-editor-foreground, var(--text)); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; white-space: pre; }
+.tool-inline-diff-line { display: block; min-height: 1.45em; padding: 0 6px; }
+.tool-inline-diff-line.added { background: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBackground, #2da44e33) 70%, transparent); }
+.tool-inline-diff-line.removed { background: color-mix(in srgb, var(--vscode-diffEditor-removedTextBackground, #cf222e33) 70%, transparent); }
+.tool-inline-diff-line.file, .tool-inline-diff-line.hunk { color: var(--muted); }
+.tool-inline-diff-line.truncated { padding: 5px 6px; color: var(--muted); font-style: italic; white-space: normal; }
 .tool-renderer-output { max-width: 100%; max-height: 220px; color: var(--vscode-editor-foreground, var(--text)); white-space: pre-wrap; overflow-wrap: anywhere; }
 .extension-renderer-output { max-height: 320px; }
 .tool-renderer-line { display: block; min-height: 1em; }

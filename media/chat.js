@@ -2284,8 +2284,57 @@ function appendSubagentDetails(card, details, partial) {
   card.append(section);
 }
 
+function appendInlineToolDiff(card, details, partial) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return false;
+  const toolName = String(card.dataset.toolName || '').toLowerCase();
+  const source = typeof details.diff === 'string' ? details.diff : typeof details.patch === 'string' ? details.patch : '';
+  if (!source || (toolName !== 'edit' && typeof details.patch !== 'string')) return false;
+
+  const maxChars = 24_000;
+  const maxLines = 500;
+  const text = source.slice(0, maxChars);
+  const lines = text.split(/\r?\n/);
+  const visibleLines = lines.slice(0, maxLines);
+  let additions = 0;
+  let removals = 0;
+  const section = document.createElement('details');
+  section.className = 'tool-structured-result tool-inline-diff';
+  section.open = !partial;
+  const summary = document.createElement('summary');
+
+  for (const line of visibleLines) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions += 1;
+    else if (line.startsWith('-') && !line.startsWith('---')) removals += 1;
+  }
+  summary.textContent = `File diff · +${additions} / −${removals}`;
+
+  const output = document.createElement('pre');
+  output.className = 'tool-output tool-inline-diff-output';
+  output.setAttribute('aria-label', 'File edit diff');
+  for (const line of visibleLines) {
+    const row = document.createElement('span');
+    row.className = 'tool-inline-diff-line';
+    if (line.startsWith('+++') || line.startsWith('---')) row.classList.add('file');
+    else if (line.startsWith('+')) row.classList.add('added');
+    else if (line.startsWith('-')) row.classList.add('removed');
+    else if (line.startsWith('@@')) row.classList.add('hunk');
+    row.textContent = line || ' ';
+    output.append(row);
+  }
+  const truncated = source.length > text.length || lines.length > visibleLines.length;
+  if (truncated) {
+    const note = document.createElement('span');
+    note.className = 'tool-inline-diff-line truncated';
+    note.textContent = '[Diff preview truncated]';
+    output.append(note);
+  }
+  section.append(summary, output);
+  card.append(section);
+  return true;
+}
+
 function appendStructuredToolDetails(card, details, partial = false, stoppableChildren = []) {
-  card.querySelector('.tool-structured-result')?.remove();
+  card.querySelectorAll('.tool-structured-result').forEach((node) => node.remove());
   if (details === undefined || details === null) return;
   let serialized;
   try {
@@ -2293,7 +2342,7 @@ function appendStructuredToolDetails(card, details, partial = false, stoppableCh
   } catch {
     return;
   }
-  if (typeof serialized !== 'string' || serialized === '{}' || serialized === '[]' || serialized.length > 24000) return;
+  if (typeof serialized !== 'string' || serialized === '{}' || serialized === '[]') return;
 
   if (appendWorkflowSubagentDetails(card, details, stoppableChildren)) return;
 
@@ -2302,6 +2351,8 @@ function appendStructuredToolDetails(card, details, partial = false, stoppableCh
     appendSubagentDetails(card, subagents, partial);
     return;
   }
+
+  const hasInlineDiff = appendInlineToolDiff(card, details, partial);
 
   const checklist = structuredChecklist(details);
   if (checklist) {
@@ -2351,6 +2402,8 @@ function appendStructuredToolDetails(card, details, partial = false, stoppableCh
     card.append(section);
     return;
   }
+
+  if (hasInlineDiff || serialized.length > 24000) return;
 
   const disclosure = document.createElement('details');
   disclosure.className = 'tool-structured-result tool-structured-disclosure';
