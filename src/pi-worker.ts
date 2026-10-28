@@ -34,6 +34,7 @@ type WorkerInput = {
   requestId?: string;
   toolCallId?: string;
   sessionPath?: string;
+  gitBranch?: string | null;
   enabled?: boolean;
   expectedEnabled?: boolean;
   value?: unknown;
@@ -250,6 +251,12 @@ const MAX_PENDING_UI_REQUESTS = 64;
 const MAX_EXTENSION_UI_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_EXTENSION_WIDGETS = 32;
 const extensionWidgetKeys = new Set<string>();
+const MAX_EXTENSION_STATUSES = 32;
+const extensionStatusValues = new Map<string, string>();
+let extensionHeaderFactory: ((tui: any, theme: unknown) => unknown) | undefined;
+let extensionFooterFactory: ((tui: any, theme: unknown, footerData: unknown) => unknown) | undefined;
+let extensionGitBranch: string | null = null;
+let extensionChromeRefreshing = false;
 let uiRequestSequence = 0;
 let modelWatcher: FSWatcher | undefined;
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -807,6 +814,40 @@ function renderPiWidgetComponent(current: SessionLike, factory: (tui: any, theme
   }
 }
 
+function renderPiFooterComponent(current: SessionLike): SafeTuiLine[] | undefined {
+  const factory = extensionFooterFactory;
+  if (!factory) return undefined;
+  let providerCount = 0;
+  try {
+    providerCount = new Set((current.modelRuntime?.getAvailableSnapshot() ?? [])
+      .map((model) => model.provider)
+      .filter((provider) => typeof provider === 'string' && provider.length <= 128)).size;
+  } catch {
+    // Footer integrations still receive the other available session values.
+  }
+  const footerData = {
+    getGitBranch: () => extensionGitBranch,
+    getExtensionStatuses: () => new Map(extensionStatusValues),
+    getAvailableProviderCount: () => providerCount,
+    onBranchChange: () => () => undefined,
+  };
+  return renderPiWidgetComponent(current, (tui, theme) => factory(tui, theme, footerData));
+}
+
+function refreshExtensionChrome(current: SessionLike): void {
+  if (extensionChromeRefreshing) return;
+  extensionChromeRefreshing = true;
+  try {
+    const header = extensionHeaderFactory
+      ? renderPiWidgetComponent(current, extensionHeaderFactory) ?? []
+      : [];
+    const footer = renderPiFooterComponent(current) ?? [];
+    send('extension-chrome', { header, footer });
+  } finally {
+    extensionChromeRefreshing = false;
+  }
+}
+
 function safeExtensionWidgetOptions(value: unknown, key: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { title: key, placement: 'aboveEditor', alwaysVisible: true };
   const options = value as Record<string, unknown>;
@@ -1140,7 +1181,22 @@ function installExtensionUi(current: SessionLike): void {
     input: (title: string, placeholder?: string, dialogOptions?: { signal?: AbortSignal; timeout?: number }) => requestExtensionUi('input', title, { placeholder }, dialogOptions),
     editor: (title: string, prefill?: string) => requestExtensionUi('editor', title, { prefill }),
     notify: (message: string, level?: string) => send('extension-ui-notice', { message, level: level ?? 'info' }),
-    setStatus: (key: string, text?: string) => send('extension-status', { key, text }),
+    setStatus: (key: string, text?: string) => {
+      const safeKey = typeof key === 'string' ? key.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 128) : '';
+      if (!safeKey) return;
+      const safeText = typeof text === 'string' ? text.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 500) : '';
+      if (safeText) {
+        if (!extensionStatusValues.has(safeKey) && extensionStatusValues.size >= MAX_EXTENSION_STATUSES) {
+          send('extension-ui-notice', { message: `Pi extensions can show up to ${MAX_EXTENSION_STATUSES} status values at once.`, level: 'warning' });
+          return;
+        }
+        extensionStatusValues.set(safeKey, safeText);
+      } else {
+        extensionStatusValues.delete(safeKey);
+      }
+      send('extension-status', { key: safeKey, text: safeText || undefined });
+      refreshExtensionChrome(current);
+    },
     setWorkingMessage: (message?: string) => send('activity', { message: message || 'Pi is working' }),
     setWorkingVisible: (visible: boolean) => send('working-visible', { visible }),
     setTitle: (title: string) => send('extension-title', { title }),
@@ -1177,8 +1233,18 @@ function installExtensionUi(current: SessionLike): void {
       return undefined;
     },
     setWidgetPlacement: () => undefined,
-    setFooter: () => undefined,
-    setHeader: () => undefined,
+    setFooter: (factory?: unknown) => {
+      extensionFooterFactory = typeof factory === 'function'
+        ? factory as (tui: any, theme: unknown, footerData: unknown) => unknown
+        : undefined;
+      refreshExtensionChrome(current);
+    },
+    setHeader: (factory?: unknown) => {
+      extensionHeaderFactory = typeof factory === 'function'
+        ? factory as (tui: any, theme: unknown) => unknown
+        : undefined;
+      refreshExtensionChrome(current);
+    },
     setEditorComponent: () => undefined,
     getEditorComponent: () => undefined,
     getTheme: () => undefined,
@@ -1469,6 +1535,7 @@ function snapshot(): void {
     sessionStats: usageStats ? { tokens: { total: usageStats.tokens.total }, cost: usageStats.cost } : undefined,
     bookmarks: getSessionBookmarks(),
   });
+  refreshExtensionChrome(activeSession);
   sendOptions();
 }
 
@@ -1635,7 +1702,11 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   session?.dispose();
   session = next;
   extensionWidgetKeys.clear();
+  extensionStatusValues.clear();
+  extensionHeaderFactory = undefined;
+  extensionFooterFactory = undefined;
   send('extension-widgets-reset');
+  send('extension-chrome-reset');
   streamingAssistantMarkdown = '';
   streamingMarkdownOverflow = false;
   lastStreamingMarkdownTransformAt = 0;
@@ -2681,6 +2752,13 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'renderSavedToolCall':
         renderSavedToolCall(input);
         return;
+      case 'setGitBranch': {
+        if (input.gitBranch !== null && (typeof input.gitBranch !== 'string' || input.gitBranch.length > 200
+          || /[\u0000-\u001f\u007f]/.test(input.gitBranch))) return;
+        extensionGitBranch = input.gitBranch;
+        if (session) refreshExtensionChrome(session);
+        return;
+      }
       case 'cancelPromptSuggestions':
         if (typeof input.requestId === 'string' && activePromptSuggestion?.requestId === input.requestId) {
           activePromptSuggestion.controller.abort();

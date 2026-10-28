@@ -79,6 +79,7 @@ const state = {
   toolMessagesBySession: new Map(),
   thinkingExpansion: new Map(),
   extensionWidgets: new Map(),
+  extensionChrome: { header: [], footer: [] },
   extensionStatuses: new Map(),
   extensionRequest: undefined,
   extensionRequestQueue: [],
@@ -118,6 +119,8 @@ const ui = {
   queueList: el('queue-list'),
   queueEmpty: el('queue-empty'),
   notice: el('notice'),
+  extensionHeader: el('extension-header'),
+  extensionFooter: el('extension-footer'),
   extensionWidgetsAbove: el('extension-widgets-above'),
   extensionWidgetsBelow: el('extension-widgets-below'),
   extensionStatus: el('extension-status'),
@@ -3091,6 +3094,15 @@ function renderExtensionWidgets() {
   }
 }
 
+function renderExtensionChrome() {
+  for (const [slot, target] of [['header', ui.extensionHeader], ['footer', ui.extensionFooter]]) {
+    target.replaceChildren();
+    const output = createTuiOutput(state.extensionChrome[slot], `extension-chrome-output-${slot}`);
+    if (output) target.append(output);
+    target.hidden = !output;
+  }
+}
+
 function renderExtensionStatuses() {
   ui.extensionStatus.textContent = [...state.extensionStatuses.values()].join(' · ');
   ui.extensionStatus.title = [...state.extensionStatuses.entries()].map(([key, value]) => `${key}: ${value}`).join('\n');
@@ -3418,6 +3430,19 @@ window.addEventListener('message', (event) => {
       break;
     case 'extension-ui-notice':
       showNotice(data.message || 'Pi extension notification', data.level === 'error' || data.level === 'warning');
+      break;
+    case 'extension-chrome':
+      state.extensionChrome = {
+        header: Array.isArray(data.header) ? data.header.slice(0, 120) : [],
+        footer: Array.isArray(data.footer) ? data.footer.slice(0, 120) : [],
+      };
+      renderExtensionChrome();
+      break;
+    case 'extension-chrome-reset':
+      state.extensionChrome = { header: [], footer: [] };
+      state.extensionStatuses.clear();
+      renderExtensionChrome();
+      renderExtensionStatuses();
       break;
     case 'extension-widget':
       state.extensionWidgets.set(String(data.key || 'extension').slice(0, 128), {

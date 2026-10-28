@@ -2197,19 +2197,24 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async refreshGitChanges(): Promise<void> {
+    const worker = this.worker;
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
+      worker?.postMessage({ type: 'setGitBranch', gitBranch: null });
       this.post({ type: 'git-changes', available: false, message: 'Open a workspace to review Git changes.', files: [] });
       return;
     }
     try {
       const handle = await this.getGitRepository(workspace);
+      if (worker !== this.worker || this.workerWorkspace !== workspace.uri.fsPath) return;
       if (!handle) {
+        worker?.postMessage({ type: 'setGitBranch', gitBranch: null });
         this.post({ type: 'git-changes', available: false, message: 'This workspace is not inside a Git repository.', files: [] });
         return;
       }
       const { repository } = handle;
       await repository.status?.();
+      if (worker !== this.worker || this.workerWorkspace !== workspace.uri.fsPath) return;
       const state = repository.state;
       const files = new Map<string, GitFileStatus>();
       const add = (changes: GitChangeRecord[] | undefined, label: string, canDiscard = false) => {
@@ -2257,6 +2262,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         insertions: stats?.insertions ?? 0,
         deletions: stats?.deletions ?? 0,
       };
+      if (worker === this.worker && this.workerWorkspace === workspace.uri.fsPath) {
+        const gitBranch = head?.name;
+        worker?.postMessage({ type: 'setGitBranch', gitBranch: typeof gitBranch === 'string' ? gitBranch.slice(0, 200) : null });
+      }
       this.post({
         type: 'git-changes',
         available: true,
@@ -2265,6 +2274,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         truncated: files.size > MAX_GIT_REVIEW_FILES,
       });
     } catch (error) {
+      if (worker !== this.worker || this.workerWorkspace !== workspace.uri.fsPath) return;
+      worker?.postMessage({ type: 'setGitBranch', gitBranch: null });
       const reason = error instanceof Error ? error.message.slice(0, 300) : 'Git status is unavailable.';
       this.post({ type: 'git-changes', available: false, message: `Could not read Git changes. ${reason}`, files: [] });
     }
@@ -4783,6 +4794,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         </div>
       </section>
       <main id="messages" class="messages" aria-live="polite" aria-relevant="additions text">
+        <div id="extension-header" class="extension-chrome extension-chrome-header" aria-label="Pi extension header" hidden></div>
         <div id="empty-state" class="empty-state">
           <div class="empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M9 6v12M15 6v12M15 6h5"/></svg></div>
           <h1>What can Pi help with?</h1>
@@ -4885,6 +4897,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           </div>
         </div>
         <div id="extension-widgets-below" class="extension-widgets extension-widgets-below" aria-label="Pi extension widgets below the editor"></div>
+        <div id="extension-footer" class="extension-chrome extension-chrome-footer" aria-label="Pi extension footer" hidden></div>
         <div id="context-meter" class="context-meter" role="meter" aria-label="Pi context usage" aria-valuemin="0" aria-valuemax="100" hidden>
           <span id="context-meter-fill" class="context-meter-fill"></span>
           <span id="context-meter-label" class="context-meter-label"></span>
