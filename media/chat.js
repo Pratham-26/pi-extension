@@ -71,6 +71,7 @@ const state = {
   extensionRequest: undefined,
   showWorking: true,
   contextUsage: undefined,
+  sessionStats: undefined,
   noticeTimer: undefined,
 };
 
@@ -146,6 +147,7 @@ const ui = {
   contextMeter: el('context-meter'),
   contextMeterFill: el('context-meter-fill'),
   contextMeterLabel: el('context-meter-label'),
+  sessionUsage: el('session-usage'),
   compactSession: el('compact-session'),
   bookmarkToggle: el('bookmark-toggle'),
   bookmarkPanel: el('bookmark-panel'),
@@ -1045,6 +1047,21 @@ function renderContextUsage() {
   ui.compactSession.title = 'Ask Pi to summarize older context to free context window space';
 }
 
+function renderSessionUsage() {
+  const stats = state.sessionStats;
+  const cost = Number(stats?.cost);
+  const tokens = Number(stats?.tokens?.total);
+  if (!stats || !Number.isFinite(cost) || cost < 0) {
+    ui.sessionUsage.textContent = '';
+    ui.sessionUsage.title = '';
+    return;
+  }
+  const tokenLabel = Number.isFinite(tokens) && tokens >= 0 ? `${Math.round(tokens).toLocaleString()} tokens` : 'usage';
+  const costLabel = cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2);
+  ui.sessionUsage.textContent = `$${costLabel} · ${tokenLabel}`;
+  ui.sessionUsage.title = 'Cumulative Pi usage for this session, including earlier turns and compacted history.';
+}
+
 function renderBookmarks() {
   ui.bookmarkList.replaceChildren();
   const bookmarkedMessages = state.bookmarks
@@ -1821,7 +1838,9 @@ function applySnapshot(data) {
   state.messages = messages;
   state.busy = Boolean(data.busy);
   state.contextUsage = data.contextUsage;
+  state.sessionStats = data.sessionStats;
   renderContextUsage();
+  renderSessionUsage();
   state.streamIndex = state.busy ? state.messages.findLastIndex((message) => message.role === 'assistant') : -1;
   ui.title.textContent = shorten(data.title || 'New chat', 48) || 'New chat';
   ui.title.title = data.title || 'New chat';

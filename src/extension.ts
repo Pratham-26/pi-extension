@@ -2186,7 +2186,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           <span id="context-meter-label" class="context-meter-label"></span>
           <button id="compact-session" class="context-meter-action" type="button" hidden>Compact</button>
         </div>
-        <div class="composer-note"><span>Pi uses your existing configuration</span><span id="extension-status" class="extension-status"></span><span id="model-label"></span></div>
+        <div class="composer-note"><span>Pi uses your existing configuration</span><span id="extension-status" class="extension-status"></span><span id="session-usage" aria-label="Session token and cost usage"></span><span id="model-label"></span></div>
       </footer>
     </section>
   </div>

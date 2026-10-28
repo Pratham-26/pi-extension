@@ -389,6 +389,7 @@ function getSessionBookmarks(): string[] {
 function snapshot(): void {
   if (!session) return;
   const model = session.model;
+  const usageStats = session.getSessionStats?.();
   const branchEntries = session.sessionManager?.buildContextEntries() ?? [];
   const contextEdits = new Map<string, { content?: unknown } | null>();
   for (const entry of branchEntries) {
@@ -414,7 +415,7 @@ function snapshot(): void {
     messages,
     busy,
     contextUsage: session.getContextUsage?.(),
-    sessionStats: session.getSessionStats?.(),
+    sessionStats: usageStats ? { tokens: { total: usageStats.tokens.total }, cost: usageStats.cost } : undefined,
     bookmarks: getSessionBookmarks(),
   });
   sendOptions();
