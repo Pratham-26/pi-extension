@@ -140,6 +140,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private mcpConfigPath = '';
   private pendingMcpSetting?: { worker: Worker; requestId: string; enabled: boolean; previous: boolean };
   private pendingPiResourcePicker?: { worker: Worker; requestId: string };
+  private pendingExtensionUiRequestIds = new Set<string>();
   private providerAuthPromptCancels = new Map<string, { worker: Worker; cancel: () => void }>();
   private activeEditorSubscription: vscode.Disposable;
   private selectionSubscription: vscode.Disposable;
@@ -168,6 +169,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.webviewMessageSubscription?.dispose();
     this.webviewMessageSubscription = undefined;
     const worker = this.worker;
+    this.cancelPendingExtensionUiRequests(worker);
     this.worker = undefined;
     this.pendingPiResourcePicker = undefined;
     this.knownPromptPaths.clear();
@@ -197,7 +199,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     view.onDidDispose(() => {
       this.webviewMessageSubscription?.dispose();
       this.webviewMessageSubscription = undefined;
-      if (this.view === view) this.view = undefined;
+      if (this.view === view) {
+        this.view = undefined;
+        this.cancelPendingExtensionUiRequests(this.worker);
+      }
     });
 
     void this.ensureRuntime();
@@ -276,6 +281,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   restartRuntime(): void {
     const previous = this.worker;
     if (previous) this.cancelProviderAuthPrompts(previous);
+    this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
     this.pendingPiResourcePicker = undefined;
     this.workerWorkspace = undefined;
@@ -312,6 +318,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
     const previous = this.worker;
     if (previous) this.cancelProviderAuthPrompts(previous);
+    this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
     this.pendingPiResourcePicker = undefined;
     this.failPendingMcpSetting(previous);
@@ -338,6 +345,22 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = worker;
     worker.on('message', (message: RuntimeMessage) => {
       if (this.worker !== worker) return;
+      if (message.type === 'extension-ui-request') {
+        const requestId = typeof message.requestId === 'string' && message.requestId.length <= 128
+          ? message.requestId
+          : '';
+        if (!requestId || !this.view) {
+          if (requestId) worker.postMessage({ type: 'extensionUiResponse', requestId, value: undefined });
+          return;
+        }
+        this.pendingExtensionUiRequestIds.add(requestId);
+        if (!this.view.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('inputRequired', true)) {
+          void this.showChatNotification('A Pi extension is waiting for your answer.');
+        }
+        this.post(message);
+        return;
+      }
+      if (message.type === 'extension-ui-reset') this.pendingExtensionUiRequestIds.clear();
       if (message.type === 'runtime-error') this.recordDiagnostic('Pi runtime error');
       else if (message.type === 'notice' && message.isError === true) this.recordDiagnostic('Pi operation error');
       if (message.type === 'run-finished') void this.refreshGitChanges();
@@ -346,9 +369,6 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.post(message);
       } else if (message.type === 'run-finished' && !message.providerLogin && !this.view?.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('runFinished', true)) {
         void this.showChatNotification('Pi finished its run.');
-        this.post(message);
-      } else if (message.type === 'extension-ui-request' && !this.view?.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('inputRequired', true)) {
-        void this.showChatNotification('A Pi extension is waiting for your answer.');
         this.post(message);
       } else if (message.type === 'provider-auth-prompt') {
         void this.handleProviderAuthPrompt(message, worker);
@@ -463,6 +483,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     worker.on('exit', (code: number) => {
       if (this.worker === worker) {
         this.worker = undefined;
+        this.pendingExtensionUiRequestIds.clear();
         this.pendingPiResourcePicker = undefined;
         this.cancelProviderAuthPrompts(worker);
       }
@@ -688,7 +709,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'usePreset':
       case 'setBookmarks':
       case 'replaceQueue':
+        this.worker?.postMessage(message);
+        return;
       case 'extensionUiResponse':
+        if (typeof message.requestId !== 'string' || !this.pendingExtensionUiRequestIds.delete(message.requestId)) return;
+        this.worker?.postMessage(message);
+        return;
       case 'navigateTree':
       case 'editUserMessage':
       case 'setMessageContext':
@@ -2402,6 +2428,19 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const timeout = setTimeout(() => { void worker.terminate(); }, 5000);
     timeout.unref?.();
     worker.once('exit', () => clearTimeout(timeout));
+  }
+
+  private cancelPendingExtensionUiRequests(worker: Worker | undefined): void {
+    if (worker) {
+      for (const requestId of this.pendingExtensionUiRequestIds) {
+        try {
+          worker.postMessage({ type: 'extensionUiResponse', requestId, value: undefined });
+        } catch {
+          // The worker may already be stopping; its own shutdown resolves remaining requests.
+        }
+      }
+    }
+    this.pendingExtensionUiRequestIds.clear();
   }
 
   private failPendingMcpSetting(worker?: Worker): void {
