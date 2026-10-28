@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isPiPackageSource } from './package-source';
+import { validatePiShellCommand } from './shell-command';
 import { resolveModelScopePatterns } from './model-scope';
 import { fillPromptSuggestionFallback, parsePromptSuggestions } from './prompt-suggestions';
 import {
@@ -25,6 +26,8 @@ import {
 type WorkerInput = {
   type: string;
   text?: string;
+  command?: string;
+  excludeFromContext?: boolean;
   path?: string;
   query?: string;
   allWorkspaces?: boolean;
@@ -109,15 +112,15 @@ type SessionLike = {
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
   sessionManager?: {
-    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; customType?: string; content?: unknown; display?: boolean; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
-    getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown } }>;
+    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; customType?: string; content?: unknown; display?: boolean; timestamp?: number; command?: string; output?: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; excludeFromContext?: boolean; fullOutputPath?: string; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown; command?: string; output?: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; excludeFromContext?: boolean; fullOutputPath?: string; timestamp?: number } }>;
     getLeafId: () => string | null;
     appendCustomEntry: (customType: string, data?: unknown) => string;
     createBranchedSession: (leafId: string) => string | undefined;
     appendSessionInfo: (name: string) => string;
     appendUsage?: (kind: string, provider: string, model: string, usage: unknown, note?: string) => unknown;
     appendContextEdit?: (targetId: string, replacement: { content: unknown } | null) => string;
-    buildContextEntries: () => Array<{ type?: string; id: string; timestamp?: string; customType?: string; content?: unknown; display?: boolean; details?: unknown; data?: unknown; message?: { role?: string; customType?: string; content?: unknown; display?: boolean; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    buildContextEntries: () => Array<{ type?: string; id: string; timestamp?: string; customType?: string; content?: unknown; display?: boolean; details?: unknown; data?: unknown; message?: { role?: string; customType?: string; content?: unknown; display?: boolean; timestamp?: number; command?: string; output?: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; excludeFromContext?: boolean; fullOutputPath?: string; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
@@ -164,6 +167,15 @@ type SessionLike = {
   refreshContext?: () => void;
   subscribe: (listener: (event: any) => void) => () => void;
   prompt: (text: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }> }) => Promise<void>;
+  executeBash?: (command: string, onChunk?: (chunk: string) => void, options?: { excludeFromContext?: boolean; id?: string }) => Promise<{
+    output: string;
+    exitCode: number | undefined;
+    cancelled: boolean;
+    truncated: boolean;
+    fullOutputPath?: string;
+  }>;
+  abortBash?: () => void;
+  isStreaming?: boolean;
   abort: () => Promise<void>;
   dispose: () => void;
 };
@@ -304,6 +316,7 @@ const subagentWorkflowStopsAccepted = new Set<string>();
 let configuredPiResources = new Map<string, ConfiguredPiResource>();
 let unsubscribe: (() => void) | undefined;
 let busy = false;
+let shellCommandRunning = false;
 let compacting = false;
 let reloadingResources = false;
 let authenticatingProvider = false;
@@ -2585,6 +2598,22 @@ function snapshot(): void {
         ...(imageCount ? { imageContent: entry.message.content, imageCount, hasImages: true } : {}),
       }];
     }
+    if (entry.message.role === 'bashExecution') {
+      if (typeof entry.message.command !== 'string') return [];
+      const output = typeof entry.message.output === 'string' ? entry.message.output : '';
+      return [{
+        role: 'bashExecution',
+        entryId: entry.id,
+        command: entry.message.command.slice(0, 16_000),
+        output: output.slice(-MAX_TOOL_UI_CHARS),
+        ...(typeof entry.message.exitCode === 'number' ? { exitCode: entry.message.exitCode } : {}),
+        cancelled: entry.message.cancelled === true,
+        truncated: entry.message.truncated === true || output.length > MAX_TOOL_UI_CHARS,
+        excludeFromContext: entry.message.excludeFromContext === true,
+        ...(typeof entry.message.fullOutputPath === 'string' ? { fullOutputPath: entry.message.fullOutputPath.slice(0, 4096) } : {}),
+        ...(typeof entry.message.timestamp === 'number' ? { timestamp: entry.message.timestamp } : {}),
+      }];
+    }
     if (entry.message.role !== 'user' && entry.message.role !== 'assistant') return [];
     const display = toUiMessage(entry.message);
     if (!display) return [];
@@ -3011,6 +3040,11 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
         rendererResult: rendererResult ?? null,
         ...boundedTranscriptImageFields(event.result?.content),
       });
+    } else if (event.type === 'bash_execution_update') {
+      send('bash-execution-update', {
+        id: typeof event.id === 'string' ? event.id.slice(0, 128) : '',
+        delta: typeof event.delta === 'string' ? event.delta.slice(0, MAX_TOOL_UI_CHARS) : '',
+      });
     } else if (event.type === 'thinking_level_changed' || event.type === 'model_change') {
       sendOptions();
       snapshot();
@@ -3108,6 +3142,9 @@ function sessionSupplementalSearchMatches(path: string, query: string): boolean 
             // Details are optional and may be malformed in legacy session data.
           }
         }
+      } else if (message.role === 'bashExecution') {
+        addSearchText(message.command);
+        addSearchText(message.output);
       }
     }
   } catch {
@@ -4765,6 +4802,41 @@ async function handle(input: WorkerInput): Promise<void> {
         }
         return;
       }
+      case 'runShellCommand': {
+        if (typeof input.command !== 'string') throw new Error('The shell command is invalid.');
+        const commandError = validatePiShellCommand(input.command);
+        if (commandError) throw new Error(commandError);
+        if (busy || shellCommandRunning || session?.isStreaming) {
+          throw new Error('Wait for Pi to finish before running a shell command.');
+        }
+        if (!session) await createSession();
+        if (!session?.executeBash) throw new Error('This Pi runtime does not support direct shell commands.');
+
+        const commandId = randomUUID();
+        const command = input.command;
+        const excludeFromContext = input.excludeFromContext === true;
+        shellCommandRunning = true;
+        busy = true;
+        send('run-started', {
+          activity: 'Running shell command',
+          canStop: true,
+          shellCommand: true,
+          commandId,
+          command,
+          excludeFromContext,
+          sessionPath: session.sessionFile,
+        });
+        try {
+          await session.executeBash(command, undefined, { excludeFromContext, id: commandId });
+        } finally {
+          shellCommandRunning = false;
+          busy = false;
+          send('run-finished', { shellCommand: true, agentRun: false });
+          snapshot();
+          await listSessions();
+        }
+        return;
+      }
       case 'prompt':
         if (!session) await createSession();
         if (!session || !input.text) return;
@@ -4807,6 +4879,10 @@ async function handle(input: WorkerInput): Promise<void> {
         }
         if (authenticatingProvider) return;
         if (reloadingResources) return;
+        if (shellCommandRunning) {
+          session?.abortBash?.();
+          return;
+        }
         if (session && busy) await session.abort();
         if (busy) {
           busy = false;

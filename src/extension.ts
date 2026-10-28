@@ -7,6 +7,7 @@ import { Worker } from 'node:worker_threads';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { isPiPackageSource } from './package-source';
 import { loadRecommendedPiPackages } from './package-recommendations';
+import { parsePiShellCommandInput, validatePiShellCommand } from './shell-command';
 import {
   normalizeNotificationHookCommand,
   normalizeNotificationHookEvents,
@@ -1690,12 +1691,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             ? `Pi finished working in “${title}”.`
             : 'Pi finished its run.');
         }
-        if (!message.providerLogin && hidden && notifications.get<boolean>('runFinished', true)) {
+        if (message.shellCommand !== true && !message.providerLogin && hidden && notifications.get<boolean>('runFinished', true)) {
           void this.showChatNotification('Pi finished its run.');
         }
         this.post({
           ...message,
-          notificationSound: !message.providerLogin && hidden && notifications.get<boolean>('sound', false),
+          notificationSound: message.shellCommand !== true && !message.providerLogin && hidden && notifications.get<boolean>('sound', false),
         });
       } else if (message.type === 'provider-auth-prompt') {
         void this.handleProviderAuthPrompt(message, worker);
@@ -2250,8 +2251,43 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'send': {
         this.sessionInteractionStarted = true;
         if (typeof message.text !== 'string') return;
-        const text = message.text.trim().slice(0, 100_000);
+        const rawText = message.text.trim();
         const attachments = this.validateAttachments(message.attachments);
+        const shellCommand = parsePiShellCommandInput(rawText);
+        if (shellCommand) {
+          const rejectShellCommand = (message: string) => this.post({ type: 'shell-command-rejected', message });
+          const commandError = validatePiShellCommand(shellCommand.command);
+          if (commandError) {
+            rejectShellCommand(commandError);
+            return;
+          }
+          if (attachments.length) {
+            rejectShellCommand('Remove attachments before running a shell command.');
+            return;
+          }
+          if (this.runtimeBusy || this.queuedWorkCount > 0) {
+            rejectShellCommand('Wait for Pi to finish and clear queued work before running a shell command.');
+            return;
+          }
+          const commandWorker = this.worker;
+          if (!commandWorker) {
+            rejectShellCommand('The Pi runtime is not ready to run a shell command.');
+            return;
+          }
+          const fileCapture = this.reserveTurnFileCapture(commandWorker);
+          if (fileCapture && !(await this.waitForTurnFileBaseline(fileCapture))) this.clearTurnFileCapture(commandWorker);
+          if (commandWorker !== this.worker) {
+            rejectShellCommand('The Pi runtime changed before the command could start.');
+            return;
+          }
+          commandWorker.postMessage({
+            type: 'runShellCommand',
+            command: shellCommand.command,
+            excludeFromContext: shellCommand.excludeFromContext,
+          });
+          return;
+        }
+        const text = rawText.slice(0, 100_000);
         const promptText = text || (attachments.some((item) => item.image)
           ? 'Please inspect the attached image.'
           : attachments.some((item) => item.context) ? 'Please inspect the attached context.' : '');

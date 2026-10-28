@@ -432,6 +432,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .message-row.custom-message .message-role, .message-row.custom-entry .message-role { color: var(--accent); }
 .message-role { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.03em; }
 .message-content { min-width: 0; max-width: 72ch; overflow-wrap: anywhere; line-height: 1.58; }
+.bash-command, .bash-output { max-width: 100%; margin: 0; padding: 7px 9px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; color: var(--vscode-editor-foreground, var(--text)); background: var(--vscode-textCodeBlock-background, var(--surface-raised)); font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 11px); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bash-command { color: var(--vscode-textPreformat-foreground, var(--text)); }
+.bash-output { max-height: min(340px, 48vh); }
+.bash-command-status { max-width: 100%; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; overflow-wrap: anywhere; }
 .thinking-block { min-width: 0; margin: 0 0 8px; color: var(--muted); }
 .thinking-block > summary { width: max-content; max-width: 100%; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; cursor: pointer; }
 .thinking-block[open] > summary { margin-bottom: 6px; color: var(--text); }

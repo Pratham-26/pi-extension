@@ -59,6 +59,8 @@ const state = {
   hasSession: false,
   switchingSession: false,
   busy: false,
+  shellCommandPending: false,
+  liveShellMessage: undefined,
   stopAllowed: true,
   streamIndex: -1,
   model: '',
@@ -728,9 +730,9 @@ function updateControls() {
   const hasText = Boolean(ui.prompt.value.trim() || state.attachments.length || state.pinnedFile);
   const hasQueuedWork = state.queue.steering.length + state.queue.followUp.length > 0;
   ui.draftsToggle.disabled = !state.savedDraftsReady;
-  ui.send.disabled = !state.hasWorkspace || !hasText;
+  ui.send.disabled = !state.hasWorkspace || !hasText || state.shellCommandPending;
   ui.saveDraft.disabled = !state.savedDraftsReady || Boolean(state.savedDraftSaveRequestId) || (!ui.prompt.value.trim() && !state.attachments.length);
-  ui.prompt.disabled = !state.hasWorkspace || state.switchingSession;
+  ui.prompt.disabled = !state.hasWorkspace || state.switchingSession || state.shellCommandPending;
   ui.extensionEditorView.tabIndex = state.hasWorkspace && !state.switchingSession ? 0 : -1;
   ui.extensionEditorView.setAttribute('aria-disabled', String(!state.hasWorkspace || state.switchingSession));
   ui.stop.hidden = !state.busy || !state.stopAllowed;
@@ -1691,6 +1693,45 @@ function renderTurnFileSummaries() {
   }
 }
 
+function bashExecutionStatusText(message) {
+  let text = message.pending
+    ? 'Running'
+    : message.cancelled
+      ? 'Cancelled'
+      : typeof message.exitCode === 'number' ? `Exited with code ${message.exitCode}` : 'Finished';
+  if (message.truncated) text += ' · Earlier output omitted';
+  text += message.excludeFromContext ? ' · Excluded from the next Pi prompt' : ' · Included in the next Pi prompt';
+  if (typeof message.fullOutputPath === 'string' && message.fullOutputPath) text += ` · Full output: ${message.fullOutputPath}`;
+  return text;
+}
+
+function renderBashExecutionMessage(message, messageIndex) {
+  const row = document.createElement('article');
+  row.className = 'message-row bash-execution';
+  row.dataset.messageIndex = String(messageIndex);
+  if (typeof message.entryId === 'string') row.dataset.entryId = message.entryId;
+
+  const role = document.createElement('div');
+  role.className = 'message-role';
+  role.textContent = 'COMMAND';
+
+  const command = document.createElement('pre');
+  command.className = 'bash-command';
+  command.textContent = String(message.command || '');
+  row.append(role, command);
+
+  const output = document.createElement('pre');
+  output.className = 'bash-output';
+  output.textContent = String(message.output || (message.pending ? 'Running…' : '(no output)'));
+  row.append(output);
+
+  const status = document.createElement('div');
+  status.className = 'bash-command-status';
+  status.textContent = bashExecutionStatusText(message);
+  row.append(status);
+  return row;
+}
+
 function renderMessages(shouldFollow = true) {
   const nearBottom = ui.messageArea.scrollHeight - ui.messageArea.scrollTop - ui.messageArea.clientHeight < 80;
   ui.messageList.replaceChildren();
@@ -1736,6 +1777,10 @@ function renderMessages(shouldFollow = true) {
         node.dataset.messageIndex = String(messageIndex);
         ui.messageList.append(node);
       }
+      continue;
+    }
+    if (message.role === 'bashExecution') {
+      ui.messageList.append(renderBashExecutionMessage(message, messageIndex));
       continue;
     }
     if (message.role === 'custom-message' || message.role === 'custom-entry') {
@@ -2615,7 +2660,9 @@ function updateChatSearch(moveToCurrent = false) {
       if (!isTranscriptMessageVisible(message)) return;
       const content = message.role === 'tool' && message.node instanceof HTMLElement
         ? message.node.textContent || ''
-        : `${message.text || ''}\n${message.thinking || ''}\n${message.context || ''}`;
+        : message.role === 'bashExecution'
+          ? `${message.command || ''}\n${message.output || ''}`
+          : `${message.text || ''}\n${message.thinking || ''}\n${message.context || ''}`;
       if (content.toLocaleLowerCase().includes(query)) state.chatSearchHits.push(index);
     });
   }
@@ -2949,8 +2996,40 @@ function closeHistory() {
 
 function sendPrompt(value = ui.prompt.value) {
   const text = String(value || '').trim();
+  const shellPrefix = text.startsWith('!');
+  const shellCommand = shellPrefix ? {
+    command: text.slice(text.startsWith('!!') ? 2 : 1).trim(),
+    excludeFromContext: text.startsWith('!!'),
+  } : undefined;
   const attachments = [...state.attachments, ...(state.pinnedFile ? [{ ...state.pinnedFile }] : [])];
   if ((!text && !attachments.length) || !state.hasWorkspace) return;
+  if (state.shellCommandPending) return;
+  if (shellCommand) {
+    if (!shellCommand.command) {
+      showNotice('Enter a command after !.', true);
+      return;
+    }
+    if (shellCommand.command.length > 16_000) {
+      showNotice('Shell commands are limited to 16,000 characters.', true);
+      return;
+    }
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(shellCommand.command)) {
+      showNotice('The shell command contains unsupported control characters.', true);
+      return;
+    }
+    if (state.busy || state.queue.steering.length + state.queue.followUp.length > 0) {
+      showNotice('Wait for Pi to finish and clear queued work before running a shell command.', true);
+      return;
+    }
+    if (attachments.length) {
+      showNotice('Remove attachments before running a shell command.', true);
+      return;
+    }
+    state.shellCommandPending = true;
+    updateControls();
+    post('send', { text, attachments: [], deliverAs: 'followUp' });
+    return;
+  }
   resumeNotificationAudio();
   const promptText = text || (attachments.some((item) => item.image)
     ? 'Please inspect the attached image.'
@@ -4773,6 +4852,9 @@ function beginAssistantMessage() {
 
 function applySnapshot(data) {
   const nextSessionPath = data.sessionFile || '';
+  if (state.liveShellMessage?.sessionPath && state.liveShellMessage.sessionPath !== nextSessionPath) {
+    state.liveShellMessage = undefined;
+  }
   if (nextSessionPath !== state.sessionPath) {
     let savedDraftsChanged = false;
     state.promptSuggestions = undefined;
@@ -4810,6 +4892,15 @@ function applySnapshot(data) {
     : [];
   state.model = data.model || '';
   const messages = Array.isArray(data.messages) ? [...data.messages] : [];
+  const liveShellMessage = state.liveShellMessage;
+  if (liveShellMessage) {
+    const recorded = messages.some((message) => message.role === 'bashExecution'
+      && message.command === liveShellMessage.command
+      && Number(message.timestamp) >= liveShellMessage.startedAt
+      && (message.excludeFromContext === true) === liveShellMessage.excludeFromContext);
+    if (recorded) state.liveShellMessage = undefined;
+    else messages.push(liveShellMessage);
+  }
   const toolMessages = state.toolMessagesBySession.get(state.sessionPath) || [];
   const recordedToolCalls = new Set(messages.filter((message) => message.role === 'tool')
     .map((message) => typeof message.toolCallId === 'string' ? message.toolCallId : '')
@@ -5489,11 +5580,60 @@ window.addEventListener('message', (event) => {
       if (card) updateToolRendererCard(card, toolMessage, `${toolMessage.isError ? 'Failed' : 'Finished'} ${String(toolMessage.toolName || 'tool').slice(0, 128)}`);
       break;
     }
+    case 'shell-command-rejected':
+      state.shellCommandPending = false;
+      updateControls();
+      showNotice(data.message || 'The shell command could not be started.', true);
+      break;
+    case 'bash-execution-update': {
+      const live = state.liveShellMessage;
+      if (!live || live.commandId !== data.id || typeof data.delta !== 'string') break;
+      const combined = `${live.output || ''}${data.delta}`;
+      live.output = combined.length > 100_000 ? combined.slice(-100_000) : combined;
+      if (combined.length > 100_000) live.truncated = true;
+      const messageIndex = state.messages.indexOf(live);
+      const row = messageIndex >= 0
+        ? ui.messageList.querySelector(`[data-message-index="${messageIndex}"]`)
+        : null;
+      const output = row?.querySelector('.bash-output');
+      const status = row?.querySelector('.bash-command-status');
+      if (output && status) {
+        output.textContent = live.output;
+        status.textContent = bashExecutionStatusText(live);
+      } else {
+        renderMessages();
+      }
+      break;
+    }
     case 'run-started':
+      if (data.shellCommand === true && typeof data.command === 'string') {
+        state.shellCommandPending = false;
+        state.liveShellMessage = {
+          role: 'bashExecution',
+          command: data.command.slice(0, 16_000),
+          output: '',
+          pending: true,
+          commandId: typeof data.commandId === 'string' ? data.commandId.slice(0, 128) : '',
+          excludeFromContext: data.excludeFromContext === true,
+          startedAt: Date.now(),
+          sessionPath: typeof data.sessionPath === 'string' ? data.sessionPath : state.sessionPath,
+        };
+        ui.prompt.value = '';
+        ui.prompt.style.height = 'auto';
+        syncPromptToWorker();
+        rememberDraft();
+        renderAttachments();
+        state.messages.push(state.liveShellMessage);
+        renderMessages();
+      }
       state.showWorking = true;
       setBusy(true, data.activity || 'Pi is working', data.canStop !== false);
       break;
     case 'run-finished':
+      if (data.shellCommand === true) {
+        state.shellCommandPending = false;
+        if (state.liveShellMessage) state.liveShellMessage.pending = false;
+      }
       if (data.notificationSound === true) playNotificationSound();
       if (state.streamIndex >= 0 && state.messages[state.streamIndex]) state.messages[state.streamIndex].streaming = false;
       state.streamIndex = -1;
@@ -5504,7 +5644,9 @@ window.addEventListener('message', (event) => {
       renderMessages();
       break;
     case 'runtime-error':
+      state.shellCommandPending = false;
       showNotice(data.message || 'Pi could not complete the request.', true);
+      updateControls();
       break;
     case 'notice':
       showNotice(data.message || '', Boolean(data.isError));
@@ -5798,12 +5940,15 @@ function dismissComposerPopoversFromOutside(event) {
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
   const target = event.target;
   const isInside = (element) => {
-    // Webview events can be retargeted at an embedding boundary. The DOM path
-    // can also retain the original target during pointer capture. For trusted
-    // pointer input, its final position is the reliable outside-click signal.
+    // Webview events can be retargeted at an embedding boundary, and pointer
+    // capture can keep the original element in the DOM path after the pointer
+    // has moved away. Hit-test the final viewport position before trusting that
+    // path so a click outside always dismisses the menu.
     const hasPointerPosition = event.type.startsWith('pointer') || event.type === 'mousedown'
       || (event.type === 'click' && event.detail > 0);
-    if (event.isTrusted && hasPointerPosition && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+    if (hasPointerPosition && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+      const hit = document.elementFromPoint(event.clientX, event.clientY);
+      if (hit) return hit === element || element.contains(hit);
       const bounds = element.getBoundingClientRect();
       return event.clientX >= bounds.left && event.clientX <= bounds.right
         && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
