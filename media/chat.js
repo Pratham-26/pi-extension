@@ -61,6 +61,8 @@ const state = {
   busy: false,
   shellCommandPending: false,
   liveShellMessage: undefined,
+  shellQueue: [],
+  shellQueueDispatchingId: '',
   stopAllowed: true,
   streamIndex: -1,
   model: '',
@@ -3017,10 +3019,6 @@ function sendPrompt(value = ui.prompt.value) {
       showNotice('The shell command contains unsupported control characters.', true);
       return;
     }
-    if (state.busy || state.queue.steering.length + state.queue.followUp.length > 0) {
-      showNotice('Wait for Pi to finish and clear queued work before running a shell command.', true);
-      return;
-    }
     if (attachments.length) {
       showNotice('Remove attachments before running a shell command.', true);
       return;
@@ -4089,15 +4087,19 @@ function renderExtensionCommandCompletions(data) {
 
 function renderQueue() {
   ui.queueList.replaceChildren();
-  if (!state.queue.steering.length && !state.queue.followUp.length) {
-    ui.activityText.textContent = 'Pi is working';
-  } else {
-    const count = state.queue.steering.length + state.queue.followUp.length;
-    ui.activityText.textContent = `Pi is working · ${count} queued`;
-  }
-  const total = state.queue.steering.length + state.queue.followUp.length;
+  const piQueueCount = state.queue.steering.length + state.queue.followUp.length;
+  const shellQueueCount = state.shellQueue.length;
+  const total = piQueueCount + shellQueueCount;
+  ui.activityText.textContent = state.busy
+    ? (total ? `Pi is working · ${total} queued` : 'Pi is working')
+    : (total ? `${total} queued for this session` : '');
   ui.queueToggle.textContent = `Queue${total ? ` · ${total}` : ''}`;
+  ui.queueToggle.hidden = total === 0;
   ui.queueEmpty.hidden = total > 0;
+  if (total === 0 && !ui.queuePanel.hidden) {
+    ui.queuePanel.hidden = true;
+    ui.queueToggle.setAttribute('aria-expanded', 'false');
+  }
   for (const [kind, items, label] of [
     ['steering', state.queue.steering, 'Steer during this run'],
     ['followUp', state.queue.followUp, 'Send after this run'],
@@ -4151,6 +4153,31 @@ function renderQueue() {
         replaceQueue(next);
       });
       actions.append(up, down, edit, remove);
+      row.append(content, actions);
+      ui.queueList.append(row);
+    });
+  }
+  if (state.shellQueue.length) {
+    const heading = document.createElement('div');
+    heading.className = 'queue-group-heading';
+    heading.textContent = 'Shell commands · run in order when Pi is idle';
+    ui.queueList.append(heading);
+    state.shellQueue.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'queued-item queued-shell-command';
+      const content = document.createElement('div');
+      content.className = 'queued-item-text';
+      content.textContent = `${item.excludeFromContext ? '!! ' : '! '}${item.command}`;
+      const actions = document.createElement('div');
+      actions.className = 'queued-item-actions';
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'session-action danger-action';
+      remove.textContent = 'Remove';
+      remove.title = item.id === state.shellQueueDispatchingId ? 'This command is starting' : 'Remove queued shell command';
+      remove.disabled = item.id === state.shellQueueDispatchingId;
+      remove.addEventListener('click', () => post('removeShellCommandFromQueue', { commandId: item.id }));
+      actions.append(remove);
       row.append(content, actions);
       ui.queueList.append(row);
     });
@@ -5244,6 +5271,28 @@ window.addEventListener('message', (event) => {
       };
       renderQueue();
       break;
+    case 'shell-command-queue':
+      state.shellQueue = Array.isArray(data.commands) ? data.commands.slice(0, 100).flatMap((item) => {
+        if (!item || typeof item !== 'object' || typeof item.id !== 'string' || !/^[a-f0-9]{32}$/.test(item.id)
+          || typeof item.command !== 'string' || item.command.length > 16_000) return [];
+        return [{ id: item.id, command: item.command, excludeFromContext: item.excludeFromContext === true }];
+      }) : [];
+      state.shellQueueDispatchingId = typeof data.dispatchingId === 'string' && /^[a-f0-9]{32}$/.test(data.dispatchingId)
+        ? data.dispatchingId
+        : '';
+      renderQueue();
+      break;
+    case 'shell-command-accepted':
+      state.shellCommandPending = false;
+      ui.prompt.value = '';
+      ui.prompt.style.height = 'auto';
+      syncPromptToWorker();
+      rememberDraft();
+      renderAttachments();
+      updateControls();
+      if (data.queued === true) showNotice('Shell command queued for this session.');
+      focusComposer();
+      break;
     case 'extension-ui-request':
       if (data.notificationSound === true) playNotificationSound();
       showExtensionDialog(data);
@@ -5619,11 +5668,6 @@ window.addEventListener('message', (event) => {
           startedAt: Date.now(),
           sessionPath: typeof data.sessionPath === 'string' ? data.sessionPath : state.sessionPath,
         };
-        ui.prompt.value = '';
-        ui.prompt.style.height = 'auto';
-        syncPromptToWorker();
-        rememberDraft();
-        renderAttachments();
         state.messages.push(state.liveShellMessage);
         renderMessages();
       }
@@ -5736,7 +5780,10 @@ el('close-queue').addEventListener('click', () => {
   ui.queuePanel.hidden = true;
   el('queue-toggle').setAttribute('aria-expanded', 'false');
 });
-el('clear-queue').addEventListener('click', () => replaceQueue({ steering: [], followUp: [] }));
+el('clear-queue').addEventListener('click', () => {
+  replaceQueue({ steering: [], followUp: [] });
+  post('clearShellCommandQueue');
+});
 ui.branchHistoryToggle.addEventListener('click', () => {
   const open = ui.branchPanel.hidden;
   ui.branchPanel.hidden = !open;

@@ -258,8 +258,16 @@ export default function (pi) {
   const newSessionToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
     && Array.isArray(message.newSessionToolNames) && message.newSessionToolNames.includes('read')
     && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'new-session tool defaults');
+  const initializedSessionPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
+    && typeof message.sessionFile === 'string', 'new Pi session');
+  const initializedSessionReadyPromise = waitForWorkerMessage((message) => message?.type === 'session-ready', 'Pi session readiness');
   worker.postMessage({ type: 'initializeSession' });
-  const [discoveredOptions, newSessionToolOptions] = await Promise.all([optionsPromise, newSessionToolOptionsPromise]);
+  const [discoveredOptions, newSessionToolOptions, initializedSession, initializedSessionReady] = await Promise.all([
+    optionsPromise,
+    newSessionToolOptionsPromise,
+    initializedSessionPromise,
+    initializedSessionReadyPromise,
+  ]);
   assert.equal(discoveredOptions.providers.find((provider) => provider.id === 'pi-chat-smoke')?.configured, true,
     'the temporary Pi configuration should provide a local test credential');
   assert.deepEqual(newSessionToolOptions.activeTools, ['read'], 'the configured tool set should apply to new smoke sessions');
@@ -280,6 +288,20 @@ export default function (pi) {
     'an explicitly listed theme path should be checked even when automatic theme discovery is disabled');
   assert.ok(!discoveredOptions.resourceDiagnostics.some((item) => item.resource === 'Theme' && item.path === agentThemePath),
     'disabling theme discovery should skip themes from Pi’s default themes directory');
+
+  const mismatchedShellCommandId = 'd'.repeat(32);
+  const mismatchedShellCommandPromise = waitForWorkerMessage((message) => message?.type === 'shell-command-rejected'
+    && message.commandId === mismatchedShellCommandId, 'session-bound shell-command rejection');
+  worker.postMessage({
+    type: 'runShellCommand',
+    commandId: mismatchedShellCommandId,
+    expectedSessionPath: join(projectPath, 'wrong-session.jsonl'),
+    command: 'PI_CHAT_USER_BASH_SMOKE wrong-session',
+    excludeFromContext: false,
+  });
+  const mismatchedShellCommand = await mismatchedShellCommandPromise;
+  assert.match(mismatchedShellCommand.message, /active session changed/i,
+    'Pi should reject a queued shell command when its session binding does not match');
 
   const sessionListRequestId = 'b'.repeat(32);
   const sessionListPromise = waitForWorkerMessage((message) => message?.type === 'sessions'
@@ -310,7 +332,12 @@ export default function (pi) {
         && entry.command === shellCase.command
         && entry.output.includes(shellCase.output)
         && entry.excludeFromContext === shellCase.excludeFromContext), 'persisted Pi shell-command result');
-    worker.postMessage({ type: 'runShellCommand', command: shellCase.command, excludeFromContext: shellCase.excludeFromContext });
+    worker.postMessage({
+      type: 'runShellCommand',
+      expectedSessionPath: initializedSession.sessionFile,
+      command: shellCase.command,
+      excludeFromContext: shellCase.excludeFromContext,
+    });
     const [shellStarted, shellOutput, shellFinished, shellSnapshot] = await Promise.all([
       shellStartedPromise,
       shellOutputPromise,

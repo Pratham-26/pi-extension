@@ -29,6 +29,8 @@ type WorkerInput = {
   type: string;
   text?: string;
   command?: string;
+  commandId?: string;
+  expectedSessionPath?: string;
   excludeFromContext?: boolean;
   path?: string;
   query?: string;
@@ -324,6 +326,7 @@ let configuredPiResources = new Map<string, ConfiguredPiResource>();
 let unsubscribe: (() => void) | undefined;
 let busy = false;
 let shellCommandRunning = false;
+let sessionOpening = false;
 let compacting = false;
 let reloadingResources = false;
 let authenticatingProvider = false;
@@ -4218,8 +4221,15 @@ async function handle(input: WorkerInput): Promise<void> {
         const activePath = session?.sessionFile;
         mcpEnabled = input.enabled;
         if (activePath) {
+          sessionOpening = true;
           send('session-opening');
-          const reopened = await createSession(activePath);
+          let reopened = false;
+          try {
+            reopened = await createSession(activePath);
+          } finally {
+            sessionOpening = false;
+            send('session-ready');
+          }
           if (!reopened) {
             mcpEnabled = previous;
             send('mcp-setting-failed', { requestId, enabled: input.enabled, message: 'The active Pi session could not be reopened with the selected MCP setting.' });
@@ -4281,13 +4291,25 @@ async function handle(input: WorkerInput): Promise<void> {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
           return;
         }
+        sessionOpening = true;
         send('session-opening');
-        await createSession(undefined, true, parseDefaultModelPreset(input.defaultPreset));
+        try {
+          await createSession(undefined, true, parseDefaultModelPreset(input.defaultPreset));
+        } finally {
+          sessionOpening = false;
+          send('session-ready');
+        }
         return;
       case 'initializeSession':
         if (busy || reloadingResources || authenticatingProvider || session) return;
+        sessionOpening = true;
         send('session-opening');
-        await createSession();
+        try {
+          await createSession();
+        } finally {
+          sessionOpening = false;
+          send('session-ready');
+        }
         return;
       case 'cloneSession': {
         if (busy || authenticatingProvider || !session?.sessionManager) return;
@@ -4302,17 +4324,23 @@ async function handle(input: WorkerInput): Promise<void> {
           send('notice', { message: 'Pi could not create a copy of this session.' });
           return;
         }
+        sessionOpening = true;
         send('session-opening');
-        await createSession(clonedPath);
-        if (carriedBookmarks.length && session?.sessionFile === clonedPath && session.sessionManager) {
-          const branchIds = new Set(session.sessionManager.buildContextEntries()
-            .filter((entry) => entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant'))
-            .map((entry) => entry.id));
-          const inherited = carriedBookmarks.filter((entryId) => branchIds.has(entryId));
-          if (inherited.length) {
-            session.sessionManager.appendCustomEntry('pi-chat.bookmarks', { entryIds: inherited });
-            snapshot();
+        try {
+          await createSession(clonedPath);
+          if (carriedBookmarks.length && session?.sessionFile === clonedPath && session.sessionManager) {
+            const branchIds = new Set(session.sessionManager.buildContextEntries()
+              .filter((entry) => entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant'))
+              .map((entry) => entry.id));
+            const inherited = carriedBookmarks.filter((entryId) => branchIds.has(entryId));
+            if (inherited.length) {
+              session.sessionManager.appendCustomEntry('pi-chat.bookmarks', { entryIds: inherited });
+              snapshot();
+            }
           }
+        } finally {
+          sessionOpening = false;
+          send('session-ready');
         }
         return;
       }
@@ -4326,8 +4354,14 @@ async function handle(input: WorkerInput): Promise<void> {
           return;
         }
         if (input.path) {
+          sessionOpening = true;
           send('session-opening');
-          await createSession(input.path);
+          try {
+            await createSession(input.path);
+          } finally {
+            sessionOpening = false;
+            send('session-ready');
+          }
         }
         return;
       case 'setModel': {
@@ -4644,17 +4678,23 @@ async function handle(input: WorkerInput): Promise<void> {
         const carriedBookmarks = getSessionBookmarks();
         const branchedPath = session.sessionManager.createBranchedSession(input.entryId);
         if (!branchedPath) throw new Error('Pi could not create a branch from that message.');
+        sessionOpening = true;
         send('session-opening');
-        await createSession(branchedPath);
-        if (carriedBookmarks.length && session?.sessionFile === branchedPath && session.sessionManager) {
-          const branchIds = new Set(session.sessionManager.buildContextEntries()
-            .filter((entry) => entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant'))
-            .map((entry) => entry.id));
-          const inherited = carriedBookmarks.filter((entryId) => branchIds.has(entryId));
-          if (inherited.length) {
-            session.sessionManager.appendCustomEntry('pi-chat.bookmarks', { entryIds: inherited });
-            snapshot();
+        try {
+          await createSession(branchedPath);
+          if (carriedBookmarks.length && session?.sessionFile === branchedPath && session.sessionManager) {
+            const branchIds = new Set(session.sessionManager.buildContextEntries()
+              .filter((entry) => entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant'))
+              .map((entry) => entry.id));
+            const inherited = carriedBookmarks.filter((entryId) => branchIds.has(entryId));
+            if (inherited.length) {
+              session.sessionManager.appendCustomEntry('pi-chat.bookmarks', { entryIds: inherited });
+              snapshot();
+            }
           }
+        } finally {
+          sessionOpening = false;
+          send('session-ready');
         }
         return;
       }
@@ -4810,16 +4850,52 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'runShellCommand': {
-        if (typeof input.command !== 'string') throw new Error('The shell command is invalid.');
-        const commandError = validatePiShellCommand(input.command);
-        if (commandError) throw new Error(commandError);
-        if (busy || shellCommandRunning || session?.isStreaming) {
-          throw new Error('Wait for Pi to finish before running a shell command.');
+        const commandId = typeof input.commandId === 'string' && /^[a-f0-9]{32}$/.test(input.commandId)
+          ? input.commandId
+          : randomUUID().replaceAll('-', '');
+        const reject = (message: string, retryable = false) => send('shell-command-rejected', {
+          commandId,
+          message,
+          retryable,
+        });
+        if (typeof input.command !== 'string') {
+          reject('The shell command is invalid.');
+          return;
         }
-        if (!session) await createSession();
-        if (!session?.executeBash) throw new Error('This Pi runtime does not support direct shell commands.');
+        const commandError = validatePiShellCommand(input.command);
+        if (commandError) {
+          reject(commandError);
+          return;
+        }
+        if (sessionOpening) {
+          reject('Wait for Pi to finish switching sessions before running a shell command.', true);
+          return;
+        }
+        if (busy || shellCommandRunning || session?.isStreaming) {
+          reject('Wait for Pi to finish before running a shell command.', true);
+          return;
+        }
+        const expectedSessionPath = input.expectedSessionPath;
+        if (typeof expectedSessionPath !== 'string' || expectedSessionPath.length > 4096
+          || !isAbsolute(expectedSessionPath) || /[\u0000-\u001f\u007f]/.test(expectedSessionPath)) {
+          reject('The queued shell command has no valid session binding.');
+          return;
+        }
+        if (!session?.sessionFile || !isAbsolute(session.sessionFile)
+          || resolve(session.sessionFile) !== resolve(expectedSessionPath) && (process.platform !== 'win32'
+            || resolve(session.sessionFile).toLocaleLowerCase() !== resolve(expectedSessionPath).toLocaleLowerCase())) {
+          reject('Pi’s active session changed before the queued shell command could start.');
+          return;
+        }
+        if (!session?.executeBash) {
+          reject('This Pi runtime does not support direct shell commands.');
+          return;
+        }
+        if (!session.extensionRunner?.emitUserBash) {
+          reject('This Pi runtime cannot apply configured shell-command handlers.');
+          return;
+        }
 
-        const commandId = randomUUID();
         const command = input.command;
         const excludeFromContext = input.excludeFromContext === true;
         shellCommandRunning = true;
@@ -4834,9 +4910,6 @@ async function handle(input: WorkerInput): Promise<void> {
           sessionPath: session.sessionFile,
         });
         try {
-          if (!session.extensionRunner?.emitUserBash) {
-            throw new Error('This Pi runtime cannot apply configured shell-command handlers.');
-          }
           const eventResult = await session.extensionRunner.emitUserBash({
             type: 'user_bash',
             command,

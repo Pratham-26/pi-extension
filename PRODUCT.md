@@ -28,11 +28,12 @@ The extension runs inside VS Code against the currently open workspace.
 
 ## Capabilities and Constraints
 
-- The current build includes model search and refresh, session/model controls, workspace references, transcript search, prompt history/drafts, editable queues, notifications, and session exports.
+- The current build includes model search and refresh, session/model controls, workspace references, transcript search, prompt history/drafts, editable message queues, queued `!`/`!!` shell commands, notifications, and session exports.
 - Feature coverage is tracked in `docs/feature-coverage.md`.
 - Voice dictation is out of scope.
 - Use the official Pi SDK and the user's existing Pi configuration and credentials.
-- Do not add a hosted account, proxy, telemetry, or a direct-shell composer command.
+- Do not add a hosted account, proxy, telemetry, or a shell execution path that bypasses Pi's configured `user_bash` handlers.
+- Route explicit `!` and `!!` composer commands through Pi's configured `user_bash` handler and queue them for the session where they were submitted.
 - Session context and Pi resources resolve from the active workspace and the user's existing Pi setup.
 
 ## Evidence on Hand

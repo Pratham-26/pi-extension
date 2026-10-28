@@ -8,6 +8,7 @@ import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { isPiPackageSource } from './package-source';
 import { loadRecommendedPiPackages } from './package-recommendations';
 import { parsePiShellCommandInput, validatePiShellCommand } from './shell-command';
+import { SessionShellCommandQueue, type QueuedPiShellCommand } from './shell-command-queue';
 import {
   normalizeNotificationHookCommand,
   normalizeNotificationHookEvents,
@@ -154,6 +155,12 @@ type TurnFileCapture = {
   workspacePath: string;
   sessionPath: string;
   baseline: Promise<TurnFileBaseline | undefined>;
+};
+
+type ShellCommandDispatch = {
+  worker: Worker;
+  sessionKey: string;
+  commandId: string;
 };
 
 type PendingSessionListRequest = {
@@ -561,6 +568,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private turnFileUndoPending?: string;
   private turnFileUndoTimer?: NodeJS.Timeout;
   private queuedWorkCount = 0;
+  private readonly shellCommandQueues = new SessionShellCommandQueue();
+  private shellCommandDispatch?: ShellCommandDispatch;
+  private shellCommandDrainWorker?: Worker;
+  private runtimeSessionOpening = false;
   private runtimeActivity = 'Working in Pi';
   private sessionListForRunningStatus: Array<Record<string, unknown>> = [];
   private pendingSessionListRequests = new Map<string, PendingSessionListRequest>();
@@ -1390,6 +1401,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   restartRuntime(): void {
     this.runtimeStartGeneration += 1;
     const previous = this.worker;
+    this.discardQueuedShellCommands('the Pi runtime restarted');
     this.clearTurnFileCapture();
     this.cancelPendingSessionListRequests(previous);
     this.workerAgentDirSetting = '';
@@ -1402,6 +1414,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = undefined;
     this.runtimeBusy = false;
     this.queuedWorkCount = 0;
+    this.runtimeSessionOpening = false;
     this.runtimeActivity = '';
     this.sessionListForRunningStatus = [];
     this.clearRunningSessionLease();
@@ -1516,6 +1529,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const previous = this.worker;
+    this.discardQueuedShellCommands('the workspace changed');
     this.clearTurnFileCapture(previous);
     this.cancelPendingSessionListRequests(previous);
     if (previous) this.cancelProviderAuthPrompts(previous);
@@ -1523,6 +1537,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = undefined;
     this.workerWorkspace = undefined;
     this.queuedWorkCount = 0;
+    this.runtimeSessionOpening = false;
     this.runtimeActivity = '';
     this.sessionListForRunningStatus = [];
     this.clearRunningSessionLease();
@@ -1649,10 +1664,22 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.finishPendingSessionListRequest(message.requestId, worker, undefined);
       }
       else if (message.type === 'notice' && message.isError === true) this.recordDiagnostic('Pi operation error');
+      if (message.type === 'session-opening') {
+        this.runtimeSessionOpening = true;
+        this.queuedWorkCount = 0;
+      } else if (message.type === 'session-ready') {
+        this.runtimeSessionOpening = false;
+        this.queuedWorkCount = 0;
+        this.postShellCommandQueue();
+        void this.drainQueuedShellCommand(worker);
+      }
       if (message.type === 'run-started') {
         this.runtimeBusy = true;
         this.runtimeActivity = this.safeRunningActivity(message.activity);
         this.refreshRunningSessionLease();
+        if (message.shellCommand === true && typeof message.commandId === 'string') {
+          this.handleShellCommandStarted(worker, message.commandId);
+        }
       } else if (message.type === 'run-finished') {
         this.runtimeBusy = false;
         this.runtimeActivity = this.queuedWorkCount > 0 ? `Queued work (${this.queuedWorkCount})` : '';
@@ -1667,9 +1694,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.queuedWorkCount = Math.min(5000, steering + followUp);
         if (!this.runtimeBusy) this.runtimeActivity = this.queuedWorkCount > 0 ? `Queued work (${this.queuedWorkCount})` : '';
         this.refreshRunningSessionLease();
+        void this.drainQueuedShellCommand(worker);
+      }
+      if (message.type === 'shell-command-rejected') {
+        this.handleShellCommandRejected(worker, message);
+        return;
       }
       if (message.type === 'run-finished') void this.refreshGitChanges();
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
+        this.runtimeSessionOpening = false;
         if (this.activeSessionPath && this.normalizeSessionPath(this.activeSessionPath) !== this.normalizeSessionPath(message.sessionFile)) {
           this.clearTurnFileUndo();
         }
@@ -1681,6 +1714,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.activeSessionPath = message.sessionFile;
         this.refreshRunningSessionLease();
         this.post(message);
+        this.postShellCommandQueue();
+        void this.drainQueuedShellCommand(worker);
       } else if (message.type === 'run-finished') {
         this.finishTurnFileCapture(worker);
         const notifications = vscode.workspace.getConfiguration('piChat.notifications');
@@ -1698,6 +1733,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           ...message,
           notificationSound: message.shellCommand !== true && !message.providerLogin && hidden && notifications.get<boolean>('sound', false),
         });
+        void this.drainQueuedShellCommand(worker);
       } else if (message.type === 'provider-auth-prompt') {
         void this.handleProviderAuthPrompt(message, worker);
       } else if (message.type === 'provider-auth-prompt-cancel') {
@@ -2265,26 +2301,30 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             rejectShellCommand('Remove attachments before running a shell command.');
             return;
           }
-          if (this.runtimeBusy || this.queuedWorkCount > 0) {
-            rejectShellCommand('Wait for Pi to finish and clear queued work before running a shell command.');
-            return;
-          }
           const commandWorker = this.worker;
           if (!commandWorker) {
             rejectShellCommand('The Pi runtime is not ready to run a shell command.');
             return;
           }
-          const fileCapture = this.reserveTurnFileCapture(commandWorker);
-          if (fileCapture && !(await this.waitForTurnFileBaseline(fileCapture))) this.clearTurnFileCapture(commandWorker);
-          if (commandWorker !== this.worker) {
-            rejectShellCommand('The Pi runtime changed before the command could start.');
+          const sessionKey = this.activeShellCommandSessionKey();
+          if (!sessionKey) {
+            rejectShellCommand('Wait for Pi to open a session before running a shell command.');
             return;
           }
-          commandWorker.postMessage({
-            type: 'runShellCommand',
+          const queuedCommand: QueuedPiShellCommand = {
+            id: randomBytes(16).toString('hex'),
             command: shellCommand.command,
             excludeFromContext: shellCommand.excludeFromContext,
-          });
+          };
+          if (!this.shellCommandQueues.enqueue(sessionKey, queuedCommand)) {
+            rejectShellCommand('This session already has the maximum number of queued shell commands. Remove one and try again.');
+            return;
+          }
+          const queued = this.runtimeBusy || this.queuedWorkCount > 0 || this.runtimeSessionOpening
+            || this.shellCommandDrainWorker === commandWorker || Boolean(this.shellCommandDispatch);
+          this.postShellCommandQueue(sessionKey);
+          this.post({ type: 'shell-command-accepted', commandId: queuedCommand.id, queued });
+          void this.drainQueuedShellCommand(commandWorker);
           return;
         }
         const text = rawText.slice(0, 100_000);
@@ -2320,6 +2360,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         });
         return;
       }
+      case 'removeShellCommandFromQueue':
+        this.removeQueuedShellCommand(message.commandId);
+        return;
+      case 'clearShellCommandQueue':
+        this.clearQueuedShellCommands();
+        return;
       case 'copyText': {
         if (typeof message.text !== 'string') return;
         if (message.text.length > 100_000) {
@@ -6223,6 +6269,116 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
   }
 
+  private activeShellCommandSessionKey(): string {
+    if (!this.activeSessionPath || this.activeSessionPath.length > 4096
+      || !path.isAbsolute(this.activeSessionPath) || /[\u0000-\u001f\u007f]/.test(this.activeSessionPath)) return '';
+    try {
+      return this.normalizeSessionPath(this.activeSessionPath);
+    } catch {
+      return '';
+    }
+  }
+
+  private postShellCommandQueue(sessionKey = this.activeShellCommandSessionKey()): void {
+    this.post({
+      type: 'shell-command-queue',
+      commands: sessionKey ? this.shellCommandQueues.list(sessionKey) : [],
+      dispatchingId: this.shellCommandDispatch?.sessionKey === sessionKey ? this.shellCommandDispatch.commandId : '',
+    });
+  }
+
+  private handleShellCommandStarted(worker: Worker, commandId: string): void {
+    const dispatch = this.shellCommandDispatch;
+    if (!dispatch || dispatch.worker !== worker || dispatch.commandId !== commandId) return;
+    this.shellCommandQueues.remove(dispatch.sessionKey, commandId);
+    this.shellCommandDispatch = undefined;
+    if (dispatch.sessionKey === this.activeShellCommandSessionKey()) this.postShellCommandQueue(dispatch.sessionKey);
+  }
+
+  private handleShellCommandRejected(worker: Worker, message: RuntimeMessage): void {
+    const commandId = typeof message.commandId === 'string' ? message.commandId : '';
+    const dispatch = this.shellCommandDispatch;
+    if (!dispatch || dispatch.worker !== worker || dispatch.commandId !== commandId) return;
+    this.shellCommandDispatch = undefined;
+    if (message.retryable !== true) {
+      this.shellCommandQueues.remove(dispatch.sessionKey, commandId);
+      const error = typeof message.message === 'string' ? message.message.slice(0, 500) : 'Pi could not start the queued shell command.';
+      this.post({ type: 'notice', message: error, isError: true });
+      if (dispatch.sessionKey === this.activeShellCommandSessionKey()) this.postShellCommandQueue(dispatch.sessionKey);
+      void this.drainQueuedShellCommand(worker);
+      return;
+    }
+    if (dispatch.sessionKey === this.activeShellCommandSessionKey()) this.postShellCommandQueue(dispatch.sessionKey);
+  }
+
+  private removeQueuedShellCommand(commandId: unknown): void {
+    const sessionKey = this.activeShellCommandSessionKey();
+    if (!sessionKey || typeof commandId !== 'string' || !/^[a-f0-9]{32}$/.test(commandId)) return;
+    if (this.shellCommandDispatch?.sessionKey === sessionKey && this.shellCommandDispatch.commandId === commandId) return;
+    if (!this.shellCommandQueues.remove(sessionKey, commandId)) return;
+    this.postShellCommandQueue(sessionKey);
+    void this.drainQueuedShellCommand(this.worker);
+  }
+
+  private clearQueuedShellCommands(): void {
+    const sessionKey = this.activeShellCommandSessionKey();
+    if (!sessionKey) return;
+    const dispatchingId = this.shellCommandDispatch?.sessionKey === sessionKey ? this.shellCommandDispatch.commandId : '';
+    for (const item of this.shellCommandQueues.list(sessionKey)) {
+      if (item.id !== dispatchingId) this.shellCommandQueues.remove(sessionKey, item.id);
+    }
+    this.postShellCommandQueue(sessionKey);
+  }
+
+  private discardQueuedShellCommands(reason: string): void {
+    const discarded = this.shellCommandQueues.clearAll();
+    this.shellCommandDispatch = undefined;
+    this.shellCommandDrainWorker = undefined;
+    this.postShellCommandQueue('');
+    if (discarded > 0) {
+      this.post({
+        type: 'notice',
+        message: `${discarded} queued shell command${discarded === 1 ? ' was' : 's were'} discarded because ${reason}.`,
+        isError: true,
+      });
+    }
+  }
+
+  private async drainQueuedShellCommand(worker: Worker | undefined): Promise<void> {
+    if (!worker || worker !== this.worker || this.shellCommandDrainWorker || this.shellCommandDispatch
+      || this.runtimeBusy || this.queuedWorkCount > 0 || this.runtimeSessionOpening) return;
+    const sessionKey = this.activeShellCommandSessionKey();
+    const command = sessionKey ? this.shellCommandQueues.first(sessionKey) : undefined;
+    if (!command) return;
+    this.shellCommandDrainWorker = worker;
+    try {
+      const capture = this.reserveTurnFileCapture(worker);
+      if (capture && !(await this.waitForTurnFileBaseline(capture))) this.clearTurnFileCapture(worker);
+      if (worker !== this.worker || this.runtimeBusy || this.queuedWorkCount > 0 || this.runtimeSessionOpening
+        || this.activeShellCommandSessionKey() !== sessionKey
+        || this.shellCommandQueues.first(sessionKey)?.id !== command.id) return;
+      this.shellCommandDispatch = { worker, sessionKey, commandId: command.id };
+      this.postShellCommandQueue(sessionKey);
+      worker.postMessage({
+        type: 'runShellCommand',
+        commandId: command.id,
+        expectedSessionPath: this.activeSessionPath,
+        command: command.command,
+        excludeFromContext: command.excludeFromContext,
+      });
+    } catch {
+      this.shellCommandQueues.remove(sessionKey, command.id);
+      this.shellCommandDispatch = undefined;
+      this.postShellCommandQueue(sessionKey);
+      this.post({ type: 'notice', message: 'Pi could not start the queued shell command.', isError: true });
+    } finally {
+      if (this.shellCommandDrainWorker === worker) this.shellCommandDrainWorker = undefined;
+      if (worker === this.worker && !this.runtimeBusy && this.queuedWorkCount <= 0 && !this.runtimeSessionOpening) {
+        queueMicrotask(() => void this.drainQueuedShellCommand(worker));
+      }
+    }
+  }
+
   private isKnownSessionPath(value: unknown): value is string {
     if (typeof value !== 'string' || value.length > 4096) return false;
     try {
@@ -6823,10 +6979,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <div id="branch-list" class="session-list"></div>
         <div id="branch-empty" class="session-empty" hidden>No user messages to branch from.</div>
       </aside>
-      <aside id="queue-panel" class="history-panel queue-panel" aria-label="Queued messages" hidden>
-        <div class="history-heading"><span>Queued messages</span><button id="clear-queue" class="text-button" type="button">Clear all</button><button id="close-queue" class="icon-button small" type="button" title="Close" aria-label="Close queued messages">×</button></div>
+      <aside id="queue-panel" class="history-panel queue-panel" aria-label="Queued work" hidden>
+        <div class="history-heading"><span>Queued work</span><button id="clear-queue" class="text-button" type="button">Clear all</button><button id="close-queue" class="icon-button small" type="button" title="Close" aria-label="Close queued work">×</button></div>
         <div id="queue-list" class="session-list"></div>
-        <div id="queue-empty" class="session-empty">No queued messages.</div>
+        <div id="queue-empty" class="session-empty">No queued work.</div>
       </aside>
       <aside id="git-review-panel" class="history-panel git-review-panel" aria-label="Git changes" hidden>
         <div class="history-heading"><span>Git changes</span><div class="git-review-actions"><button id="quote-git-diff-selection" class="text-button" type="button" title="Attach selected lines from the open Git diff">Quote selection</button><button id="refresh-git-changes" class="icon-button small" type="button" title="Refresh Git changes" aria-label="Refresh Git changes">↻</button><button id="close-git-review" class="icon-button small" type="button" title="Close" aria-label="Close Git changes">×</button></div></div>
@@ -6888,7 +7044,6 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <div id="activity" class="activity" hidden>
           <span class="spinner" aria-hidden="true"></span>
           <span id="activity-text">Pi is working</span>
-          <button id="queue-toggle" class="queue-toggle" type="button" aria-expanded="false">Queue</button>
           <button id="stop" class="stop-button" type="button">Stop</button>
         </div>
       </main>
@@ -6905,6 +7060,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <select id="thinking-choice" class="control-select thinking-select" aria-label="Reasoning level" title="Reasoning level" hidden disabled></select>
             <button id="tools-toggle" class="control-button" type="button" aria-expanded="false" disabled>Tools</button>
             <button id="skills-toggle" class="control-button" type="button" aria-expanded="false" disabled>Resources</button>
+            <button id="queue-toggle" class="control-button queue-toggle" type="button" aria-expanded="false" hidden>Queue</button>
             <button id="delivery-mode" class="control-button delivery-mode" type="button" aria-label="Queued message mode" title="Click to switch between queue and steer" hidden>Queue next</button>
             <section id="model-popover" class="control-popover model-popover" aria-label="Choose a model" hidden>
               <div class="model-search-row"><input id="model-search" class="session-search" type="search" aria-label="Search models" placeholder="Search models, providers, or vision"><button id="refresh-models" class="icon-button small" type="button" title="Refresh models; may contact providers and run configured API-key commands" aria-label="Refresh model catalog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg></button></div>

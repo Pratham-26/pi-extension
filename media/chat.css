@@ -252,6 +252,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .queue-group-heading { padding: 8px 7px 4px; color: var(--muted); font-size: 10px; font-weight: 600; }
 .queued-item { display: flex; align-items: flex-start; gap: 5px; padding: 7px; border: 1px solid var(--line); border-radius: 5px; margin: 4px 0; }
 .queued-item-text { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 11px; line-height: 1.4; }
+.queued-shell-command .queued-item-text { font-family: var(--vscode-editor-font-family, monospace); }
 .queued-item-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; flex: 0 0 auto; max-width: 74px; }
 .queued-item-actions .session-action { padding: 3px 4px; }
 .queue-edit-input { display: block; width: 100%; resize: vertical; margin-bottom: 4px; padding: 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 11px; }
@@ -508,8 +509,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .diagram-source code { font: inherit; }
 
 .activity { display: flex; align-items: center; gap: 8px; width: min(100%, 68ch); margin: 10px auto 0; color: var(--muted); font-size: 11px; }
-.queue-toggle { flex: 0 0 auto; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
-.queue-toggle:hover { color: var(--text); border-color: var(--focus); }
+.queue-toggle { padding: 0 5px; color: var(--muted); font-size: 9px; }
 .spinner { width: 13px; height: 13px; border: 1.5px solid color-mix(in srgb, var(--muted) 30%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin 800ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .stop-button { margin-left: auto; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: transparent; font-size: 11px; }
@@ -555,7 +555,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .preset-choice:hover:not(:disabled), .preset-add:hover:not(:disabled) { color: var(--text); border-color: var(--focus); }
 .preset-choice:disabled, .preset-add:disabled { opacity: .55; cursor: default; }
 .preset-add { border-style: dashed; }
-.composer-controls { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) repeat(5, auto); align-items: center; gap: 2px; min-width: 0; margin: 0 0 5px; }
+.composer-controls { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) repeat(6, auto); align-items: center; gap: 2px; min-width: 0; margin: 0 0 5px; }
 .control-select, .control-button {
   height: 23px;
   min-width: 0;

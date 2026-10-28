@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.123",
+  "version": "0.1.124",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -480,9 +480,17 @@
         },
         "piChat.notifications.hookEvents": {
           "type": "array",
-          "items": { "type": "string", "enum": ["input_request", "agent_finished"] },
+          "items": {
+            "type": "string",
+            "enum": [
+              "input_request",
+              "agent_finished"
+            ]
+          },
           "maxItems": 2,
-          "default": ["input_request"],
+          "default": [
+            "input_request"
+          ],
           "scope": "machine",
           "description": "Choose which events run piChat.notifications.hookCommand. Events are ignored while the command is empty."
         }
@@ -517,7 +525,7 @@
     "typecheck": "tsc --noEmit",
     "smoke:drafts": "npm run compile:draft-store && node scripts/smoke-drafts.mjs",
     "smoke:worker": "npm run compile:worker && node scripts/smoke-worker.mjs",
-    "smoke:shell-command": "esbuild src/shell-command.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/shell-command.cjs && node scripts/smoke-shell-command.mjs",
+    "smoke:shell-command": "esbuild src/shell-command.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/shell-command.cjs && esbuild src/shell-command-queue.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/shell-command-queue.cjs && node scripts/smoke-shell-command.mjs",
     "smoke:runtime-settings": "npm run compile:worker && node scripts/smoke-runtime-settings.mjs",
     "smoke:sessions": "node scripts/smoke-session-order.mjs",
     "smoke:prompts": "node scripts/smoke-prompt-suggestions.mjs",
