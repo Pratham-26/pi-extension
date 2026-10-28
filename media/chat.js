@@ -460,16 +460,118 @@ function contextLabels(context) {
 }
 
 function appendInlineText(parent, text) {
-  const pieces = String(text).split(/(`[^`]+`)/g);
-  for (const piece of pieces) {
-    if (piece.startsWith('`') && piece.endsWith('`') && piece.length > 2) {
+  const source = String(text);
+  const tokens = /(`[^`\n]+`|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|\[([^\]\n]{1,500})\]\(([^)\s]{1,2048})\))/g;
+  let cursor = 0;
+  for (const match of source.matchAll(tokens)) {
+    const token = match[0];
+    const start = match.index ?? cursor;
+    if (start > cursor) parent.append(document.createTextNode(source.slice(cursor, start)));
+    if (token.startsWith('`') && token.endsWith('`')) {
       const code = document.createElement('code');
-      code.textContent = piece.slice(1, -1);
+      code.textContent = token.slice(1, -1);
       parent.append(code);
+    } else if (token.startsWith('**') && token.endsWith('**')) {
+      const strong = document.createElement('strong');
+      strong.textContent = token.slice(2, -2);
+      parent.append(strong);
+    } else if (token.startsWith('~~') && token.endsWith('~~')) {
+      const deleted = document.createElement('del');
+      deleted.textContent = token.slice(2, -2);
+      parent.append(deleted);
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      const emphasis = document.createElement('em');
+      emphasis.textContent = token.slice(1, -1);
+      parent.append(emphasis);
+    } else if (match[2]) {
+      const url = safeMarkdownLink(match[3]);
+      if (!url) {
+        parent.append(document.createTextNode(token));
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = match[2];
+        link.addEventListener('click', (event) => {
+          event.preventDefault();
+          post('openExternalLink', { url });
+        });
+        parent.append(link);
+      }
     } else {
-      parent.append(document.createTextNode(piece));
+      parent.append(document.createTextNode(token));
     }
+    cursor = start + token.length;
   }
+  if (cursor < source.length) parent.append(document.createTextNode(source.slice(cursor)));
+}
+
+function safeMarkdownLink(value) {
+  if (typeof value !== 'string' || value.length > 2048) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) return undefined;
+    if (url.protocol === 'https:') return url.href;
+    if (url.protocol === 'http:' && /^(localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(url.host)) return url.href;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function splitMarkdownTableRow(line) {
+  const source = String(line || '').trim();
+  const leadingPipe = source.startsWith('|');
+  const trailingPipe = source.endsWith('|');
+  const cells = [];
+  let cell = '';
+  let escaped = false;
+  for (const character of source) {
+    if (character === '|' && !escaped) {
+      cells.push(cell);
+      cell = '';
+    } else {
+      cell += character;
+    }
+    if (character === '\\' && !escaped) escaped = true;
+    else escaped = false;
+  }
+  cells.push(cell);
+  if (leadingPipe) cells.shift();
+  if (trailingPipe) cells.pop();
+  return cells.map((value) => value.replace(/\\\|/g, '|').trim());
+}
+
+function isMarkdownTableDelimiter(line, columnCount) {
+  if (!String(line || '').includes('|')) return false;
+  const cells = splitMarkdownTableRow(line);
+  return cells.length === columnCount && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function createMarkdownTable(headers, rows) {
+  const table = document.createElement('table');
+  table.className = 'markdown-table';
+  const head = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  for (const value of headers) {
+    const cell = document.createElement('th');
+    appendInlineText(cell, value);
+    headerRow.append(cell);
+  }
+  head.append(headerRow);
+  const body = document.createElement('tbody');
+  for (const values of rows) {
+    const row = document.createElement('tr');
+    headers.forEach((_, index) => {
+      const cell = document.createElement('td');
+      appendInlineText(cell, values[index] || '');
+      row.append(cell);
+    });
+    body.append(row);
+  }
+  table.append(head, body);
+  return table;
 }
 
 function createCodeBlock(source, language = '') {
@@ -501,6 +603,7 @@ function renderMarkdown(container, text) {
   const lines = String(text || '').split('\n');
   let paragraph = [];
   let list = undefined;
+  let quoteLines = [];
   let codeLines = undefined;
   let language = '';
 
@@ -515,12 +618,23 @@ function renderMarkdown(container, text) {
     if (list) container.append(list);
     list = undefined;
   };
+  const flushQuote = () => {
+    if (!quoteLines.length) return;
+    const quote = document.createElement('blockquote');
+    const p = document.createElement('p');
+    appendInlineText(p, quoteLines.join('\n'));
+    quote.append(p);
+    container.append(quote);
+    quoteLines = [];
+  };
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
     const fence = line.match(/^\s*```\s*([\w.+-]*)/);
     if (fence) {
       flushParagraph();
       flushList();
+      flushQuote();
       if (!codeLines) {
         codeLines = [];
         language = fence[1];
@@ -539,6 +653,23 @@ function renderMarkdown(container, text) {
     if (!line.trim()) {
       flushParagraph();
       flushList();
+      flushQuote();
+      continue;
+    }
+
+    const tableHeaders = line.includes('|') ? splitMarkdownTableRow(line).slice(0, 12) : [];
+    if (tableHeaders.length && isMarkdownTableDelimiter(lines[lineIndex + 1], tableHeaders.length)) {
+      flushParagraph();
+      flushList();
+      flushQuote();
+      const rows = [];
+      let rowIndex = lineIndex + 2;
+      while (rowIndex < lines.length && lines[rowIndex].trim() && lines[rowIndex].includes('|') && rows.length < 50) {
+        rows.push(splitMarkdownTableRow(lines[rowIndex]).slice(0, tableHeaders.length));
+        rowIndex += 1;
+      }
+      container.append(createMarkdownTable(tableHeaders, rows));
+      lineIndex = rowIndex - 1;
       continue;
     }
 
@@ -546,9 +677,51 @@ function renderMarkdown(container, text) {
     if (heading) {
       flushParagraph();
       flushList();
+      flushQuote();
       const h = document.createElement(heading[1].length === 1 ? 'h2' : 'h3');
       appendInlineText(h, heading[2]);
       container.append(h);
+      continue;
+    }
+
+    if (/^\s*(?:---+|\*\*\*+|___+)\s*$/.test(line)) {
+      flushParagraph();
+      flushList();
+      flushQuote();
+      const rule = document.createElement('hr');
+      rule.className = 'markdown-rule';
+      container.append(rule);
+      continue;
+    }
+
+    const quoted = line.match(/^\s{0,3}>\s?(.*)$/);
+    if (quoted) {
+      flushParagraph();
+      flushList();
+      quoteLines.push(quoted[1]);
+      continue;
+    }
+    flushQuote();
+
+    const task = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)$/);
+    if (task) {
+      flushParagraph();
+      if (!list || list.tagName.toLowerCase() !== 'ul') {
+        flushList();
+        list = document.createElement('ul');
+        list.className = 'task-list';
+      }
+      const item = document.createElement('li');
+      item.className = 'task-list-item';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.disabled = true;
+      checkbox.checked = task[1].toLowerCase() === 'x';
+      checkbox.setAttribute('aria-label', checkbox.checked ? 'Completed task' : 'Incomplete task');
+      const content = document.createElement('span');
+      appendInlineText(content, task[2]);
+      item.append(checkbox, content);
+      list.append(item);
       continue;
     }
 
@@ -575,6 +748,7 @@ function renderMarkdown(container, text) {
   }
   flushParagraph();
   flushList();
+  flushQuote();
 }
 
 function openMessageContextEditor(row, message) {

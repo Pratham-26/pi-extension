@@ -580,6 +580,19 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case 'openExternalLink': {
+        const uri = this.safeProviderUri(message.url);
+        if (!uri) {
+          this.post({ type: 'notice', message: 'That Markdown link is not allowed.', isError: true });
+          return;
+        }
+        try {
+          await vscode.env.openExternal(uri);
+        } catch {
+          this.post({ type: 'notice', message: 'Could not open that Markdown link.', isError: true });
+        }
+        return;
+      }
       case 'setModel':
       case 'setThinkingLevel':
       case 'setTools':

@@ -25,7 +25,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Show estimated context usage and warn visually near the model's context limit.
 - [x] Offer Pi context compaction near the context limit, with an explicit confirmation and cancellation through Stop.
 - [x] Export the active session as HTML or JSONL.
-- [~] Render a safe Markdown subset; full Markdown, math, Mermaid, image output, thinking blocks, and extension renderers are not supported.
+- [~] Render headings, emphasis, lists, task lists, quotes, tables, fenced code, and allowlisted external Markdown links without raw HTML; math, Mermaid, image output, thinking blocks, and extension renderers remain unsupported.
 - [~] Tool cards show live activity; historical tool cards, edit diffs, exploration grouping, focused transcript mode, and per-tool expansion settings are not restored/rendered.
 - [~] Code blocks can be copied; symbol links and model-generated prompt suggestions are missing. Message quoting, bookmarks, persistent context edits, and context compaction are available.
 - [x] Export a redacted diagnostic report with software versions and generic error categories; the report excludes prompt/transcript content, workspace/session paths, file names, provider IDs, credentials, and environment variables.
