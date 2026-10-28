@@ -2440,6 +2440,15 @@ function renderGitChanges() {
       discard.addEventListener('click', () => post('discardGitChange', { path: change.path }));
       row.append(discard);
     }
+    if (change.isUntracked === true && change.canMoveToTrash === true) {
+      const trash = document.createElement('button');
+      trash.type = 'button';
+      trash.className = 'git-change-discard';
+      trash.textContent = 'Trash';
+      trash.title = 'Remove this regular untracked file after confirmation; VS Code requests OS Trash when supported';
+      trash.addEventListener('click', () => post('trashUntrackedGitChange', { path: change.path }));
+      row.append(trash);
+    }
     ui.gitChangeList.append(row);
   }
 }

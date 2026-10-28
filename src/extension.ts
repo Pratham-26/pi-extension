@@ -96,6 +96,7 @@ type GitFileStatus = {
   status: string[];
   canDiscard: boolean;
   isUntracked: boolean;
+  canMoveToTrash: boolean;
 };
 
 type PiResourceType = 'extensions' | 'skills' | 'prompts' | 'themes';
@@ -1385,6 +1386,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'discardGitChange':
         await this.discardGitChange(message.path);
         return;
+      case 'trashUntrackedGitChange':
+        await this.trashUntrackedGitChange(message.path);
+        return;
       case 'exportDiagnostics':
         await this.exportDiagnostics();
         return;
@@ -2207,11 +2211,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           if (!relativePath) continue;
           let item = files.get(relativePath);
           if (!item) {
-            item = { path: relativePath.slice(0, 4096), status: [], canDiscard: false, isUntracked: false };
+            item = { path: relativePath.slice(0, 4096), status: [], canDiscard: false, isUntracked: false, canMoveToTrash: false };
             files.set(relativePath, item);
           }
           if (!item.status.includes(label)) item.status.push(label);
-          if (label === 'Untracked') item.isUntracked = true;
+          if (label === 'Untracked') {
+            item.isUntracked = true;
+            item.canMoveToTrash = true;
+          }
           if (canDiscard && !item.isUntracked) item.canDiscard = true;
         }
       };
@@ -2220,7 +2227,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       add(state.untrackedChanges, 'Untracked');
       add(state.mergeChanges, 'Conflict');
       for (const item of files.values()) {
-        if (item.status.includes('Conflict') || item.isUntracked) item.canDiscard = false;
+        if (item.status.includes('Conflict')) {
+          item.canDiscard = false;
+          item.canMoveToTrash = false;
+        }
       }
       let stats: { files: number; insertions: number; deletions: number } | undefined;
       try {
@@ -2367,6 +2377,84 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       await this.refreshGitChanges();
     } catch (error) {
       this.post({ type: 'notice', message: `Could not discard this Git change. ${error instanceof Error ? error.message.slice(0, 300) : ''}`, isError: true });
+    }
+  }
+
+  private async inspectSafeUntrackedFile(target: {
+    workspace: vscode.WorkspaceFolder;
+    repository: GitRepositoryLike;
+    uri: vscode.Uri;
+  }): Promise<{ dev: number; ino: number; realPath: string } | undefined> {
+    if (target.uri.scheme !== 'file') return undefined;
+    const stats = await lstat(target.uri.fsPath);
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink > 1) return undefined;
+    const [filePath, repositoryPath, workspacePath] = await Promise.all([
+      realpath(target.uri.fsPath),
+      realpath(target.repository.rootUri.fsPath),
+      realpath(target.workspace.uri.fsPath),
+    ]);
+    if (!isPathInside(repositoryPath, filePath) || !isPathInside(workspacePath, filePath)) return undefined;
+    const resolvedStats = await lstat(filePath);
+    if (!resolvedStats.isFile() || resolvedStats.isSymbolicLink() || resolvedStats.nlink > 1
+      || resolvedStats.dev !== stats.dev || resolvedStats.ino !== stats.ino) return undefined;
+    return { dev: resolvedStats.dev, ino: resolvedStats.ino, realPath: filePath };
+  }
+
+  private async trashUntrackedGitChange(value: unknown): Promise<void> {
+    try {
+      const target = await this.findCurrentGitChange(value);
+      if (!target || !target.isUntracked) {
+        this.post({ type: 'notice', message: 'That file is no longer an untracked Git change. Refresh the list and try again.', isError: true });
+        await this.refreshGitChanges();
+        return;
+      }
+      const identity = await this.inspectSafeUntrackedFile(target);
+      if (!identity) {
+        this.post({ type: 'notice', message: 'Only regular untracked files inside the workspace can be moved to Trash. Directories, symlinks, and hard-linked files are not eligible.', isError: true });
+        await this.refreshGitChanges();
+        return;
+      }
+      const hasDirtyDocument = (realPath: string) => {
+        const filePaths = new Set([target.uri.fsPath, realPath].map((filePath) => this.normalizeSessionPath(filePath)));
+        return vscode.workspace.textDocuments.some((document) => document.isDirty
+          && document.uri.scheme === 'file'
+          && filePaths.has(this.normalizeSessionPath(document.uri.fsPath)));
+      };
+      if (hasDirtyDocument(identity.realPath)) {
+        this.post({ type: 'notice', message: 'Save or discard the open file’s unsaved changes before moving it to Trash.', isError: true });
+        return;
+      }
+      const answer = await vscode.window.showWarningMessage(
+        `Remove untracked file ${target.relativePath}? VS Code will request the operating system’s Trash/Recycle Bin when supported; a file system without Trash support may delete it permanently. Git cannot restore it because it has not been committed.`,
+        { modal: true },
+        'Remove untracked file',
+      );
+      if (answer !== 'Remove untracked file') return;
+
+      const current = await this.findCurrentGitChange(target.relativePath);
+      if (!current || !current.isUntracked
+        || this.normalizeSessionPath(current.uri.fsPath) !== this.normalizeSessionPath(target.uri.fsPath)
+        || this.normalizeSessionPath(current.repository.rootUri.fsPath) !== this.normalizeSessionPath(target.repository.rootUri.fsPath)) {
+        this.post({ type: 'notice', message: 'The Git state or open file changed while confirmation was open. Nothing was moved.', isError: true });
+        await this.refreshGitChanges();
+        return;
+      }
+      const currentIdentity = await this.inspectSafeUntrackedFile(current);
+      if (!currentIdentity || currentIdentity.dev !== identity.dev || currentIdentity.ino !== identity.ino
+        || this.normalizeSessionPath(currentIdentity.realPath) !== this.normalizeSessionPath(identity.realPath)) {
+        this.post({ type: 'notice', message: 'The file changed while confirmation was open. Nothing was moved; refresh the Git list and try again.', isError: true });
+        await this.refreshGitChanges();
+        return;
+      }
+      if (hasDirtyDocument(currentIdentity.realPath)) {
+        this.post({ type: 'notice', message: 'The file became unsaved while confirmation was open. Save it before moving it to Trash.', isError: true });
+        return;
+      }
+      await vscode.workspace.fs.delete(vscode.Uri.file(currentIdentity.realPath), { useTrash: true });
+      await this.refreshGitChanges();
+    } catch {
+      this.post({ type: 'notice', message: 'Could not remove the untracked file. Review its current state and refresh Git status.', isError: true });
+      await this.refreshGitChanges();
     }
   }
 

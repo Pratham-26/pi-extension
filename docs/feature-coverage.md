@@ -66,7 +66,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 ## Git review, notifications, and privacy
 
-- [~] Show branch and changed-file summaries, open bounded Git diffs, and discard confirmed tracked unstaged changes by restoring from the index; Pi edit-history review and untracked-file deletion are unavailable.
+- [~] Show branch and changed-file summaries, open bounded Git diffs, discard confirmed tracked unstaged changes by restoring from the index, and remove a confirmed regular untracked file through VS Code's OS Trash option when supported. Recheck the Git state, file identity, workspace/repository containment, and dirty editor state before removal; reject directories, symlinks, and hard links.
 - [~] Prepare editable commit-message and pull-request prompts with bounded Git change context; Pi generates the draft in the active chat after the user reviews and submits it.
 - [x] Show VS Code notifications for a finished run or extension input request while the chat view is hidden.
 - [~] A bounded local diagnostic log records timestamps and generic runtime/operation error categories; notification sound and user-defined command hooks remain unavailable.
