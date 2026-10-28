@@ -1205,13 +1205,6 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.post(message);
         return;
       }
-      if (message.type === 'options') {
-        const runtimeSettings = message.runtimeSettings && typeof message.runtimeSettings === 'object'
-          ? message.runtimeSettings as Record<string, unknown>
-          : {};
-        this.post({ ...message, runtimeSettings: { ...runtimeSettings, offlineMode: readPiOfflineMode() } });
-        return;
-      }
       if (message.type === 'extension-ui-reset') this.pendingExtensionUiRequestIds.clear();
       if (message.type === 'runtime-error') this.recordDiagnostic('Pi runtime error');
       else if (message.type === 'notice' && message.isError === true) this.recordDiagnostic('Pi operation error');
@@ -1367,6 +1360,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingPiResourcePicker = undefined;
         void this.openPiResourcePicker(worker, message);
       } else if (message.type === 'options') {
+        const runtimeSettings = message.runtimeSettings && typeof message.runtimeSettings === 'object'
+          ? message.runtimeSettings as Record<string, unknown>
+          : {};
         this.availableProviderIds = Array.isArray(message.providerIds)
           ? [...new Set(message.providerIds.filter((providerId): providerId is string => typeof providerId === 'string'
             && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(providerId)))].slice(0, 500)
@@ -1429,7 +1425,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           contextFilesTruncated: _contextFilesTruncated,
           ...safeMessage
         } = message;
-        this.post({ ...safeMessage, presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
+        this.post({
+          ...safeMessage,
+          runtimeSettings: { ...runtimeSettings, offlineMode: readPiOfflineMode() },
+          presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []),
+        });
       } else {
         this.post(message);
       }
