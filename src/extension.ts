@@ -225,14 +225,16 @@ function parsePiPackageSearchResults(value: unknown): PiPackageSearchResult[] {
   if (!Array.isArray(objects)) return [];
   const results: PiPackageSearchResult[] = [];
   const seen = new Set<string>();
-  for (const object of objects.slice(0, 20)) {
+  for (const object of objects.slice(0, 50)) {
     if (!object || typeof object !== 'object' || Array.isArray(object)) continue;
     const packageData = (object as Record<string, unknown>).package;
     if (!packageData || typeof packageData !== 'object' || Array.isArray(packageData)) continue;
     const fields = packageData as Record<string, unknown>;
     const name = typeof fields.name === 'string' ? fields.name : '';
     const version = typeof fields.version === 'string' ? fields.version : '';
+    const keywords = Array.isArray(fields.keywords) ? fields.keywords : [];
     if (!name || name.length > 214 || seen.has(name)
+      || !keywords.some((keyword) => typeof keyword === 'string' && keyword.toLowerCase() === 'pi-package')
       || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) continue;
     const source = `npm:${name}@${version}`;
     if (!isPiPackageSource(source)) continue;
@@ -241,6 +243,7 @@ function parsePiPackageSearchResults(value: unknown): PiPackageSearchResult[] {
       : '';
     seen.add(name);
     results.push({ name, version, description, source });
+    if (results.length >= 20) break;
   }
   return results;
 }
@@ -4141,7 +4144,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async searchPiPackages(message: RuntimeMessage): Promise<void> {
-    const query = typeof message.query === 'string' ? message.query.trim() : '';
+    const popular = message.popular === true;
+    const query = popular ? 'keywords:pi-package' : typeof message.query === 'string' ? message.query.trim() : '';
     if (!query || query.length > 128 || /[\u0000-\u001f\u007f]/.test(query)) {
       this.post({ type: 'package-search-results', status: 'Enter a search term up to 128 characters.', results: [] });
       return;
@@ -4157,12 +4161,20 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     this.pendingPackageSearch = { controller, timer };
-    this.post({ type: 'package-search-state', status: 'Searching the public npm registry…' });
+    this.post({
+      type: 'package-search-state',
+      status: popular ? 'Loading popular Pi packages from npm…' : 'Searching the public npm registry…',
+    });
     try {
       const url = new URL('https://registry.npmjs.org/-/v1/search');
       url.searchParams.set('text', query);
-      url.searchParams.set('size', '20');
+      url.searchParams.set('size', popular ? '20' : '50');
       url.searchParams.set('from', '0');
+      if (popular) {
+        url.searchParams.set('quality', '0');
+        url.searchParams.set('popularity', '1');
+        url.searchParams.set('maintenance', '0');
+      }
       const response = await fetch(url, {
         method: 'GET',
         headers: { accept: 'application/json' },
@@ -4187,7 +4199,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       const results = parsePiPackageSearchResults(payload);
       this.post({
         type: 'package-search-results',
-        status: results.length ? `${results.length} results. Select Use to fill a version-pinned source.` : 'No matching packages were found.',
+        status: results.length
+          ? popular
+            ? `${results.length} results. Popularity is not a security review; select Use to fill a version-pinned source.`
+            : `${results.length} results. Select Use to fill a version-pinned source.`
+          : 'No eligible Pi packages were found.',
         results,
       });
     } catch {
@@ -5368,9 +5384,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div id="package-list" class="package-list"></div>
               <div id="package-empty" class="package-empty">Package manager is unavailable until a Pi session is ready.</div>
               <div class="package-gallery">
-                <div class="package-gallery-heading"><strong>Discover packages</strong></div>
+                <div class="package-gallery-heading"><strong>Discover packages</strong><button id="popular-packages" class="text-button" type="button" title="Browse Pi packages ranked by npm popularity">Popular</button></div>
                 <div class="package-search-form"><input id="package-search" type="search" maxlength="128" autocomplete="off" aria-label="Search Pi packages on npm" placeholder="Search Pi packages on npm"><button id="package-search-button" class="text-button" type="button" disabled>Search</button></div>
-                <p class="package-safety-note">Search sends these terms to the public npm registry. Selecting a result fills a version-pinned source; installing still requires confirmation.</p>
+                <p class="package-safety-note">Search sends your terms to npm. Popular shows packages tagged for Pi, sorted by npm's popularity signal; popularity is not a safety review. Review sources before installing.</p>
                 <div id="package-search-status" class="package-status" aria-live="polite"></div>
                 <div id="package-search-results" class="package-list"></div>
               </div>

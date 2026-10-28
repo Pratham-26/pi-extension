@@ -244,6 +244,7 @@ const ui = {
   packageStatus: el('package-status'),
   packageSearch: el('package-search'),
   packageSearchButton: el('package-search-button'),
+  popularPackagesButton: el('popular-packages'),
   packageSearchStatus: el('package-search-status'),
   packageSearchResults: el('package-search-results'),
   packageSource: el('package-source'),
@@ -518,6 +519,7 @@ function updateControls() {
   ui.packageSearch.disabled = false;
   ui.packageSearchButton.disabled = !state.packageSearchBusy && !ui.packageSearch.value.trim();
   ui.packageSearchButton.textContent = state.packageSearchBusy ? 'Cancel' : 'Search';
+  ui.popularPackagesButton.disabled = state.packageSearchBusy;
   ui.packageSearchResults.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
   ui.skillsToggle.disabled = !state.hasSession;
@@ -3093,6 +3095,16 @@ function renderPackageSearchResults() {
   }
 }
 
+function startPackageSearch(query, popular = false) {
+  if (state.packageSearchBusy || (!popular && !query)) return;
+  state.packageSearchBusy = true;
+  state.packageSearchStatus = popular ? 'Loading popular Pi packages from npm…' : 'Searching the public npm registry…';
+  state.packageSearchResults = [];
+  renderPackageSearchResults();
+  updateControls();
+  post('searchPiPackages', popular ? { popular: true } : { query: query.slice(0, 128) });
+}
+
 function addPromptOption(parent, prompt) {
   const row = document.createElement('div');
   row.className = 'prompt-option-row';
@@ -4749,14 +4761,7 @@ ui.packageSearch.addEventListener('input', updateControls);
 ui.packageSearch.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') return;
   event.preventDefault();
-  if (state.packageSearchBusy) return;
-  const query = ui.packageSearch.value.trim().slice(0, 128);
-  if (!query) return;
-  state.packageSearchBusy = true;
-  state.packageSearchStatus = 'Searching the public npm registry…';
-  renderPackageSearchResults();
-  updateControls();
-  post('searchPiPackages', { query });
+  startPackageSearch(ui.packageSearch.value.trim().slice(0, 128));
 });
 ui.packageSearchButton.addEventListener('click', () => {
   if (state.packageSearchBusy) {
@@ -4768,13 +4773,9 @@ ui.packageSearchButton.addEventListener('click', () => {
     return;
   }
   const query = ui.packageSearch.value.trim().slice(0, 128);
-  if (!query) return;
-  state.packageSearchBusy = true;
-  state.packageSearchStatus = 'Searching the public npm registry…';
-  renderPackageSearchResults();
-  updateControls();
-  post('searchPiPackages', { query });
+  startPackageSearch(query);
 });
+ui.popularPackagesButton.addEventListener('click', () => startPackageSearch('', true));
 el('prompt-template-cancel').addEventListener('click', closePromptTemplateForm);
 el('prompt-template-use').addEventListener('click', usePromptTemplate);
 el('send').addEventListener('click', () => sendPrompt());
