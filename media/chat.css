@@ -501,6 +501,18 @@ button:focus-visible, textarea:focus-visible {
 .tool-structured-disclosure > summary { padding: 0; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; }
 .tool-structured-disclosure[open] > summary { margin: 0 8px; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
 .tool-structured-disclosure .tool-output { max-height: 180px; }
+.subagent-results { display: grid; gap: 5px; }
+.subagent-run { border-top: 1px solid var(--line); padding-top: 5px; }
+.subagent-run > summary, .subagent-transcript > summary { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; cursor: pointer; }
+.subagent-run[open] > summary { margin-bottom: 6px; color: var(--text); }
+.subagent-run-error > summary, .subagent-error { color: var(--danger); }
+.subagent-task { margin: 5px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.subagent-transcript { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 5px; }
+.subagent-transcript-text { max-height: 320px; overflow: auto; overflow-wrap: anywhere; }
+.subagent-transcript-call { margin: 5px 0; color: var(--vscode-descriptionForeground, var(--muted)); }
+.subagent-transcript-call strong { font-size: 10px; font-weight: 500; }
+.subagent-transcript-call pre { max-height: 140px; }
+.subagent-usage { display: block; margin-top: 7px; color: var(--vscode-descriptionForeground, var(--muted)); overflow-wrap: anywhere; }
 .tool-arguments { border-bottom: 1px solid var(--line); color: var(--vscode-editor-foreground, var(--text)); }
 .composer textarea {
   display: block;

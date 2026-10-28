@@ -1034,7 +1034,127 @@ function structuredChecklist(details) {
   return undefined;
 }
 
-function appendStructuredToolDetails(card, details) {
+function subagentDetails(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return undefined;
+  if (!['single', 'parallel', 'chain'].includes(details.mode) || !Array.isArray(details.results)) return undefined;
+  const results = details.results.filter((run) => run && typeof run === 'object' && !Array.isArray(run)).slice(0, 8);
+  if (results.length && !results.some((run) => typeof run.agent === 'string' && Array.isArray(run.messages))) return undefined;
+  const omittedResults = Number.isFinite(details.omittedResults) ? Math.max(0, Math.floor(details.omittedResults)) : 0;
+  return { mode: details.mode, results, omittedResults };
+}
+
+function appendSubagentDetails(card, details, partial) {
+  const section = document.createElement('section');
+  section.className = 'tool-structured-result subagent-results';
+  const heading = document.createElement('div');
+  heading.className = 'tool-checklist-heading';
+  const title = document.createElement('strong');
+  title.textContent = `Subagents · ${details.mode}`;
+  const count = document.createElement('span');
+  const runCount = `${details.results.length} run${details.results.length === 1 ? '' : 's'}`;
+  count.textContent = details.omittedResults ? `${runCount} shown · ${details.omittedResults} more omitted` : runCount;
+  heading.append(title, count);
+  section.append(heading);
+  if (!details.results.length) {
+    const empty = document.createElement('p');
+    empty.className = 'tool-checklist-empty';
+    empty.textContent = partial ? 'Waiting for subagent results.' : 'No subagent results were recorded.';
+    section.append(empty);
+    card.append(section);
+    return;
+  }
+
+  for (const run of details.results) {
+    const failed = (typeof run.exitCode === 'number' && run.exitCode !== 0)
+      || ['error', 'aborted'].includes(String(run.stopReason || '').toLocaleLowerCase());
+    const runDetails = document.createElement('details');
+    runDetails.className = `subagent-run${failed ? ' subagent-run-error' : ''}`;
+    runDetails.open = details.results.length === 1;
+    const summary = document.createElement('summary');
+    const name = typeof run.agent === 'string' ? run.agent.slice(0, 128) : 'Subagent';
+    const source = typeof run.agentSource === 'string' ? ` · ${run.agentSource.slice(0, 64)}` : '';
+    const status = partial ? 'Running' : failed ? 'Failed' : 'Finished';
+    summary.textContent = `${name}${source} · ${status}`;
+    runDetails.append(summary);
+
+    if (typeof run.task === 'string' && run.task.trim()) {
+      const task = document.createElement('p');
+      task.className = 'subagent-task';
+      task.textContent = run.task.slice(0, 8000);
+      runDetails.append(task);
+    }
+    if (typeof run.errorMessage === 'string' && run.errorMessage) {
+      const error = document.createElement('p');
+      error.className = 'subagent-error';
+      error.textContent = run.errorMessage.slice(0, 2000);
+      runDetails.append(error);
+    } else if (failed && typeof run.stderr === 'string' && run.stderr) {
+      const error = document.createElement('p');
+      error.className = 'subagent-error';
+      error.textContent = run.stderr.slice(0, 2000);
+      runDetails.append(error);
+    }
+
+    const transcript = document.createElement('details');
+    transcript.className = 'subagent-transcript';
+    const transcriptSummary = document.createElement('summary');
+    transcriptSummary.textContent = 'Transcript';
+    transcript.append(transcriptSummary);
+    let transcriptItems = 0;
+    const messages = Array.isArray(run.messages) ? run.messages.slice(-30) : [];
+    for (const message of messages) {
+      const parts = Array.isArray(message?.content) ? message.content.slice(-40) : [];
+      for (const part of parts) {
+        if (part?.type === 'text' && typeof part.text === 'string' && part.text) {
+          const output = document.createElement('div');
+          output.className = 'subagent-transcript-text';
+          renderMarkdown(output, part.text.slice(-8000));
+          transcript.append(output);
+          transcriptItems += 1;
+        } else if (part?.type === 'toolCall') {
+          const call = document.createElement('div');
+          call.className = 'subagent-transcript-call';
+          const label = document.createElement('strong');
+          label.textContent = `Tool · ${String(part.name || 'tool').slice(0, 128)}`;
+          const args = document.createElement('pre');
+          args.textContent = JSON.stringify(part.arguments ?? {}, null, 2).slice(0, 4000);
+          call.append(label, args);
+          transcript.append(call);
+          transcriptItems += 1;
+        }
+      }
+    }
+    if (!transcriptItems) {
+      const empty = document.createElement('p');
+      empty.className = 'tool-checklist-empty';
+      empty.textContent = 'No transcript entries were recorded.';
+      transcript.append(empty);
+    }
+    runDetails.append(transcript);
+
+    const usage = run.usage && typeof run.usage === 'object' ? run.usage : undefined;
+    if (usage) {
+      const metrics = [];
+      for (const [key, label] of [['turns', 'turns'], ['input', 'input'], ['output', 'output']]) {
+        const value = Number(usage[key]);
+        if (Number.isFinite(value) && value > 0) metrics.push(`${label} ${Math.round(value).toLocaleString()}`);
+      }
+      const cost = Number(usage.cost);
+      if (Number.isFinite(cost) && cost > 0) metrics.push(`$${cost.toFixed(4)}`);
+      if (typeof run.model === 'string' && run.model) metrics.push(run.model.slice(0, 128));
+      if (metrics.length) {
+        const footer = document.createElement('small');
+        footer.className = 'subagent-usage';
+        footer.textContent = metrics.join(' · ');
+        runDetails.append(footer);
+      }
+    }
+    section.append(runDetails);
+  }
+  card.append(section);
+}
+
+function appendStructuredToolDetails(card, details, partial = false) {
   card.querySelector('.tool-structured-result')?.remove();
   if (details === undefined || details === null) return;
   let serialized;
@@ -1044,6 +1164,12 @@ function appendStructuredToolDetails(card, details) {
     return;
   }
   if (typeof serialized !== 'string' || serialized === '{}' || serialized === '[]' || serialized.length > 24000) return;
+
+  const subagents = subagentDetails(details);
+  if (subagents) {
+    appendSubagentDetails(card, subagents, partial);
+    return;
+  }
 
   const checklist = structuredChecklist(details);
   if (checklist) {
@@ -2584,7 +2710,7 @@ window.addEventListener('message', (event) => {
         const result = data.result;
         const text = typeof result === 'string' ? result : JSON.stringify(result ?? '', null, 2);
         if (output) output.textContent = text.slice(-12000);
-        appendStructuredToolDetails(card, data.details);
+        appendStructuredToolDetails(card, data.details, data.type === 'tool-update');
         const toolMessage = [...state.messages].reverse().find((message) => message.role === 'tool' && message.toolCallId === toolId);
         if (toolMessage) {
           toolMessage.result = text.slice(-12000);

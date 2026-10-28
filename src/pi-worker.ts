@@ -273,6 +273,7 @@ function toolOutput(result: unknown): string {
 }
 
 function boundedStructuredToolValue(value: unknown, budget: { remaining: number }, depth = 0): unknown {
+  if (value === undefined) return undefined;
   if (budget.remaining <= 0) return '[details truncated]';
   if (typeof value === 'string') {
     const available = Math.max(0, budget.remaining - 24);
@@ -284,7 +285,7 @@ function boundedStructuredToolValue(value: unknown, budget: { remaining: number 
     budget.remaining -= 16;
     return value;
   }
-  if (depth >= 5) return '[nested value omitted]';
+  if (depth >= 9) return '[nested value omitted]';
   if (Array.isArray(value)) {
     const result: unknown[] = [];
     const length = Math.min(value.length, 50);
@@ -318,16 +319,52 @@ function boundedStructuredToolValue(value: unknown, budget: { remaining: number 
     }
     return result;
   }
-  const text = String(value).slice(0, Math.max(0, budget.remaining - 24));
-  budget.remaining -= text.length;
-  return text;
+  return '[value omitted]';
 }
 
 function toolDetails(result: unknown): unknown {
   if (!result || typeof result !== 'object') return undefined;
   try {
     const details = (result as { details?: unknown }).details;
-    return details === undefined ? undefined : boundedStructuredToolValue(details, { remaining: MAX_TOOL_DETAILS_CHARS });
+    if (details === undefined) return undefined;
+    if (details && typeof details === 'object' && !Array.isArray(details)) {
+      const source = details as Record<string, unknown>;
+      const modes = new Set(['single', 'parallel', 'chain']);
+      if (typeof source.mode === 'string' && modes.has(source.mode) && Array.isArray(source.results)) {
+        const runs = source.results.slice(0, 8).flatMap((value) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+          const run = value as Record<string, unknown>;
+          const transcript = Array.isArray(run.messages)
+            ? run.messages.slice(-120).filter((message) => message && typeof message === 'object' && (message as Record<string, unknown>).role === 'assistant').slice(-30).map((message) => {
+              const content = (message as Record<string, unknown>).content;
+              const blocks: Array<Record<string, unknown>> = Array.isArray(content) ? content.slice(-80).flatMap((part): Array<Record<string, unknown>> => {
+                if (!part || typeof part !== 'object') return [];
+                const block = part as Record<string, unknown>;
+                if (block.type === 'text' && typeof block.text === 'string') return [{ type: 'text', text: block.text }];
+                if (block.type === 'toolCall') return [{ type: 'toolCall', name: block.name, arguments: block.arguments }];
+                return [];
+              }).slice(-40) : [];
+              return { content: blocks };
+            })
+            : [];
+          return [{
+            agent: run.agent,
+            agentSource: run.agentSource,
+            task: run.task,
+            exitCode: run.exitCode,
+            stderr: run.stderr,
+            usage: run.usage,
+            model: run.model,
+            stopReason: run.stopReason,
+            errorMessage: run.errorMessage,
+            step: run.step,
+            messages: transcript,
+          }];
+        });
+        return boundedStructuredToolValue({ mode: source.mode, results: runs, omittedResults: Math.max(0, source.results.length - runs.length) }, { remaining: MAX_TOOL_DETAILS_CHARS });
+      }
+    }
+    return boundedStructuredToolValue(details, { remaining: MAX_TOOL_DETAILS_CHARS });
   } catch {
     return undefined;
   }

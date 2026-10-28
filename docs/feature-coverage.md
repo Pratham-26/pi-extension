@@ -58,11 +58,11 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Browse/invoke Pi slash prompt templates.
 - [x] Prompt-template argument forms/previews; create project templates; edit loaded templates; show extension, skill, prompt, and theme diagnostics; explicitly reload Pi resources.
 - [~] List configured packages; install/remove in user or trusted project scope; confirm and update all configured packages. Package gallery/recommendations and per-resource enable/disable controls are missing. Package install/update can run package-manager code and reload executable extensions only after an explicit modal confirmation.
-- [~] Support extension select/confirm/input/editor dialogs, notices, status values, plain-text widgets, and composer text. Bounded structured tool details and generic checklist cards render in live and saved sessions; concurrent dialogs, timeouts/signals, arbitrary custom renderers/components, terminal cards, and native subagent UI remain unavailable.
+- [~] Support extension select/confirm/input/editor dialogs, notices, status values, plain-text widgets, and composer text. Bounded structured tool details and generic checklist cards render in live and saved sessions; concurrent dialogs, timeouts/signals, arbitrary custom renderers/components, and terminal cards remain unavailable.
 - [x] Show and open extension load-error sources and reload Pi resources.
 - [~] Browse registered Pi extension commands and request their argument suggestions; completion code runs only after a user click, and suggestions only fill the composer.
 - [~] Opt-in connections from Pi's MCP configuration, project trust gating, status/login/reconnect through `/mcp`, and generic tool cards; graphical server controls and per-server exposure edits remain in `mcp.json`.
-- [ ] Recognize supported subagent tools and show their runs, transcripts, and controls.
+- [~] Recognize structured single/parallel/chain subagent results; show bounded run metadata, task text, assistant text/tool-call transcripts, usage, and errors. Per-child stop and live activity controls remain unavailable.
 
 ## Git review, notifications, and privacy
 
