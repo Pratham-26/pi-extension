@@ -553,6 +553,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private pendingExtensionUiRequestIds = new Set<string>();
   private providerAuthPromptCancels = new Map<string, { worker: Worker; cancel: () => void }>();
   private activeEditorSubscription: vscode.Disposable;
+  private activeTerminalSubscription: vscode.Disposable;
   private selectionSubscription: vscode.Disposable;
   private pinnedActiveFileEnabled: boolean;
   private diagnosticEvents: Array<{ at: string; category: string }> = [];
@@ -573,8 +574,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }, 2500);
     this.runningSessionPoller.unref?.();
     this.activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (editor) this.post({ type: 'dismiss-composer-popovers' });
+      // The active editor can become undefined when focus moves to a terminal,
+      // panel, or another workbench surface. Treat that transition as outside.
+      this.post({ type: 'dismiss-composer-popovers' });
       if (this.pinnedActiveFileEnabled && editor) this.publishPinnedActiveFile(editor);
+    });
+    this.activeTerminalSubscription = vscode.window.onDidChangeActiveTerminal(() => {
+      this.post({ type: 'dismiss-composer-popovers' });
     });
     this.selectionSubscription = vscode.window.onDidChangeTextEditorSelection((event) => {
       if (event.textEditor === vscode.window.activeTextEditor
@@ -595,6 +601,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.outputChannel.dispose();
     this.extensionStatusBarItem?.dispose();
     this.activeEditorSubscription.dispose();
+    this.activeTerminalSubscription.dispose();
     this.selectionSubscription.dispose();
     this.webviewMessageSubscription?.dispose();
     this.webviewMessageSubscription = undefined;

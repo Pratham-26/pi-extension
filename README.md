@@ -54,10 +54,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.113.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.114.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.113.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.114.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.
