@@ -377,6 +377,9 @@ button:focus-visible, textarea:focus-visible {
 .attachment-chip.pinned { border-style: dashed; color: var(--accent); }
 .attachment-preview { width: 25px; height: 25px; object-fit: cover; border-radius: 3px; }
 .attachment-name { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-context-toggle { padding: 2px 4px; border: 0; border-radius: 3px; color: var(--accent); background: transparent; cursor: pointer; font-size: 10px; }
+.attachment-context-toggle:hover { color: var(--text); background: color-mix(in srgb, var(--text) 9%, transparent); }
+.attachment-context-preview { flex: 1 0 100%; max-width: 100%; max-height: 210px; margin: 0; padding: 7px 8px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; color: var(--vscode-editor-foreground, var(--text)); background: var(--vscode-textCodeBlock-background, var(--surface-raised)); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .attachment-remove { display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 3px; color: var(--muted); background: transparent; cursor: pointer; }
 .attachment-remove:hover { color: var(--text); background: color-mix(in srgb, var(--text) 9%, transparent); }
 .attachment-remove svg { width: 11px; height: 11px; stroke: currentColor; stroke-width: 2; }

@@ -20,6 +20,7 @@ const state = {
   messages: [],
   bookmarks: [],
   attachments: [],
+  expandedContextId: '',
   pinnedFile: undefined,
   pinnedFileEnabled: false,
   hasSession: false,
@@ -847,6 +848,11 @@ function jumpToQuotedMessage(entryId) {
 
 function renderAttachments() {
   ui.attachments.replaceChildren();
+  const visibleAttachmentIds = new Set([
+    ...(state.pinnedFile ? [state.pinnedFile.id] : []),
+    ...state.attachments.map((attachment) => attachment.id),
+  ]);
+  if (!visibleAttachmentIds.has(state.expandedContextId)) state.expandedContextId = '';
   const appendChip = (attachment, isPinned = false) => {
     const chip = document.createElement('span');
     chip.className = `attachment-chip${isPinned ? ' pinned' : ''}`;
@@ -860,6 +866,24 @@ function renderAttachments() {
       preview.src = `data:${attachment.image.mimeType};base64,${attachment.image.data}`;
       preview.alt = attachment.label;
       chip.prepend(preview);
+    }
+    let previewContext;
+    if (typeof attachment.context === 'string' && attachment.context) {
+      const expanded = state.expandedContextId === attachment.id;
+      previewContext = document.createElement('button');
+      previewContext.type = 'button';
+      previewContext.className = 'attachment-context-toggle';
+      previewContext.dataset.attachmentId = String(attachment.id || '');
+      previewContext.textContent = expanded ? 'Hide' : 'View';
+      previewContext.title = expanded ? 'Hide attached text context' : 'Preview attached text context';
+      previewContext.setAttribute('aria-expanded', String(expanded));
+      previewContext.addEventListener('click', () => {
+        state.expandedContextId = expanded ? '' : attachment.id;
+        renderAttachments();
+        const replacement = Array.from(ui.attachments.querySelectorAll('.attachment-context-toggle'))
+          .find((button) => button.dataset.attachmentId === String(attachment.id || ''));
+        replacement?.focus();
+      });
     }
     const remove = document.createElement('button');
     remove.type = 'button';
@@ -877,8 +901,19 @@ function renderAttachments() {
       }
       renderAttachments();
     });
-    chip.append(name, remove);
+    chip.append(name);
+    if (previewContext) chip.append(previewContext);
+    chip.append(remove);
     ui.attachments.append(chip);
+    if (state.expandedContextId === attachment.id && typeof attachment.context === 'string' && attachment.context) {
+      const preview = document.createElement('pre');
+      preview.className = 'attachment-context-preview';
+      preview.tabIndex = 0;
+      preview.setAttribute('aria-label', `Attached context for ${String(attachment.label || 'item').slice(0, 160)}`);
+      preview.textContent = attachment.context.slice(0, 100_000);
+      if (attachment.context.length > 100_000) preview.textContent += '\n[Preview truncated after 100,000 characters]';
+      ui.attachments.append(preview);
+    }
   };
   if (state.pinnedFile) appendChip(state.pinnedFile, true);
   for (const attachment of state.attachments) {
