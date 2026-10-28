@@ -44,6 +44,7 @@ type WorkerInput = {
   source?: string;
   scope?: string;
   resourceChanges?: unknown[];
+  disabledContextFiles?: unknown;
   autoNameSessions?: boolean;
   steering?: string[];
   followUp?: string[];
@@ -73,6 +74,7 @@ type SessionLike = {
     login?: (providerId: string, type: 'api_key' | 'oauth', interaction: unknown) => Promise<unknown>;
   };
   resourceLoader?: {
+    getAgentsFiles?: () => { agentsFiles: Array<{ path: string; content: string }> };
     getExtensions?: () => { errors?: Array<{ path?: string; error?: string }>; warnings?: Array<{ path?: string; warning?: string }> };
     getSkills: () => { skills: Array<{ name: string; description?: string; disableModelInvocation?: boolean }>; diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
     getPrompts: () => { prompts: Array<{ name: string; description?: string; argumentHint?: string; content?: string; filePath?: string }>; diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
@@ -133,10 +135,21 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; disabledContextFiles?: unknown } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
 let mcpEnabled = workerOptions?.mcpEnabled === true;
 let autoNameSessions = workerOptions?.autoNameSessions !== false;
+function parseContextFilePaths(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > 2000) return undefined;
+  const paths: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || item.length > 4096 || !isAbsolute(item) || /[\u0000-\u001f\u007f]/.test(item)) return undefined;
+    if (!paths.includes(item)) paths.push(item);
+  }
+  return paths;
+}
+let disabledContextFilePaths = new Set(parseContextFilePaths(workerOptions?.disabledContextFiles) ?? []);
+let contextFileCandidates: string[] = [];
 const MAX_TOOL_UI_CHARS = 100_000;
 const MAX_TOOL_DETAILS_CHARS = 24_000;
 const PI_RESOURCE_TYPES = ['extensions', 'skills', 'prompts', 'themes'] as const;
@@ -753,6 +766,10 @@ function sendOptions(): void {
   const loadedSkills = session.resourceLoader?.getSkills();
   const loadedPrompts = session.resourceLoader?.getPrompts();
   const loadedExtensions = session.resourceLoader?.getExtensions?.();
+  const contextFiles = contextFileCandidates.slice(0, 500).map((filePath) => ({
+    path: filePath,
+    enabled: !disabledContextFilePaths.has(filePath),
+  }));
   let extensionCommands: Array<{ name: string; description: string; hasArgumentCompletions: boolean }> = [];
   try {
     extensionCommands = (session.extensionRunner?.getRegisteredCommands?.() ?? []).slice(0, 100).flatMap((command) => {
@@ -852,6 +869,8 @@ function sendOptions(): void {
       cacheWarming: session.settingsManager?.getCacheWarmingMode?.() ?? 'off',
     },
     providers: providers.filter((provider) => provider.supportsApiKey || provider.supportsOAuth),
+    contextFiles,
+    contextFilesTruncated: contextFileCandidates.length > contextFiles.length,
     extensionCommands,
     mcpEnabled,
     modelsConfigPath: join(getAgentDir(), 'models.json'),
@@ -1402,6 +1421,14 @@ async function createSession(path?: string): Promise<boolean> {
       settingsManager,
       extensionFactories,
       disabledBuiltinExtensions: ['mcp'],
+      agentsFilesOverride: (current) => {
+        contextFileCandidates = current.agentsFiles
+          .map((file) => file.path)
+          .filter((filePath) => typeof filePath === 'string' && filePath.length <= 4096 && isAbsolute(filePath)
+            && !/[\u0000-\u001f\u007f]/.test(filePath));
+        disabledContextFilePaths = new Set([...disabledContextFilePaths].filter((filePath) => contextFileCandidates.includes(filePath)));
+        return { agentsFiles: current.agentsFiles.filter((file) => !disabledContextFilePaths.has(file.path)) };
+      },
     });
     await resourceLoader.reload({ resolveProjectTrust: () => resolveProjectTrust(settingsManager) });
     const result = await createAgentSession({ cwd, sessionManager: manager, settingsManager, resourceLoader });
@@ -1457,6 +1484,52 @@ function watchModelConfig(): void {
     });
   } catch {
     // The models file is still loaded when a session starts; the picker also offers manual refresh.
+  }
+}
+
+async function setContextFileSelection(input: WorkerInput): Promise<void> {
+  const requestId = typeof input.requestId === 'string' && /^[a-f0-9]{24}$/.test(input.requestId)
+    ? input.requestId
+    : undefined;
+  if (!requestId) return;
+  const requestedDisabled = parseContextFilePaths(input.disabledContextFiles);
+  if (!requestedDisabled) {
+    send('context-files-failed', { requestId, message: 'The context-file selection was invalid.' });
+    return;
+  }
+  const activeSession = session;
+  if (!activeSession?.reload || !activeSession.resourceLoader?.getAgentsFiles || busy || authenticatingProvider) {
+    send('context-files-failed', { requestId, message: 'The Pi runtime is unavailable or busy. Try again when it is idle.' });
+    return;
+  }
+
+  const available = new Set(contextFileCandidates);
+  const nextDisabled = new Set(requestedDisabled.filter((filePath) => available.has(filePath)));
+  const unchanged = nextDisabled.size === disabledContextFilePaths.size
+    && [...nextDisabled].every((filePath) => disabledContextFilePaths.has(filePath));
+  if (unchanged) {
+    send('context-files-applied', { requestId, disabledContextFiles: [...disabledContextFilePaths] });
+    return;
+  }
+
+  const previousDisabled = disabledContextFilePaths;
+  busy = true;
+  reloadingResources = true;
+  send('run-started', { canStop: false, activity: 'Reloading Pi resources' });
+  try {
+    disabledContextFilePaths = nextDisabled;
+    await activeSession.reload();
+    send('context-files-applied', { requestId, disabledContextFiles: [...disabledContextFilePaths] });
+  } catch {
+    disabledContextFilePaths = previousDisabled;
+    try { await activeSession.reload(); } catch { /* Keep the previous selection for the next resource reload. */ }
+    send('context-files-failed', { requestId, message: 'Pi could not reload with that context-file selection. The previous selection was restored.' });
+  } finally {
+    reloadingResources = false;
+    busy = false;
+    send('run-finished', { aborted: false, resourceReload: true });
+    snapshot();
+    sendOptions();
   }
 }
 
@@ -1570,6 +1643,10 @@ async function handle(input: WorkerInput): Promise<void> {
       }
       case 'newSession':
         autoNameSessions = input.autoNameSessions !== false;
+        if (busy || reloadingResources) {
+          send('notice', { message: 'Finish the current Pi operation before opening a new session.' });
+          return;
+        }
         if (authenticatingProvider) {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
           return;
@@ -1605,6 +1682,10 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'openSession':
+        if (busy || reloadingResources) {
+          send('notice', { message: 'Finish the current Pi operation before switching sessions.' });
+          return;
+        }
         if (authenticatingProvider) {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
           return;
@@ -1895,6 +1976,9 @@ async function handle(input: WorkerInput): Promise<void> {
       }
       case 'setPiResourceStates':
         await setPiResourceStates(input);
+        return;
+      case 'setContextFiles':
+        await setContextFileSelection(input);
         return;
       case 'managePackage':
         await manageConfiguredPackage(input);

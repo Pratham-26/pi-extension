@@ -81,6 +81,7 @@ type PiResourceChoice = vscode.QuickPickItem & {
 };
 
 type PiOfflineMode = 'inherit' | 'offline' | 'online';
+type ContextFileChoice = { path: string; enabled: boolean };
 
 type RunningSessionRecord = {
   version: 1;
@@ -199,6 +200,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private knownPromptPaths = new Set<string>();
   private knownResourcePaths = new Set<string>();
   private availableProviders: ProviderSetup[] = [];
+  private contextFileChoices: ContextFileChoice[] = [];
+  private contextFilesTruncated = false;
+  private pendingContextFileSelection?: { worker: Worker; requestId: string; previousDisabled: string[] };
   private modelsConfigPath = '';
   private settingsConfigPath = '';
   private mcpConfigPath = '';
@@ -248,6 +252,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
+    this.contextFileChoices = [];
+    this.contextFilesTruncated = false;
+    this.pendingContextFileSelection = undefined;
     this.modelsConfigPath = '';
     this.settingsConfigPath = '';
     this.mcpConfigPath = '';
@@ -370,6 +377,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
+    this.contextFileChoices = [];
+    this.contextFilesTruncated = false;
+    this.pendingContextFileSelection = undefined;
     this.modelsConfigPath = '';
     this.settingsConfigPath = '';
     this.mcpConfigPath = '';
@@ -436,6 +446,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         cwd,
         autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
         mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
+        disabledContextFiles: this.readDisabledContextFiles(),
       },
     });
     this.worker = worker;
@@ -512,6 +523,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         void this.handleMcpOpenUrl(message, worker);
       } else if (message.type === 'mcp-setting-applied' || message.type === 'mcp-setting-failed') {
         void this.handleMcpSettingResult(message, worker);
+      } else if (message.type === 'context-files-applied' || message.type === 'context-files-failed') {
+        void this.handleContextFileSelectionResult(message, worker);
       } else if (message.type === 'session-exported') {
         void this.handleSessionExport(message);
       } else if (message.type === 'sessions' && Array.isArray(message.sessions)) {
@@ -599,6 +612,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             }];
           })
           : [];
+        this.contextFileChoices = Array.isArray(message.contextFiles)
+          ? (message.contextFiles as Array<Record<string, unknown>>).slice(0, 500).flatMap((item) => {
+            if (typeof item.path !== 'string' || item.path.length > 4096 || !path.isAbsolute(item.path)
+              || /[\u0000-\u001f\u007f]/.test(item.path) || typeof item.enabled !== 'boolean') return [];
+            return [{ path: item.path, enabled: item.enabled }];
+          })
+          : [];
+        this.contextFilesTruncated = message.contextFilesTruncated === true;
         this.modelsConfigPath = typeof message.modelsConfigPath === 'string'
           && message.modelsConfigPath.length <= 4096
           && path.isAbsolute(message.modelsConfigPath)
@@ -626,7 +647,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.knownResourcePaths = new Set([...promptPaths, ...diagnosticPaths]
           .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096)
           .map((value) => this.normalizeSessionPath(value)));
-        const { modelsConfigPath: _modelsConfigPath, settingsConfigPath: _settingsConfigPath, mcpConfigPath: _mcpConfigPath, ...safeMessage } = message;
+        const {
+          modelsConfigPath: _modelsConfigPath,
+          settingsConfigPath: _settingsConfigPath,
+          mcpConfigPath: _mcpConfigPath,
+          contextFiles: _contextFiles,
+          contextFilesTruncated: _contextFilesTruncated,
+          ...safeMessage
+        } = message;
         this.post({ ...safeMessage, presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
       } else {
         this.post(message);
@@ -977,6 +1005,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         worker.postMessage({ type: 'listPiResources', requestId });
         return;
       }
+      case 'manageContextFiles':
+        await this.manageContextFiles();
+        return;
       case 'installPackage':
       case 'managePackage': {
         const worker = this.worker;
@@ -2214,6 +2245,37 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handleContextFileSelectionResult(message: RuntimeMessage, worker: Worker): Promise<void> {
+    const pending = this.pendingContextFileSelection;
+    if (!pending || pending.worker !== worker || pending.requestId !== message.requestId || this.worker !== worker) return;
+    this.pendingContextFileSelection = undefined;
+    if (message.type === 'context-files-failed') {
+      try { await this.context.workspaceState.update('piChat.context.disabledFiles', pending.previousDisabled); } catch { /* Keep the confirmed selection if state rollback is unavailable. */ }
+      this.post({
+        type: 'notice',
+        message: typeof message.message === 'string' ? message.message.slice(0, 300) : 'Pi could not apply the context-file selection.',
+        isError: true,
+      });
+      return;
+    }
+
+    const rawDisabled = message.disabledContextFiles;
+    if (!Array.isArray(rawDisabled) || rawDisabled.length > 2000
+      || rawDisabled.some((item) => typeof item !== 'string' || item.length > 4096 || !path.isAbsolute(item) || /[\u0000-\u001f\u007f]/.test(item))) {
+      try { await this.context.workspaceState.update('piChat.context.disabledFiles', pending.previousDisabled); } catch { /* Keep the confirmed selection if state rollback is unavailable. */ }
+      this.post({ type: 'notice', message: 'Pi returned an invalid context-file selection. The previous setting was restored.', isError: true });
+      return;
+    }
+    const disabledPaths = [...new Set(rawDisabled as string[])];
+    try {
+      await this.context.workspaceState.update('piChat.context.disabledFiles', disabledPaths);
+      this.post({ type: 'notice', message: 'Pi context files updated. Future prompts will use the selected files.' });
+    } catch {
+      try { await this.context.workspaceState.update('piChat.context.disabledFiles', pending.previousDisabled); } catch { /* Keep the already-applied setting if rollback is unavailable. */ }
+      this.post({ type: 'notice', message: 'Pi applied the selection, but VS Code could not save it for this workspace.', isError: true });
+    }
+  }
+
   private openDiagramPanel(value: unknown): void {
     if (typeof value !== 'string' || value.length > 300_000) {
       this.post({ type: 'notice', message: 'That diagram is too large to open separately.', isError: true });
@@ -2320,6 +2382,103 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       '{}\n',
       'Create Pi’s settings file? This file changes Pi behavior for all sessions that use this configuration.',
     );
+  }
+
+  private readDisabledContextFiles(): string[] {
+    const value = this.context.workspaceState.get<unknown>('piChat.context.disabledFiles', []);
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.filter((item): item is string => typeof item === 'string'
+      && item.length <= 4096 && path.isAbsolute(item) && !/[\u0000-\u001f\u007f]/.test(item)))].slice(0, 2000);
+  }
+
+  private async manageContextFiles(): Promise<void> {
+    const worker = this.worker;
+    if (!worker) {
+      this.post({ type: 'notice', message: 'Open a Pi session before choosing context files.' });
+      return;
+    }
+    if (this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'Finish running and queued work before changing context files.', isError: true });
+      return;
+    }
+    if (!this.contextFileChoices.length) {
+      this.post({ type: 'notice', message: 'Pi did not discover any AGENTS.md context files for this workspace.' });
+      return;
+    }
+
+    const workspacePath = this.workerWorkspace ?? '';
+    const choices = this.contextFileChoices.map((choice) => {
+      const relativePath = workspacePath ? path.relative(workspacePath, choice.path) : '';
+      const description = relativePath && !path.isAbsolute(relativePath) && relativePath !== '..'
+        && !relativePath.startsWith(`..${path.sep}`) ? relativePath : choice.path;
+      return {
+        label: `$(file) ${path.basename(choice.path)}`,
+        description,
+        picked: choice.enabled,
+        path: choice.path,
+      };
+    });
+    const selected = await vscode.window.showQuickPick(choices, {
+      canPickMany: true,
+      ignoreFocusOut: true,
+      placeHolder: this.contextFilesTruncated
+        ? 'Choose Pi context files (showing the first 500)'
+        : 'Choose AGENTS.md files included in Pi’s system context',
+      title: 'Pi context files',
+    });
+    if (selected === undefined) return;
+    if (this.worker !== worker || this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'The Pi runtime changed or became busy while choosing context files. Nothing was applied.', isError: true });
+      return;
+    }
+
+    const managedPaths = new Set(this.contextFileChoices.map((choice) => choice.path));
+    const selectedPaths = new Set(selected.map((choice) => choice.path));
+    const disabledPaths = new Set(this.readDisabledContextFiles().filter((filePath) => !managedPaths.has(filePath)));
+    for (const choice of this.contextFileChoices) {
+      if (!selectedPaths.has(choice.path)) disabledPaths.add(choice.path);
+    }
+    const previousDisabled = this.readDisabledContextFiles();
+    const nextDisabled = [...disabledPaths].slice(0, 2000);
+    if (nextDisabled.length === previousDisabled.length
+      && nextDisabled.every((filePath) => previousDisabled.includes(filePath))) return;
+
+    const enabledCount = this.contextFileChoices.length - this.contextFileChoices.filter((choice) => disabledPaths.has(choice.path)).length;
+    const prompt = this.contextFilesTruncated
+      ? `Apply this selection to the displayed ${this.contextFileChoices.length} discovered Pi context files? Other undisplayed files stay enabled. Pi will reload resources; enabled extensions may run during reload.`
+      : `Use ${enabledCount} discovered Pi context file${enabledCount === 1 ? '' : 's'} for future prompts? Pi will reload resources; enabled extensions may run during reload.`;
+    const answer = await vscode.window.showWarningMessage(
+      prompt,
+      { modal: true },
+      'Apply context selection',
+    );
+    if (answer !== 'Apply context selection') return;
+    if (this.worker !== worker || this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'Pi work started while confirmation was open. Nothing was applied.', isError: true });
+      return;
+    }
+
+    try {
+      await this.context.workspaceState.update('piChat.context.disabledFiles', nextDisabled);
+    } catch {
+      this.post({ type: 'notice', message: 'Could not save the context-file selection for this workspace.', isError: true });
+      return;
+    }
+    if (this.worker !== worker || this.runtimeBusy || this.queuedWorkCount > 0) {
+      try { await this.context.workspaceState.update('piChat.context.disabledFiles', previousDisabled); } catch { /* The worker will still apply the last confirmed selection on restart. */ }
+      this.post({ type: 'notice', message: 'Pi work started while saving the selection. Nothing was applied.', isError: true });
+      return;
+    }
+
+    const requestId = randomBytes(12).toString('hex');
+    this.pendingContextFileSelection = { worker, requestId, previousDisabled };
+    try {
+      worker.postMessage({ type: 'setContextFiles', requestId, disabledContextFiles: nextDisabled });
+    } catch {
+      this.pendingContextFileSelection = undefined;
+      try { await this.context.workspaceState.update('piChat.context.disabledFiles', previousDisabled); } catch { /* Keep the already-confirmed setting if rollback is unavailable. */ }
+      this.post({ type: 'notice', message: 'Could not send the context-file selection to Pi.', isError: true });
+    }
   }
 
   onAgentDirConfigurationChanged(): void {
@@ -3246,6 +3405,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <label class="runtime-setting cache-warming-setting" for="offline-mode"><span>Startup network mode</span><select id="offline-mode"><option value="inherit">Use Pi environment</option><option value="offline">Offline startup</option><option value="online">Allow startup checks</option></select></label>
                 <p class="runtime-settings-note">Offline mode disables automatic startup network operations. Model requests still need a connection. Restart Pi to apply changes.</p>
                 <p class="runtime-settings-note">These choices affect Pi sessions using your global settings. Cache warming sends extra provider requests and may cost money.</p>
+                <div class="popover-heading extension-command-heading"><strong>Context files</strong><span>Discovered AGENTS.md instructions</span></div>
+                <button id="manage-context-files" class="text-button" type="button" title="Choose discovered Pi context files for this workspace">Choose context files</button>
+                <p class="runtime-settings-note">The selection is saved per workspace and applies to future prompts. Applying it reloads Pi resources; enabled extensions may run during reload.</p>
                 <div class="popover-heading extension-command-heading"><strong>MCP servers</strong><span>Configured connections are off until you enable them here</span></div>
                 <label class="runtime-setting"><input id="mcp-enabled" type="checkbox"><span>Connect configured MCP servers</span></label>
                 <button id="edit-mcp-config" class="text-button" type="button">Open global mcp.json</button>

@@ -159,6 +159,7 @@ const ui = {
   autoRetry: el('auto-retry'),
   cacheWarming: el('cache-warming'),
   offlineMode: el('offline-mode'),
+  manageContextFiles: el('manage-context-files'),
   mcpEnabled: el('mcp-enabled'),
   editMcpConfig: el('edit-mcp-config'),
   contextMeter: el('context-meter'),
@@ -369,6 +370,7 @@ function updateControls() {
   ui.autoRetry.disabled = !state.hasSession || state.busy;
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
   ui.offlineMode.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
+  ui.manageContextFiles.disabled = !state.hasSession || state.busy || hasQueuedWork;
   ui.mcpEnabled.disabled = !state.hasSession || state.busy || state.mcpSettingPending;
   ui.editMcpConfig.disabled = !state.hasWorkspace || state.busy;
   ui.gitReviewToggle.disabled = !state.hasWorkspace;
@@ -3483,6 +3485,7 @@ ui.offlineMode.addEventListener('change', () => {
   ui.offlineMode.disabled = true;
   post('setPiOfflineMode', { mode: ui.offlineMode.value });
 });
+ui.manageContextFiles.addEventListener('click', () => post('manageContextFiles'));
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
 ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));
 ui.choosePiAgentDir.addEventListener('click', () => post('choosePiAgentDir'));
