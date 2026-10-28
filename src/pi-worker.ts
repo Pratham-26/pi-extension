@@ -121,6 +121,7 @@ type SessionLike = {
     emit?: (event: { type: 'session_shutdown'; reason: 'quit' | 'reload' }) => Promise<unknown>;
     getMessageRenderer?: (customType: string) => ((message: unknown, options: { expanded: boolean; outputPad: number }, theme: unknown) => unknown) | undefined;
     getEntryRenderer?: (customType: string) => ((entry: unknown, options: { expanded: boolean }, theme: unknown) => unknown) | undefined;
+    getMarkdownTransformers?: () => Array<(markdown: string, context: { messageType: 'user' | 'assistant' | 'assistant-thinking'; isStreaming: boolean; availableWidth: number }) => string>;
     getRegisteredCommands?: () => Array<{
       invocationName: string;
       description?: string;
@@ -167,6 +168,7 @@ function parseContextFilePaths(value: unknown): string[] | undefined {
 let disabledContextFilePaths = new Set(parseContextFilePaths(workerOptions?.disabledContextFiles) ?? []);
 let contextFileCandidates: string[] = [];
 const MAX_TOOL_UI_CHARS = 100_000;
+const MAX_MARKDOWN_TRANSFORM_CHARS = 100_000;
 const MAX_TOOL_DETAILS_CHARS = 24_000;
 const MAX_CONTEXT_EDIT_HISTORY_ENTRIES = 160;
 const MAX_CONTEXT_EDIT_HISTORY_PER_MESSAGE = 12;
@@ -198,6 +200,9 @@ let authenticatingProvider = false;
 let providerAuthController: AbortController | undefined;
 let activePromptSuggestion: { requestId: string; entryId: string; controller: AbortController; session: SessionLike } | undefined;
 let lastPromptSuggestionAt = 0;
+let streamingAssistantMarkdown = '';
+let streamingMarkdownOverflow = false;
+let lastStreamingMarkdownTransformAt = 0;
 type SafeTuiSegment = { text: string; styles: string[] };
 type SafeTuiLine = SafeTuiSegment[];
 type RenderedToolResult = { collapsed: SafeTuiLine[]; expanded: SafeTuiLine[] };
@@ -1084,6 +1089,29 @@ function toUiMessage(message: { role?: string; content?: unknown }): { role: str
   return { role: message.role, text: raw, ...(thinking ? { thinking } : {}), hasImages, imageCount };
 }
 
+function piMarkdownTransformers(current: SessionLike): Array<(markdown: string, context: { messageType: 'user' | 'assistant' | 'assistant-thinking'; isStreaming: boolean; availableWidth: number }) => string> {
+  try {
+    return (current.extensionRunner?.getMarkdownTransformers?.() ?? []).filter((transformer) => typeof transformer === 'function').slice(0, 64);
+  } catch {
+    return [];
+  }
+}
+
+function renderPiMarkdown(current: SessionLike, markdown: string, messageType: 'user' | 'assistant' | 'assistant-thinking', isStreaming: boolean): string {
+  const transformers = piMarkdownTransformers(current);
+  if (!transformers.length || typeof markdown !== 'string' || !markdown) return markdown;
+  let value = markdown.slice(0, MAX_MARKDOWN_TRANSFORM_CHARS);
+  for (const transformer of transformers) {
+    try {
+      const transformed = transformer(value, { messageType, isStreaming, availableWidth: 80 });
+      if (typeof transformed === 'string') value = transformed.slice(0, MAX_MARKDOWN_TRANSFORM_CHARS);
+    } catch {
+      // Keep the last valid Markdown when a user-installed transform fails.
+    }
+  }
+  return `${value}${markdown.slice(MAX_MARKDOWN_TRANSFORM_CHARS)}`;
+}
+
 function withContext(text: string, context?: string): string {
   if (!context) return text;
   const block = `--- pi-extension-context:start ---\n<workspace-context>\n${context}\n</workspace-context>\n--- pi-extension-context:end ---`;
@@ -1271,20 +1299,28 @@ function snapshot(): void {
     if (entry.message.role !== 'user' && entry.message.role !== 'assistant') return [];
     const display = toUiMessage(entry.message);
     if (!display) return [];
+    const messageType = display.role as 'user' | 'assistant';
+    const visibleDisplay = {
+      ...display,
+      text: renderPiMarkdown(activeSession, display.text, messageType, false),
+      ...(display.thinking !== undefined
+        ? { thinking: renderPiMarkdown(activeSession, display.thinking, 'assistant-thinking', false) }
+        : {}),
+    };
     if (!contextEdits.has(entry.id)) {
-      return [{ ...userAssistantSnapshot(display, entry.id, entry.message.content), ...contextEditHistoryPayload(entry.id) }];
+      return [{ ...userAssistantSnapshot(visibleDisplay, entry.id, entry.message.content), ...contextEditHistoryPayload(entry.id) }];
     }
     const replacement = contextEdits.get(entry.id);
     if (replacement === null) {
-      return [{ ...userAssistantSnapshot(display, entry.id, entry.message.content), contextStatus: 'omitted', ...contextEditHistoryPayload(entry.id) }];
+      return [{ ...userAssistantSnapshot(visibleDisplay, entry.id, entry.message.content), contextStatus: 'omitted', ...contextEditHistoryPayload(entry.id) }];
     }
     const edited = replacement && 'content' in replacement
       ? toUiMessage({ role: entry.message.role, content: replacement.content })
       : undefined;
     return [{
-      ...userAssistantSnapshot(display, entry.id, entry.message.content),
+      ...userAssistantSnapshot(visibleDisplay, entry.id, entry.message.content),
       contextStatus: 'edited',
-      contextEditText: edited?.text ?? contentText(replacement?.content),
+      contextEditText: renderPiMarkdown(activeSession, edited?.text ?? contentText(replacement?.content), messageType, false),
       ...contextEditHistoryPayload(entry.id),
     }];
   });
@@ -1465,6 +1501,9 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   unsubscribe?.();
   session?.dispose();
   session = next;
+  streamingAssistantMarkdown = '';
+  streamingMarkdownOverflow = false;
+  lastStreamingMarkdownTransformAt = 0;
   toolRendererStates.clear();
   await loadToolRendererTheme(next);
   sessionExtensionsBound = extensionsBound;
@@ -1486,17 +1525,49 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   installExtensionUi(next);
   unsubscribe = next.subscribe((event: any) => {
     if (event.type === 'message_start' && event.message?.role === 'assistant') {
+      streamingAssistantMarkdown = '';
+      streamingMarkdownOverflow = false;
+      lastStreamingMarkdownTransformAt = 0;
       send('assistant-start');
     } else if (event.type === 'message_update') {
       const update = event.assistantMessageEvent;
       if (update?.type === 'text_delta' && typeof update.delta === 'string') {
-        send('assistant-delta', { text: update.delta });
+        if (streamingMarkdownOverflow || !piMarkdownTransformers(next).length) {
+          send('assistant-delta', { text: update.delta });
+        } else {
+          const combined = streamingAssistantMarkdown + update.delta;
+          if (combined.length > MAX_MARKDOWN_TRANSFORM_CHARS) {
+            const prefix = renderPiMarkdown(next, combined.slice(0, MAX_MARKDOWN_TRANSFORM_CHARS), 'assistant', true);
+            send('assistant-replace', { text: `${prefix}${combined.slice(MAX_MARKDOWN_TRANSFORM_CHARS)}` });
+            streamingAssistantMarkdown = '';
+            streamingMarkdownOverflow = true;
+          } else {
+            streamingAssistantMarkdown = combined;
+            if (Date.now() - lastStreamingMarkdownTransformAt >= 75) {
+              send('assistant-replace', { text: renderPiMarkdown(next, streamingAssistantMarkdown, 'assistant', true) });
+              lastStreamingMarkdownTransformAt = Date.now();
+            }
+          }
+        }
       } else if (update?.type === 'thinking_delta' && typeof update.delta === 'string') {
         send('thinking-delta', { text: update.delta.slice(0, 50_000) });
         send('activity', { message: 'Pi is thinking' });
       } else if (update?.type === 'thinking_start') {
         send('activity', { message: 'Pi is thinking' });
       }
+    } else if (event.type === 'message_end' && event.message?.role === 'assistant') {
+      const display = toUiMessage(event.message);
+      if (display) {
+        send('assistant-replace', {
+          text: renderPiMarkdown(next, display.text, 'assistant', false),
+          ...(display.thinking !== undefined
+            ? { thinking: renderPiMarkdown(next, display.thinking, 'assistant-thinking', false) }
+            : {}),
+        });
+      }
+      streamingAssistantMarkdown = '';
+      streamingMarkdownOverflow = false;
+      lastStreamingMarkdownTransformAt = 0;
     } else if (event.type === 'tool_execution_start') {
       const toolName = String(event.toolName ?? 'tool').slice(0, 128);
       const toolCallId = String(event.toolCallId ?? `${Date.now()}`).slice(0, 256);

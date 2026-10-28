@@ -3488,6 +3488,14 @@ window.addEventListener('message', (event) => {
       renderMessages();
       break;
     }
+    case 'assistant-replace': {
+      if (state.streamIndex < 0 || !state.messages[state.streamIndex]) beginAssistantMessage();
+      const message = state.messages[state.streamIndex];
+      message.text = typeof data.text === 'string' ? data.text : '';
+      if (typeof data.thinking === 'string') message.thinking = data.thinking;
+      renderMessages();
+      break;
+    }
     case 'thinking-delta': {
       if (state.streamIndex < 0 || !state.messages[state.streamIndex]) beginAssistantMessage();
       const message = state.messages[state.streamIndex];
