@@ -30,6 +30,7 @@ const state = {
   model: '',
   currentModel: undefined,
   providers: [],
+  runtimeSettings: { autoCompaction: false, autoRetry: false, cacheWarming: 'off' },
   models: [],
   modelSearch: '',
   chatSearch: '',
@@ -116,6 +117,11 @@ const ui = {
   connectProvider: el('connect-provider'),
   editModelsConfig: el('edit-models-config'),
   editPiSettings: el('edit-pi-settings'),
+  runtimeSettingsToggle: el('runtime-settings-toggle'),
+  runtimeSettings: el('runtime-settings'),
+  autoCompaction: el('auto-compaction'),
+  autoRetry: el('auto-retry'),
+  cacheWarming: el('cache-warming'),
   contextMeter: el('context-meter'),
   contextMeterFill: el('context-meter-fill'),
   contextMeterLabel: el('context-meter-label'),
@@ -286,6 +292,10 @@ function updateControls() {
   ui.connectProvider.disabled = !state.hasWorkspace || state.busy || state.providers.length === 0;
   ui.editModelsConfig.disabled = !state.hasWorkspace || state.busy;
   ui.editPiSettings.disabled = !state.hasWorkspace || state.busy;
+  ui.runtimeSettingsToggle.disabled = !state.hasSession || state.busy;
+  ui.autoCompaction.disabled = !state.hasSession || state.busy;
+  ui.autoRetry.disabled = !state.hasSession || state.busy;
+  ui.cacheWarming.disabled = !state.hasSession || state.busy;
   ui.pinActiveFile.disabled = !state.hasWorkspace;
   for (const button of ui.messageList.querySelectorAll('.context-action')) button.disabled = state.busy;
   ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
@@ -872,6 +882,15 @@ function renderModelChoices(data) {
       authLabel: typeof provider.authLabel === 'string' ? provider.authLabel.slice(0, 128) : '',
     })) : [];
   state.currentModel = data.currentModel;
+  const runtimeSettings = data.runtimeSettings || {};
+  state.runtimeSettings = {
+    autoCompaction: runtimeSettings.autoCompaction === true,
+    autoRetry: runtimeSettings.autoRetry === true,
+    cacheWarming: ['off', 'streaming', 'idle'].includes(runtimeSettings.cacheWarming) ? runtimeSettings.cacheWarming : 'off',
+  };
+  ui.autoCompaction.checked = state.runtimeSettings.autoCompaction;
+  ui.autoRetry.checked = state.runtimeSettings.autoRetry;
+  ui.cacheWarming.value = state.runtimeSettings.cacheWarming;
   state.presets = Array.isArray(data.presets) ? data.presets : state.presets;
   const selectedKey = data.currentModel ? `${data.currentModel.provider}/${data.currentModel.id}` : '';
   const selectedModel = state.models.find((model) => `${model.provider}/${model.id}` === selectedKey);
@@ -1888,6 +1907,23 @@ ui.modelSearch.addEventListener('input', () => {
 });
 el('refresh-models').addEventListener('click', () => post('refreshModels'));
 ui.connectProvider.addEventListener('click', () => post('connectProvider'));
+ui.runtimeSettingsToggle.addEventListener('click', () => {
+  const open = ui.runtimeSettings.hidden;
+  ui.runtimeSettings.hidden = !open;
+  ui.runtimeSettingsToggle.setAttribute('aria-expanded', String(open));
+});
+ui.autoCompaction.addEventListener('change', () => {
+  ui.autoCompaction.disabled = true;
+  post('updatePiSetting', { setting: 'autoCompaction', value: ui.autoCompaction.checked });
+});
+ui.autoRetry.addEventListener('change', () => {
+  ui.autoRetry.disabled = true;
+  post('updatePiSetting', { setting: 'autoRetry', value: ui.autoRetry.checked });
+});
+ui.cacheWarming.addEventListener('change', () => {
+  ui.cacheWarming.disabled = true;
+  post('updatePiSetting', { setting: 'cacheWarming', value: ui.cacheWarming.value });
+});
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
 ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));
 ui.thinkingChoice.addEventListener('change', () => post('setThinkingLevel', { thinkingLevel: ui.thinkingChoice.value }));

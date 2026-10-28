@@ -472,6 +472,31 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (answer === 'Refresh catalogs') this.worker?.postMessage({ type: 'refreshModels' });
         return;
       }
+      case 'updatePiSetting': {
+        const worker = this.worker;
+        if (!worker) return;
+        const valid = (message.setting === 'autoCompaction' || message.setting === 'autoRetry')
+          ? typeof message.value === 'boolean'
+          : message.setting === 'cacheWarming'
+            && (message.value === 'off' || message.value === 'streaming' || message.value === 'idle');
+        if (!valid) {
+          worker.postMessage({ type: 'getOptions' });
+          return;
+        }
+        if (message.setting === 'cacheWarming' && message.value !== 'off') {
+          const answer = await vscode.window.showWarningMessage(
+            'Pi cache warming makes additional provider requests and may incur API costs. Enable the selected cache-warming mode in global Pi settings?',
+            { modal: true },
+            'Enable cache warming',
+          );
+          if (answer !== 'Enable cache warming') {
+            if (this.worker === worker) worker.postMessage({ type: 'getOptions' });
+            return;
+          }
+        }
+        if (this.worker === worker) worker.postMessage(message);
+        return;
+      }
       case 'compactSession': {
         const answer = await vscode.window.showWarningMessage(
           'Pi will summarize older context and update the active session. Continue?',
@@ -1635,7 +1660,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <button id="delivery-mode" class="control-button delivery-mode" type="button" aria-label="Queued message mode" title="Click to switch between queue and steer" hidden>Queue next</button>
             <section id="model-popover" class="control-popover model-popover" aria-label="Choose a model" hidden>
               <div class="model-search-row"><input id="model-search" class="session-search" type="search" aria-label="Search models" placeholder="Search models, providers, or vision"><button id="refresh-models" class="icon-button small" type="button" title="Refresh models; may contact providers and run configured API-key commands" aria-label="Refresh model catalog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg></button></div>
-              <div class="provider-actions"><span id="provider-status" class="provider-status"></span><button id="connect-provider" class="text-button" type="button">Connect</button><button id="edit-models-config" class="text-button" type="button" title="Edit Pi's custom models and providers">Models</button><button id="edit-pi-settings" class="text-button" type="button" title="Open Pi's user settings">Pi settings</button></div>
+              <div class="provider-actions"><span id="provider-status" class="provider-status"></span><button id="connect-provider" class="text-button" type="button">Connect</button><button id="runtime-settings-toggle" class="text-button" type="button" aria-expanded="false">Runtime</button><button id="edit-models-config" class="text-button" type="button" title="Edit Pi's custom models and providers">Models</button><button id="edit-pi-settings" class="text-button" type="button" title="Open Pi's user settings">Pi settings</button></div>
+              <section id="runtime-settings" class="runtime-settings" aria-label="Pi runtime settings" hidden>
+                <div class="popover-heading"><strong>Pi runtime settings</strong><span>Saved in global Pi settings</span></div>
+                <label class="runtime-setting"><input id="auto-compaction" type="checkbox"><span>Automatic context compaction</span></label>
+                <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
+                <label class="runtime-setting cache-warming-setting" for="cache-warming"><span>Cache warming</span><select id="cache-warming"><option value="off">Off</option><option value="streaming">While streaming</option><option value="idle">Between runs</option></select></label>
+                <p class="runtime-settings-note">These choices affect Pi sessions using your global settings. Cache warming sends extra provider requests and may cost money.</p>
+              </section>
               <div id="model-list" class="option-list" role="listbox" aria-label="Available models"></div>
             </section>
             <section id="tools-popover" class="control-popover tools-popover" aria-label="Tools for this chat" hidden>

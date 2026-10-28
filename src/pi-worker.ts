@@ -12,6 +12,7 @@ type WorkerInput = {
   entryId?: string;
   entryIds?: unknown[];
   action?: string;
+  setting?: string;
   requestId?: string;
   value?: unknown;
   provider?: string;
@@ -74,6 +75,12 @@ type SessionLike = {
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
+  autoCompactionEnabled?: boolean;
+  setAutoCompactionEnabled?: (enabled: boolean) => void;
+  autoRetryEnabled?: boolean;
+  setAutoRetryEnabled?: (enabled: boolean) => void;
+  setCacheWarmingMode?: (mode: 'off' | 'streaming' | 'idle') => void;
+  settingsManager?: { getCacheWarmingMode?: () => 'off' | 'streaming' | 'idle' };
   getUserMessagesForForking?: () => Array<{ entryId: string; text: string }>;
   navigateTree?: (targetId: string, options?: { summarize?: boolean }) => Promise<{ editorText?: string; cancelled: boolean }>;
   exportToHtml?: () => Promise<string>;
@@ -380,6 +387,11 @@ function sendOptions(): void {
     })) ?? [];
   send('options', {
     models,
+    runtimeSettings: {
+      autoCompaction: Boolean(session.autoCompactionEnabled),
+      autoRetry: Boolean(session.autoRetryEnabled),
+      cacheWarming: session.settingsManager?.getCacheWarmingMode?.() ?? 'off',
+    },
     providers: providers.filter((provider) => provider.supportsApiKey || provider.supportsOAuth),
     modelsConfigPath: join(getAgentDir(), 'models.json'),
     settingsConfigPath: join(getAgentDir(), 'settings.json'),
@@ -529,6 +541,9 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'listSessions':
         await listSessions(typeof input.query === 'string' ? input.query : sessionQuery);
         return;
+      case 'getOptions':
+        sendOptions();
+        return;
       case 'newSession':
         if (authenticatingProvider) {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
@@ -592,6 +607,25 @@ async function handle(input: WorkerInput): Promise<void> {
         } catch (error) {
           send('notice', { message: 'Model catalog refresh failed. Check your Pi provider settings and try again.', isError: true });
         }
+        sendOptions();
+        return;
+      }
+      case 'updatePiSetting': {
+        if (!session || busy) return;
+        if (input.setting === 'autoCompaction' && typeof input.value === 'boolean' && session.setAutoCompactionEnabled) {
+          session.setAutoCompactionEnabled(input.value);
+        } else if (input.setting === 'autoRetry' && typeof input.value === 'boolean' && session.setAutoRetryEnabled) {
+          session.setAutoRetryEnabled(input.value);
+        } else if (input.setting === 'cacheWarming'
+          && (input.value === 'off' || input.value === 'streaming' || input.value === 'idle')
+          && session.setCacheWarmingMode) {
+          session.setCacheWarmingMode(input.value);
+        } else {
+          send('notice', { message: 'That Pi runtime setting is unavailable or invalid.', isError: true });
+          sendOptions();
+          return;
+        }
+        send('notice', { message: 'Pi runtime setting saved to global Pi settings.' });
         sendOptions();
         return;
       }

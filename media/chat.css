@@ -255,6 +255,11 @@ button:focus-visible, textarea:focus-visible {
 .provider-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
 .provider-status { width: 100%; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .provider-actions .text-button { flex: 0 0 auto; padding: 3px 5px; font-size: 9px; }
+.runtime-settings { padding: 7px 8px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
+.runtime-setting { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; color: var(--text); font-size: 10px; }
+.runtime-setting input[type="checkbox"] { accent-color: var(--focus); }
+.cache-warming-setting select { max-width: 48%; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--vscode-dropdown-foreground); background: var(--vscode-dropdown-background); font: inherit; }
+.runtime-settings-note { margin: 5px 0 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
 
 .messages { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 8px 14px 18px; }
 .empty-state { max-width: 440px; margin: clamp(34px, 11vh, 100px) auto 30px; text-align: center; }
