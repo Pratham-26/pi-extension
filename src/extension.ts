@@ -66,6 +66,24 @@ type RuntimeMessage = {
   [key: string]: unknown;
 };
 
+type ToolDisplayDefaultMode = 'folded' | 'normal' | 'expanded';
+type ToolDisplayOverrideMode = 'hidden' | ToolDisplayDefaultMode;
+
+const TOOL_DISPLAY_DEFAULT_MODES = new Set<ToolDisplayDefaultMode>(['folded', 'normal', 'expanded']);
+const TOOL_DISPLAY_OVERRIDE_MODES = new Set<ToolDisplayOverrideMode>(['hidden', 'folded', 'normal', 'expanded']);
+
+function isSafePiToolName(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function normalizeToolDisplayOverrides(value: unknown): Record<string, ToolDisplayOverrideMode> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([name, mode]) => isSafePiToolName(name) && TOOL_DISPLAY_OVERRIDE_MODES.has(mode as ToolDisplayOverrideMode))
+    .slice(-256)) as Record<string, ToolDisplayOverrideMode>;
+}
+
 type ModelPreset = {
   id: string;
   name: string;
@@ -541,6 +559,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.prompts') || event.affectsConfiguration('piChat.resources')) activeProvider.onPiPromptResourceConfigurationChanged();
         if (event.affectsConfiguration('piChat.composer.promptHistory')) activeProvider.onPromptHistoryConfigurationChanged();
         if (event.affectsConfiguration('piChat.appearance')) activeProvider.onAppearanceConfigurationChanged();
+        if (event.affectsConfiguration('piChat.transcript')) activeProvider.onTranscriptConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -632,6 +651,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private notificationHookSavePending = false;
   private logWriteQueue: Promise<void> = Promise.resolve();
   private savedDraftsWrite: Promise<void> = Promise.resolve();
+  private toolDisplaySettingsWriteQueue: Promise<void> = Promise.resolve();
   private sessionInputDispatchQueue: Promise<void> = Promise.resolve();
   private sessionInputDispatchEpoch = 0;
 
@@ -779,6 +799,31 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private postPromptHistorySetting(): void {
     const enabled = vscode.workspace.getConfiguration('piChat.composer').get<boolean>('promptHistory', true);
     this.post({ type: 'prompt-history-setting', enabled });
+  }
+
+  private readToolDisplaySettings(): { defaultMode: ToolDisplayDefaultMode; overrides: Record<string, ToolDisplayOverrideMode> } {
+    const configuration = vscode.workspace.getConfiguration('piChat.transcript');
+    const inspectedMode = configuration.inspect<ToolDisplayDefaultMode>('toolDisplayMode');
+    const explicitMode = [inspectedMode?.globalValue, inspectedMode?.workspaceValue, inspectedMode?.workspaceFolderValue]
+      .find((value): value is ToolDisplayDefaultMode => typeof value === 'string' && TOOL_DISPLAY_DEFAULT_MODES.has(value as ToolDisplayDefaultMode));
+    const defaultMode = explicitMode
+      ?? (configuration.get<boolean>('expandSuccessfulToolCalls', false) ? 'expanded' : 'folded');
+    return {
+      defaultMode,
+      overrides: normalizeToolDisplayOverrides(configuration.get('toolDisplayOverrides')),
+    };
+  }
+
+  private async persistToolDisplaySettings(update: () => Promise<void>): Promise<void> {
+    const operation = this.toolDisplaySettingsWriteQueue.then(update, update);
+    this.toolDisplaySettingsWriteQueue = operation.catch(() => {});
+    await operation;
+    this.onTranscriptConfigurationChanged();
+  }
+
+  onTranscriptConfigurationChanged(): void {
+    const settings = this.readToolDisplaySettings();
+    this.post({ type: 'tool-display-settings', ...settings });
   }
 
   onAppearanceConfigurationChanged(): void {
@@ -1963,11 +2008,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           contextFilesTruncated: _contextFilesTruncated,
           ...safeMessage
         } = message;
+        const toolDisplaySettings = this.readToolDisplaySettings();
         this.post({
           ...safeMessage,
           runtimeSettings: { ...runtimeSettings, offlineMode: readPiOfflineMode() },
           notificationSound: vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('sound', false),
           autoRefreshModels: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
+          toolDisplayDefault: toolDisplaySettings.defaultMode,
+          toolDisplayOverrides: toolDisplaySettings.overrides,
           expandSuccessfulToolCalls: vscode.workspace.getConfiguration('piChat.transcript').get<boolean>('expandSuccessfulToolCalls', false),
           presets: this.readModelPresets(),
           defaultPresetId: this.getDefaultModelPresetId(),
@@ -2188,9 +2236,49 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           await vscode.workspace.getConfiguration('piChat.transcript').update(
             'expandSuccessfulToolCalls', message.enabled, vscode.ConfigurationTarget.Global,
           );
-          this.post({ type: 'tool-expansion-default-setting', enabled: message.enabled });
+          this.onTranscriptConfigurationChanged();
         } catch (error) {
+          this.onTranscriptConfigurationChanged();
           this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the tool-card display preference.', isError: true });
+        }
+        return;
+      }
+      case 'setToolDisplayDefault': {
+        const mode = message.mode;
+        if (typeof mode !== 'string' || !TOOL_DISPLAY_DEFAULT_MODES.has(mode as ToolDisplayDefaultMode)) return;
+        try {
+          await this.persistToolDisplaySettings(async () => {
+            await vscode.workspace.getConfiguration('piChat.transcript').update(
+              'toolDisplayMode', mode, vscode.ConfigurationTarget.Global,
+            );
+          });
+        } catch (error) {
+          this.onTranscriptConfigurationChanged();
+          this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the default tool display.', isError: true });
+        }
+        return;
+      }
+      case 'setToolDisplayOverride': {
+        const toolName = message.toolName;
+        const mode = message.mode;
+        if (!isSafePiToolName(toolName) || !this.availableToolNames.has(toolName)) {
+          this.post({ type: 'notice', message: 'That Pi tool is no longer available in this session.', isError: true });
+          this.onTranscriptConfigurationChanged();
+          return;
+        }
+        if (mode !== 'default' && (typeof mode !== 'string' || !TOOL_DISPLAY_OVERRIDE_MODES.has(mode as ToolDisplayOverrideMode))) return;
+        try {
+          await this.persistToolDisplaySettings(async () => {
+            const configuration = vscode.workspace.getConfiguration('piChat.transcript');
+            const overrides = normalizeToolDisplayOverrides(configuration.get('toolDisplayOverrides'));
+            if (mode === 'default') delete overrides[toolName];
+            else overrides[toolName] = mode as ToolDisplayOverrideMode;
+            const entries = Object.entries(overrides).slice(-256);
+            await configuration.update('toolDisplayOverrides', Object.fromEntries(entries), vscode.ConfigurationTarget.Global);
+          });
+        } catch (error) {
+          this.onTranscriptConfigurationChanged();
+          this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the per-tool display preference.', isError: true });
         }
         return;
       }
@@ -7101,7 +7189,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <button id="git-review-toggle" class="icon-button" type="button" title="Review Git changes" aria-label="Review Git changes" aria-expanded="false" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v12a4 4 0 0 0 4 4h8"/><path d="m14 15 4 4-4 4"/><circle cx="6" cy="3" r="2"/></svg>
         </button>
-        <button id="focus-transcript-toggle" class="icon-button" type="button" title="Hide tool activity" aria-label="Hide tool activity" aria-pressed="false">
+        <button id="focus-transcript-toggle" class="icon-button" type="button" title="Focus transcript" aria-label="Focus transcript" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-6 9-6 9 6 9 6-3.2 6-9 6-9-6-9-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
         </button>
         <button id="bookmark-toggle" class="text-button header-action" type="button" title="Show bookmarked messages" aria-expanded="false">★</button>
@@ -7306,8 +7394,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div id="tool-list" class="option-list"></div>
               <div class="tool-display-preference">
                 <span class="tool-display-title">Transcript</span>
-                <label><input id="expand-successful-tools" type="checkbox"><span>Expand successful calls by default</span></label>
-                <small>Errors always open. Manual changes to a tool card are remembered.</small>
+                <label class="tool-display-default" for="tool-display-default"><span>Default detail</span><select id="tool-display-default"><option value="folded">Folded</option><option value="normal">Normal</option><option value="expanded">Expanded</option></select></label>
+                <details class="tool-display-overrides"><summary>Per-tool display</summary><div id="tool-display-list" class="tool-display-list"></div></details>
+                <small>Errors stay visible and open. Manual card changes are remembered.</small>
               </div>
             </section>
             <section id="skills-popover" class="control-popover skills-popover" aria-label="Skills and prompt templates" hidden>

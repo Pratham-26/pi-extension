@@ -653,8 +653,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-default-actions button:disabled { opacity: .5; cursor: default; }
 .tool-display-preference { display: grid; gap: 4px; padding: 7px 6px 2px; border-top: 1px solid var(--line); }
 .tool-display-title { color: var(--muted); font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
-.tool-display-preference label { display: flex; align-items: center; gap: 5px; color: var(--text); cursor: pointer; font-size: 10px; }
-.tool-display-preference input { margin: 0; accent-color: var(--focus); }
+.tool-display-default { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); font-size: 10px; }
+.tool-display-default select, .tool-display-row select { height: 22px; min-width: 90px; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--surface-input); font-size: 9px; }
+.tool-display-overrides { min-width: 0; }
+.tool-display-overrides > summary { width: fit-content; color: var(--muted); cursor: pointer; font-size: 9px; }
+.tool-display-list { display: grid; gap: 2px; max-height: 180px; margin-top: 4px; overflow: auto; }
+.tool-display-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; padding: 2px 0; }
+.tool-display-row > span { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 9px; }
+.tool-display-list > small { color: var(--muted); font-size: 9px; }
 .tool-display-preference small { color: var(--muted); font-size: 9px; line-height: 1.35; }
 .skill-option { display: flex; align-items: center; gap: 3px; min-width: 0; }
 .skill-option .command-option { flex: 1; }
@@ -727,6 +733,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-exploration-group > summary, .tool-activity-group > summary { padding: 5px 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; cursor: pointer; }
 .tool-exploration-group[open] > summary, .tool-activity-group[open] > summary { color: var(--text); }
 .tool-exploration-group > .tool-card, .tool-activity-group > .tool-card { width: 100%; margin: 5px 0; }
+#message-list.focused-transcript .tool-exploration-group, #message-list.focused-transcript .tool-activity-group { margin: 2px auto; }
+#message-list.focused-transcript .tool-exploration-group > summary, #message-list.focused-transcript .tool-activity-group > summary { padding: 5px 8px; border: 1px solid transparent; border-radius: 5px; }
+#message-list.focused-transcript .tool-exploration-group > summary:hover, #message-list.focused-transcript .tool-activity-group > summary:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
 .tool-output { max-height: 220px; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; }
 .tool-structured-result { border-top: 1px solid var(--line); padding: 8px; color: var(--text); font-size: 11px; }
 .tool-checklist-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 7px; }

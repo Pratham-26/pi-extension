@@ -3,6 +3,17 @@ const vscode = acquireVsCodeApi();
 const draftStore = window.PiChatDraftStore;
 const persistedWebviewState = vscode.getState() || {};
 const recommendedPackageNames = new Set(['pi-subagents', '@inobit/pi-todo', '@plannotator/pi-extension']);
+const TOOL_DISPLAY_OVERRIDE_MODES = new Set(['hidden', 'folded', 'normal', 'expanded']);
+const TOOL_DISPLAY_DEFAULT_MODES = new Set(['folded', 'normal', 'expanded']);
+
+function normalizeToolDisplayOverrides(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .filter(([name, mode]) => typeof name === 'string' && name.length > 0 && name.length <= 128
+      && !/[\u0000-\u001f\u007f]/.test(name) && TOOL_DISPLAY_OVERRIDE_MODES.has(mode))
+    .slice(-256));
+}
+
 const state = {
   hasWorkspace: false,
   workspaceName: '',
@@ -124,7 +135,8 @@ const state = {
   activeTools: [],
   defaultTools: [],
   newSessionToolNames: null,
-  expandSuccessfulToolCalls: false,
+  toolDisplayDefault: 'folded',
+  toolDisplayOverrides: {},
   disabledSkills: [],
   branchPoints: [],
   gitChanges: [],
@@ -305,10 +317,11 @@ const ui = {
   toolsToggle: el('tools-toggle'),
   toolsPopover: el('tools-popover'),
   toolList: el('tool-list'),
+  toolDisplayDefault: el('tool-display-default'),
+  toolDisplayList: el('tool-display-list'),
   newChatToolDefaultLabel: el('new-chat-tool-default-label'),
   saveToolDefault: el('save-tool-default'),
   resetToolDefault: el('reset-tool-default'),
-  expandSuccessfulTools: el('expand-successful-tools'),
   skillsToggle: el('skills-toggle'),
   skillsPopover: el('skills-popover'),
   skillList: el('skill-list'),
@@ -339,7 +352,7 @@ const ui = {
 
 function syncFocusTranscriptToggle() {
   const active = state.focusedTranscript;
-  ui.focusTranscriptToggle.title = active ? 'Show tool activity' : 'Hide tool activity';
+  ui.focusTranscriptToggle.title = active ? 'Show full transcript' : 'Focus transcript';
   ui.focusTranscriptToggle.setAttribute('aria-label', ui.focusTranscriptToggle.title);
   ui.focusTranscriptToggle.setAttribute('aria-pressed', String(active));
 }
@@ -425,7 +438,11 @@ function finishSavedDraftWrite(requestId, succeeded) {
 }
 
 function isTranscriptMessageVisible(message) {
-  return !state.focusedTranscript || message.role !== 'tool';
+  if (message.role !== 'tool') return true;
+  if (message.isError === true) return true;
+  if (message.manuallyOpened === true) return true;
+  const name = String(message.toolName || 'tool').slice(0, 128);
+  return state.toolDisplayOverrides[name] !== 'hidden';
 }
 
 const EXPLORATION_TOOL_NAMES = new Set(['read', 'grep', 'find', 'ls']);
@@ -438,17 +455,26 @@ function toolExpansionPreference(toolName, isError = false, defaultOpen = undefi
   const name = String(toolName || 'tool').slice(0, 128);
   if (isError) return true;
   if (Object.prototype.hasOwnProperty.call(state.toolExpansion, name)) return state.toolExpansion[name];
-  return typeof defaultOpen === 'boolean' ? defaultOpen : state.expandSuccessfulToolCalls;
+  const override = state.toolDisplayOverrides[name];
+  if (override) return override === 'normal' || override === 'expanded';
+  if (typeof defaultOpen === 'boolean') return defaultOpen;
+  return state.toolDisplayDefault === 'normal' || state.toolDisplayDefault === 'expanded';
+}
+
+function applyToolCardDisplayPreference(card, toolName, isError = false) {
+  const hasManualPreference = Object.prototype.hasOwnProperty.call(state.toolExpansion, toolName);
+  if (isError) card.open = true;
+  else if (!hasManualPreference) card.open = toolExpansionPreference(toolName);
+  if (!hasManualPreference) {
+    const fullyExpanded = (state.toolDisplayOverrides[toolName] || state.toolDisplayDefault) === 'expanded';
+    card.querySelectorAll('details').forEach((detail) => { detail.open = fullyExpanded; });
+  }
 }
 
 function applyToolExpansionDefaults() {
   for (const card of ui.messageList.querySelectorAll('.tool-card')) {
     const name = String(card.dataset.toolName || 'tool').slice(0, 128);
-    if (card.classList.contains('tool-error')) {
-      card.open = true;
-    } else if (!Object.prototype.hasOwnProperty.call(state.toolExpansion, name)) {
-      card.open = state.expandSuccessfulToolCalls;
-    }
+    applyToolCardDisplayPreference(card, name, card.classList.contains('tool-error'));
   }
 }
 
@@ -1739,6 +1765,7 @@ function renderBashExecutionMessage(message, messageIndex) {
 
 function renderMessages(shouldFollow = true) {
   const nearBottom = ui.messageArea.scrollHeight - ui.messageArea.scrollTop - ui.messageArea.clientHeight < 80;
+  ui.messageList.classList.toggle('focused-transcript', state.focusedTranscript);
   ui.messageList.replaceChildren();
   const latestAssistantIndex = state.busy ? -1 : state.messages.findLastIndex((message) =>
     message.role === 'assistant' && message.streaming !== true && typeof message.entryId === 'string');
@@ -1746,25 +1773,34 @@ function renderMessages(shouldFollow = true) {
     const message = state.messages[messageIndex];
     if (!isTranscriptMessageVisible(message)) continue;
     if (message.role === 'tool') {
-      const groupMessages = [];
-      let groupEnd = messageIndex;
-      while (groupEnd < state.messages.length
-        && isTranscriptMessageVisible(state.messages[groupEnd])
-        && state.messages[groupEnd].role === 'tool') {
-        groupMessages.push({ message: state.messages[groupEnd], index: groupEnd });
-        groupEnd += 1;
+      const isExplorationStart = isExplorationToolMessage(message);
+      const shouldCollectGroup = state.focusedTranscript || isExplorationStart;
+      const groupMessages = [{ message, index: messageIndex }];
+      let groupEnd = messageIndex + 1;
+      if (shouldCollectGroup) {
+        while (groupEnd < state.messages.length
+          && isTranscriptMessageVisible(state.messages[groupEnd])
+          && state.messages[groupEnd].role === 'tool'
+          && (state.focusedTranscript || isExplorationToolMessage(state.messages[groupEnd]))) {
+          groupMessages.push({ message: state.messages[groupEnd], index: groupEnd });
+          groupEnd += 1;
+        }
       }
-      if (groupMessages.length > 1) {
+      const shouldGroup = state.focusedTranscript || (isExplorationStart && groupMessages.length > 1);
+      if (shouldGroup) {
         const hasError = groupMessages.some(({ message: item }) => item.isError === true);
         const isExplorationGroup = groupMessages.every(({ message: item }) => isExplorationToolMessage(item));
         const groupKey = isExplorationGroup ? 'exploration' : 'activity';
         const group = document.createElement('details');
         group.className = isExplorationGroup ? 'tool-exploration-group' : 'tool-activity-group';
-        group.open = toolExpansionPreference(groupKey, hasError, !isExplorationGroup);
+        group.open = toolExpansionPreference(groupKey, hasError, state.focusedTranscript ? false : !isExplorationGroup);
         const summary = document.createElement('summary');
-        summary.textContent = isExplorationGroup
-          ? `Explored ${groupMessages.length} items`
-          : `Pi used ${groupMessages.length} tools`;
+        const singleToolName = String(groupMessages[0].message.toolName || 'tool').slice(0, 80);
+        summary.textContent = groupMessages.length === 1
+          ? `Ran ${singleToolName}`
+          : isExplorationGroup
+            ? `Explored ${groupMessages.length} items`
+            : `Pi used ${groupMessages.length} tools`;
         const toolNames = [...new Set(groupMessages.map(({ message: item }) => String(item.toolName || 'tool').slice(0, 80)))];
         summary.title = `Show ${groupMessages.length} tool calls: ${toolNames.join(', ').slice(0, 400)}`;
         group.append(summary);
@@ -2187,6 +2223,7 @@ function createHistoricalToolCard(message) {
   updateToolRendererCard(detail, message, `${message.isError ? 'Failed' : 'Finished'} ${toolName}`);
   renderToolImages(detail, message);
   appendStructuredToolDetails(detail, message.details, false, message.stoppableChildren);
+  applyToolCardDisplayPreference(detail, toolName, Boolean(message.isError));
   if (detail.open) requestDeferredToolRenderer(message);
   return detail;
 }
@@ -2649,11 +2686,22 @@ ui.messageList.addEventListener('click', (event) => {
   if (!toolName) return;
   const open = !card.open;
   state.toolExpansion[toolName] = open;
+  const messageIndex = Number(card.dataset.messageIndex);
+  const toolMessage = Number.isInteger(messageIndex) ? state.messages[messageIndex] : undefined;
+  if (toolMessage?.role === 'tool') toolMessage.manuallyOpened = open;
   const toolNames = Object.keys(state.toolExpansion);
   if (toolNames.length > 200) delete state.toolExpansion[toolNames[0]];
   persistWebviewState();
+  if (!open && (state.focusedTranscript || state.toolDisplayOverrides[toolName] === 'hidden')) {
+    window.requestAnimationFrame(() => renderMessages());
+  }
   for (const peer of ui.messageList.querySelectorAll('.tool-card')) {
-    if (peer !== card && peer.dataset.toolName === toolName) peer.open = open;
+    if (peer !== card && peer.dataset.toolName === toolName) {
+      const peerIndex = Number(peer.dataset.messageIndex);
+      const peerMessage = Number.isInteger(peerIndex) ? state.messages[peerIndex] : undefined;
+      if (peerMessage?.role === 'tool') peerMessage.manuallyOpened = open;
+      peer.open = open;
+    }
   }
 });
 
@@ -3606,7 +3654,60 @@ function renderPresets() {
   ui.presets.append(add);
 }
 
+function renderToolDisplayPreferences() {
+  if (!(ui.toolDisplayList instanceof HTMLElement)) return;
+  ui.toolDisplayDefault.value = TOOL_DISPLAY_DEFAULT_MODES.has(state.toolDisplayDefault)
+    ? state.toolDisplayDefault
+    : 'folded';
+  ui.toolDisplayList.replaceChildren();
+  const names = [...new Set(state.tools.flatMap((tool) => typeof tool?.name === 'string'
+    && tool.name.length > 0 && tool.name.length <= 128 && !/[\u0000-\u001f\u007f]/.test(tool.name)
+    ? [tool.name]
+    : []))];
+  for (const name of names.slice(0, 100)) {
+    const row = document.createElement('label');
+    row.className = 'tool-display-row';
+    const label = document.createElement('span');
+    label.textContent = name;
+    label.title = name;
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', `Transcript display for ${name}`);
+    for (const [value, text] of [
+      ['default', 'Default'],
+      ['hidden', 'Hidden'],
+      ['folded', 'Folded'],
+      ['normal', 'Normal'],
+      ['expanded', 'Expanded'],
+    ]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = text;
+      select.append(option);
+    }
+    select.value = state.toolDisplayOverrides[name] || 'default';
+    select.addEventListener('change', () => {
+      const mode = select.value;
+      if (mode === 'default') delete state.toolDisplayOverrides[name];
+      else if (TOOL_DISPLAY_OVERRIDE_MODES.has(mode)) state.toolDisplayOverrides[name] = mode;
+      else {
+        select.value = state.toolDisplayOverrides[name] || 'default';
+        return;
+      }
+      post('setToolDisplayOverride', { toolName: name, mode });
+      renderMessages();
+    });
+    row.append(label, select);
+    ui.toolDisplayList.append(row);
+  }
+  if (names.length > 100) {
+    const note = document.createElement('small');
+    note.textContent = `Showing the first 100 of ${names.length} tools.`;
+    ui.toolDisplayList.append(note);
+  }
+}
+
 function renderTools() {
+  renderToolDisplayPreferences();
   ui.toolList.replaceChildren();
   const configuredToolNames = state.newSessionToolNames;
   ui.newChatToolDefaultLabel.textContent = configuredToolNames === null
@@ -5248,9 +5349,18 @@ window.addEventListener('message', (event) => {
       renderSessions();
       break;
     case 'tool-expansion-default-setting':
-      state.expandSuccessfulToolCalls = data.enabled === true;
-      ui.expandSuccessfulTools.checked = state.expandSuccessfulToolCalls;
+      state.toolDisplayDefault = data.enabled === true ? 'expanded' : 'folded';
+      ui.toolDisplayDefault.value = state.toolDisplayDefault;
       applyToolExpansionDefaults();
+      renderMessages();
+      break;
+    case 'tool-display-settings':
+      state.toolDisplayDefault = TOOL_DISPLAY_DEFAULT_MODES.has(data.defaultMode) ? data.defaultMode : 'folded';
+      state.toolDisplayOverrides = normalizeToolDisplayOverrides(data.overrides);
+      ui.toolDisplayDefault.value = state.toolDisplayDefault;
+      renderTools();
+      applyToolExpansionDefaults();
+      renderMessages();
       break;
     case 'running-session-status': {
       const statuses = Array.isArray(data.statuses) ? data.statuses.slice(0, 500) : [];
@@ -5285,10 +5395,14 @@ window.addEventListener('message', (event) => {
         : Array.isArray(data.newSessionToolNames)
           ? data.newSessionToolNames.filter((name) => typeof name === 'string').slice(0, 256)
           : null;
-      state.expandSuccessfulToolCalls = data.expandSuccessfulToolCalls === true;
-      ui.expandSuccessfulTools.checked = state.expandSuccessfulToolCalls;
+      state.toolDisplayDefault = TOOL_DISPLAY_DEFAULT_MODES.has(data.toolDisplayDefault)
+        ? data.toolDisplayDefault
+        : data.expandSuccessfulToolCalls === true ? 'expanded' : 'folded';
+      state.toolDisplayOverrides = normalizeToolDisplayOverrides(data.toolDisplayOverrides);
+      ui.toolDisplayDefault.value = state.toolDisplayDefault;
       applyToolExpansionDefaults();
       renderTools();
+      renderMessages();
       updateControls();
       renderModelChoices(data);
       if (state.pendingModelPicker && !ui.modelToggle.disabled) {
@@ -5656,6 +5770,7 @@ window.addEventListener('message', (event) => {
         node: detail,
       };
       updateToolRendererCard(detail, toolMessage, `Running ${toolName}`);
+      applyToolCardDisplayPreference(detail, toolName);
       state.messages.push(toolMessage);
       const currentTools = state.toolMessagesBySession.get(state.sessionPath) || [];
       currentTools.push(toolMessage);
@@ -5735,7 +5850,8 @@ window.addEventListener('message', (event) => {
           card.classList.toggle('tool-error', Boolean(data.isError));
           const toolName = String(data.name || card.dataset.toolName || 'tool').slice(0, 128);
           card.dataset.toolName = toolName;
-          card.open = toolExpansionPreference(toolName, Boolean(data.isError));
+          applyToolCardDisplayPreference(card, toolName, Boolean(data.isError));
+          if (data.isError) renderMessages();
         }
       }
       break;
@@ -5749,7 +5865,10 @@ window.addEventListener('message', (event) => {
       toolMessage.rendererCall = Array.isArray(data.rendererCall) ? data.rendererCall : undefined;
       toolMessage.rendererResult = data.rendererResult && typeof data.rendererResult === 'object' ? data.rendererResult : undefined;
       const card = toolMessage.node instanceof HTMLElement ? toolMessage.node : [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === toolId);
-      if (card) updateToolRendererCard(card, toolMessage, `${toolMessage.isError ? 'Failed' : 'Finished'} ${String(toolMessage.toolName || 'tool').slice(0, 128)}`);
+      if (card) {
+        updateToolRendererCard(card, toolMessage, `${toolMessage.isError ? 'Failed' : 'Finished'} ${String(toolMessage.toolName || 'tool').slice(0, 128)}`);
+        applyToolCardDisplayPreference(card, String(toolMessage.toolName || 'tool').slice(0, 128), Boolean(toolMessage.isError));
+      }
       break;
     }
     case 'shell-command-rejected':
@@ -6365,10 +6484,15 @@ ui.saveToolDefault.addEventListener('click', () => {
 ui.resetToolDefault.addEventListener('click', () => {
   post('setNewChatToolDefault', { toolNames: ['*'] });
 });
-ui.expandSuccessfulTools.addEventListener('change', () => {
-  const requested = ui.expandSuccessfulTools.checked;
-  ui.expandSuccessfulTools.checked = state.expandSuccessfulToolCalls;
-  post('setSuccessfulToolExpansion', { enabled: requested });
+ui.toolDisplayDefault.addEventListener('change', () => {
+  const requested = ui.toolDisplayDefault.value;
+  if (!TOOL_DISPLAY_DEFAULT_MODES.has(requested)) {
+    ui.toolDisplayDefault.value = state.toolDisplayDefault;
+    return;
+  }
+  state.toolDisplayDefault = requested;
+  renderMessages();
+  post('setToolDisplayDefault', { mode: requested });
 });
 ui.deliveryMode.addEventListener('click', () => {
   state.deliverAs = state.deliverAs === 'steer' ? 'followUp' : 'steer';

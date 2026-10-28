@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.127",
+  "version": "0.1.128",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -405,7 +405,40 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
-          "description": "Open successful tool cards by default in the Pi Chat transcript. Errors remain expanded."
+          "description": "Legacy setting. Use piChat.transcript.toolDisplayMode instead.",
+          "deprecationMessage": "Use piChat.transcript.toolDisplayMode instead."
+        },
+        "piChat.transcript.toolDisplayMode": {
+          "type": "string",
+          "enum": [
+            "folded",
+            "normal",
+            "expanded"
+          ],
+          "enumDescriptions": [
+            "Keep successful tool cards folded until opened.",
+            "Open tool cards but keep nested result details folded.",
+            "Open tool cards and their nested result details."
+          ],
+          "default": "folded",
+          "scope": "machine",
+          "description": "Choose the default detail shown for successful tool calls. Per-tool overrides are available from the Tools menu."
+        },
+        "piChat.transcript.toolDisplayOverrides": {
+          "type": "object",
+          "default": {},
+          "scope": "machine",
+          "maxProperties": 256,
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "hidden",
+              "folded",
+              "normal",
+              "expanded"
+            ]
+          },
+          "description": "Choose transcript visibility and detail for individual Pi tool names. Hidden tools remain visible when they fail or you have opened their cards."
         },
         "piChat.appearance.userMessagesOnRight": {
           "type": "boolean",
