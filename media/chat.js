@@ -4337,6 +4337,10 @@ window.addEventListener('message', (event) => {
     case 'workspace':
       updateWorkspace(data.name, data.hasWorkspace);
       break;
+    case 'queue-default-action':
+      state.deliverAs = data.action === 'steer' ? 'steer' : 'followUp';
+      updateControls();
+      break;
     case 'git-changes':
       state.gitReviewAvailable = data.available === true;
       state.gitSummary = state.gitReviewAvailable && data.summary && typeof data.summary === 'object'

@@ -342,6 +342,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.extensionStatus')) activeProvider.onExtensionStatusConfigurationChanged();
         if (event.affectsConfiguration('piChat.notifications.sound')) activeProvider.onNotificationSoundConfigurationChanged();
         if (event.affectsConfiguration('piChat.models.autoRefresh')) activeProvider.onModelRefreshConfigurationChanged();
+        if (event.affectsConfiguration('piChat.queue.defaultAction')) activeProvider.onQueueDefaultActionConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -507,7 +508,17 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     this.postExtensionStatusPreferences();
+    this.postQueueDefaultAction();
     void this.ensureRuntime();
+  }
+
+  onQueueDefaultActionConfigurationChanged(): void {
+    this.postQueueDefaultAction();
+  }
+
+  private postQueueDefaultAction(): void {
+    const value = vscode.workspace.getConfiguration('piChat.queue').get<unknown>('defaultAction', 'followUp');
+    this.post({ type: 'queue-default-action', action: value === 'steer' ? 'steer' : 'followUp' });
   }
 
   async newSession(): Promise<void> {

@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.97",
+  "version": "0.1.98",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -216,6 +216,17 @@
           "default": "manual",
           "scope": "machine",
           "description": "Sort Pi session history manually, by recent activity, or by title. Pinned sessions stay at the top."
+        },
+        "piChat.queue.defaultAction": {
+          "type": "string",
+          "enum": ["followUp", "steer"],
+          "default": "followUp",
+          "scope": "window",
+          "enumDescriptions": [
+            "Queue messages to send after the current turn.",
+            "Send messages as steering input during the current turn."
+          ],
+          "description": "Choose the default action for messages sent while Pi is working. The composer toggle can switch it for the current chat."
         },
         "piChat.mcp.enabled": {
           "type": "boolean",

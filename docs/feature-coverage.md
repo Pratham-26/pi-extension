@@ -19,7 +19,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 ## Chat and transcript
 
 - [x] Stream Pi replies; stop a run; show live tool start, update, and result cards.
-- [x] Queue follow-ups or steer a running turn; reorder, edit, and remove queued text messages.
+- [x] Queue follow-ups or steer a running turn; reorder, edit, and remove queued text messages. Choose the default send action in VS Code settings and switch it from the composer during a run.
 - [x] Search the current transcript and step through matches in messages and visible tool output.
 - [x] Persist drafts and prompt history by Pi session; quote a message or selected passage into the next prompt.
 - [x] Bookmark transcript messages with persistent branch-local bookmarks and jump back to bookmarked messages.
