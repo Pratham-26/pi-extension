@@ -9,10 +9,10 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Search models by provider, name, ID, or vision support; refresh manually and watch `models.json` for updates.
 - [x] Choose a thinking level supported by the selected model.
 - [x] Save, rename, remove, reorder, and use model/thinking presets.
-- [ ] Provider onboarding: OAuth/API-key login, custom provider setup, and custom-provider model discovery.
+- [~] OAuth/API-key sign-in through Pi's SDK; open Pi's custom model file and manually refresh remote model catalogs. Provider usage/balance and in-app custom endpoint forms are not shown.
 - [ ] Show provider usage or balance.
 - [ ] Pi settings controls for offline mode, Pi home, environment variables, retry policy, cache warming, sandbox, and context files.
-- [~] A settings command opens the extension's searchable VS Code settings; the settings surface currently covers editor-context behavior and notifications only.
+- [~] Settings open the extension's searchable VS Code settings and Pi's `settings.json`; extension settings currently cover editor context and notifications, while Pi-specific settings must be edited in the file.
 
 ## Chat and transcript
 
@@ -48,7 +48,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Type `@` to search workspace files, insert a reference, and attach the selected file.
 - [x] Automatically attach a selected-line reference or follow the active file, controlled by extension settings.
 - [~] Manual file attachments include bounded text content; automatic editor context uses file/line references. Image context is sent as image content.
-- [~] Automatic diagnostics/Git toggles, active-file following, and arbitrary line ranges are available; pinning an active file until removed is missing.
+- [x] Automatic diagnostics/Git toggles, active-file following, active-file pinning with selected-line updates, and arbitrary line ranges.
 - [ ] Quote diff lines, quote transcript passages with persistent jump-back references, and show full attached context as compact chips.
 
 ## Pi tools, skills, prompts, extensions, and packages

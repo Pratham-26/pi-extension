@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { lstat, open as openFile, realpath } from 'node:fs/promises';
+import { access, lstat, open as openFile, realpath } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 
@@ -23,6 +23,17 @@ type ModelPreset = {
   provider: string;
   modelId: string;
   thinkingLevel?: string;
+};
+
+type ProviderSetup = {
+  id: string;
+  name: string;
+  supportsApiKey: boolean;
+  apiKeyName: string;
+  supportsOAuth: boolean;
+  oauthLabel: string;
+  configured: boolean;
+  authLabel: string;
 };
 
 const VIEW_ID = 'piChat.chatView';
@@ -58,16 +69,37 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private knownSessionPaths = new Set<string>();
   private knownPromptPaths = new Set<string>();
   private knownResourcePaths = new Set<string>();
+  private availableProviders: ProviderSetup[] = [];
+  private modelsConfigPath = '';
+  private settingsConfigPath = '';
+  private providerAuthPromptCancels = new Map<string, { worker: Worker; cancel: () => void }>();
+  private activeEditorSubscription: vscode.Disposable;
+  private selectionSubscription: vscode.Disposable;
+  private pinnedActiveFileEnabled: boolean;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
+    this.activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (this.pinnedActiveFileEnabled && editor) this.publishPinnedActiveFile(editor);
+    });
+    this.selectionSubscription = vscode.window.onDidChangeTextEditorSelection((event) => {
+      if (this.pinnedActiveFileEnabled && event.textEditor === vscode.window.activeTextEditor) this.publishPinnedActiveFile(event.textEditor);
+    });
+  }
 
   dispose(): void {
+    this.cancelProviderAuthPrompts();
+    this.activeEditorSubscription.dispose();
+    this.selectionSubscription.dispose();
     this.webviewMessageSubscription?.dispose();
     this.webviewMessageSubscription = undefined;
     const worker = this.worker;
     this.worker = undefined;
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
+    this.availableProviders = [];
+    this.modelsConfigPath = '';
+    this.settingsConfigPath = '';
     if (worker) void worker.terminate();
   }
 
@@ -98,20 +130,26 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   restartRuntime(): void {
     const previous = this.worker;
+    if (previous) this.cancelProviderAuthPrompts(previous);
     this.worker = undefined;
     this.workerWorkspace = undefined;
     this.knownSessionPaths.clear();
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
+    this.availableProviders = [];
+    this.modelsConfigPath = '';
+    this.settingsConfigPath = '';
     this.activeSessionPath = '';
     if (previous) void previous.terminate();
     void this.ensureRuntime();
+    this.publishPinnedActiveFile();
   }
 
   private async ensureRuntime(): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
       this.post({ type: 'workspace', hasWorkspace: false });
+      this.publishPinnedActiveFile();
       return;
     }
 
@@ -123,11 +161,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const previous = this.worker;
+    if (previous) this.cancelProviderAuthPrompts(previous);
     this.worker = undefined;
     if (previous) void previous.terminate();
     this.knownSessionPaths.clear();
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
+    this.availableProviders = [];
+    this.modelsConfigPath = '';
+    this.settingsConfigPath = '';
     this.activeSessionPath = '';
 
     this.workerWorkspace = cwd;
@@ -139,12 +181,21 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
         this.activeSessionPath = message.sessionFile;
         this.post(message);
-      } else if (message.type === 'run-finished' && !this.view?.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('runFinished', true)) {
+      } else if (message.type === 'run-finished' && !message.providerLogin && !this.view?.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('runFinished', true)) {
         void this.showChatNotification('Pi finished its run.');
         this.post(message);
       } else if (message.type === 'extension-ui-request' && !this.view?.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('inputRequired', true)) {
         void this.showChatNotification('A Pi extension is waiting for your answer.');
         this.post(message);
+      } else if (message.type === 'provider-auth-prompt') {
+        void this.handleProviderAuthPrompt(message, worker);
+      } else if (message.type === 'provider-auth-prompt-cancel') {
+        if (typeof message.requestId === 'string') {
+          const pending = this.providerAuthPromptCancels.get(message.requestId);
+          if (pending?.worker === worker) pending.cancel();
+        }
+      } else if (message.type === 'provider-auth-event') {
+        void this.handleProviderAuthEvent(message, worker);
       } else if (message.type === 'session-exported') {
         void this.handleSessionExport(message);
       } else if (message.type === 'sessions' && Array.isArray(message.sessions)) {
@@ -169,6 +220,31 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             || Number(b['modified'] ?? 0) - Number(a['modified'] ?? 0));
         this.post({ ...message, sessions });
       } else if (message.type === 'options') {
+        this.availableProviders = Array.isArray(message.providers)
+          ? (message.providers as Array<Record<string, unknown>>).slice(0, 200).flatMap((provider) => {
+            if (typeof provider.id !== 'string' || provider.id.length > 128 || typeof provider.name !== 'string') return [];
+            return [{
+              id: provider.id,
+              name: provider.name.slice(0, 128),
+              supportsApiKey: provider.supportsApiKey === true,
+              apiKeyName: typeof provider.apiKeyName === 'string' ? provider.apiKeyName.slice(0, 128) : 'API key',
+              supportsOAuth: provider.supportsOAuth === true,
+              oauthLabel: typeof provider.oauthLabel === 'string' ? provider.oauthLabel.slice(0, 128) : 'Sign in',
+              configured: provider.configured === true,
+              authLabel: typeof provider.authLabel === 'string' ? provider.authLabel.slice(0, 128) : '',
+            }];
+          })
+          : [];
+        this.modelsConfigPath = typeof message.modelsConfigPath === 'string'
+          && message.modelsConfigPath.length <= 4096
+          && path.isAbsolute(message.modelsConfigPath)
+          ? path.resolve(message.modelsConfigPath)
+          : '';
+        this.settingsConfigPath = typeof message.settingsConfigPath === 'string'
+          && message.settingsConfigPath.length <= 4096
+          && path.isAbsolute(message.settingsConfigPath)
+          ? path.resolve(message.settingsConfigPath)
+          : '';
         const promptPaths = Array.isArray(message.prompts)
           ? (message.prompts as Array<Record<string, unknown>>).map((prompt) => prompt.filePath)
           : [];
@@ -181,7 +257,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.knownResourcePaths = new Set([...promptPaths, ...diagnosticPaths]
           .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096)
           .map((value) => this.normalizeSessionPath(value)));
-        this.post({ ...message, presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
+        const { modelsConfigPath: _modelsConfigPath, settingsConfigPath: _settingsConfigPath, ...safeMessage } = message;
+        this.post({ ...safeMessage, presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
       } else {
         this.post(message);
       }
@@ -192,20 +269,31 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
     worker.on('exit', (code: number) => {
-      if (this.worker === worker) this.worker = undefined;
+      if (this.worker === worker) {
+        this.worker = undefined;
+        this.cancelProviderAuthPrompts(worker);
+      }
       if (this.workerWorkspace === cwd && code !== 0) {
         this.post({ type: 'runtime-error', message: `The Pi runtime exited with code ${code}.` });
       }
     });
 
     this.post({ type: 'workspace', hasWorkspace: true, name: folder.name });
+    this.publishPinnedActiveFile();
   }
 
   private async handleWebviewMessage(message: RuntimeMessage): Promise<void> {
     switch (message.type) {
+      case 'togglePinActiveFile':
+        this.togglePinnedActiveFile();
+        return;
+      case 'unpinActiveFile':
+        this.setPinnedActiveFile(false);
+        return;
       case 'ready':
         await this.ensureRuntime();
         this.worker?.postMessage({ type: 'listSessions' });
+        this.publishPinnedActiveFile();
         return;
       case 'newSession':
         await this.newSession();
@@ -317,9 +405,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (typeof message.text !== 'string') return;
         const text = message.text.trim().slice(0, 100_000);
         const attachments = this.validateAttachments(message.attachments);
-        const promptText = text || (attachments.some((item) => item.image) ? 'Please inspect the attached image.' : '');
+        const promptText = text || (attachments.some((item) => item.image)
+          ? 'Please inspect the attached image.'
+          : attachments.some((item) => item.context) ? 'Please inspect the attached context.' : '');
         if (!promptText) return;
-        const automaticContext = await this.collectAutomaticContext();
+        const attachedPaths = new Set(attachments.map((item) => {
+          const relative = item.path.replaceAll('\\', '/');
+          return process.platform === 'win32' ? relative.toLocaleLowerCase() : relative;
+        }));
+        const automaticContext = await this.collectAutomaticContext(attachedPaths);
         const prompt = this.composePrompt(promptText, [...attachments, ...automaticContext]);
         this.worker?.postMessage({
           type: 'prompt',
@@ -351,13 +445,21 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'setTools':
       case 'setSkills':
       case 'usePreset':
-      case 'refreshModels':
       case 'setBookmarks':
       case 'replaceQueue':
       case 'extensionUiResponse':
       case 'navigateTree':
         this.worker?.postMessage(message);
         return;
+      case 'refreshModels': {
+        const answer = await vscode.window.showWarningMessage(
+          'Refresh configured model catalogs? Pi may contact provider endpoints and run API-key commands configured in its model settings.',
+          { modal: true },
+          'Refresh catalogs',
+        );
+        if (answer === 'Refresh catalogs') this.worker?.postMessage({ type: 'refreshModels' });
+        return;
+      }
       case 'compactSession': {
         const answer = await vscode.window.showWarningMessage(
           'Pi will summarize older context and update the active session. Continue?',
@@ -381,6 +483,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openResourceFile':
         await this.openResourceFile(message.filePath);
+        return;
+      case 'connectProvider':
+        await this.connectProvider();
+        return;
+      case 'openModelsConfig':
+        await this.openModelsConfig();
+        return;
+      case 'openPiSettings':
+        await this.openPiSettings();
         return;
       case 'createPromptTemplate':
         await this.createPromptTemplate();
@@ -419,6 +530,54 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         await this.searchMentions(typeof message.query === 'string' ? message.query : '');
         return;
     }
+  }
+
+  private togglePinnedActiveFile(): void {
+    if (this.pinnedActiveFileEnabled) {
+      this.setPinnedActiveFile(false);
+      return;
+    }
+    const editor = vscode.window.activeTextEditor;
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!editor || !workspace || !this.workspaceRelativePath(editor.document.uri, workspace)) {
+      this.post({ type: 'notice', message: 'Open a file inside this workspace before pinning the active file.' });
+      return;
+    }
+    this.setPinnedActiveFile(true, editor);
+  }
+
+  private setPinnedActiveFile(enabled: boolean, editor = vscode.window.activeTextEditor): void {
+    this.pinnedActiveFileEnabled = enabled;
+    void this.context.workspaceState.update('piChat.context.pinnedActiveFile', enabled);
+    if (enabled) this.publishPinnedActiveFile(editor);
+    else this.post({ type: 'pinned-file', enabled: false });
+  }
+
+  private publishPinnedActiveFile(editor = vscode.window.activeTextEditor): void {
+    if (!this.pinnedActiveFileEnabled) {
+      this.post({ type: 'pinned-file', enabled: false });
+      return;
+    }
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    const relativePath = editor && workspace ? this.workspaceRelativePath(editor.document.uri, workspace) : undefined;
+    if (!editor || !workspace || !relativePath) {
+      this.post({ type: 'pinned-file', enabled: true });
+      return;
+    }
+    const selection = editor.selection;
+    const start = selection.isEmpty ? 0 : selection.start.line + 1;
+    const end = selection.isEmpty ? 0 : Math.max(start, selection.end.line + (selection.end.character === 0 ? 0 : 1));
+    const range = start ? `:${start}-${end}` : '';
+    this.post({
+      type: 'pinned-file',
+      enabled: true,
+      attachment: {
+        id: 'pi-chat-pinned-active-file',
+        label: `${path.basename(relativePath)} · pinned${range ? ` · lines ${start}-${end}` : ''}`,
+        path: relativePath,
+        context: `@${relativePath}${range}`,
+      } satisfies Attachment,
+    });
   }
 
   private attachActiveEditor(): void {
@@ -814,6 +973,257 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async connectProvider(): Promise<void> {
+    const methods = this.availableProviders.flatMap((provider) => [
+      ...(provider.supportsOAuth ? [{
+        label: `${provider.oauthLabel} · ${provider.name}`,
+        description: provider.configured ? `Credential configured${provider.authLabel ? ` · ${provider.authLabel}` : ''}` : 'Sign in with a provider account',
+        providerId: provider.id,
+        providerName: provider.name,
+        authType: 'oauth' as const,
+      }] : []),
+      ...(provider.supportsApiKey ? [{
+        label: `${provider.apiKeyName} · ${provider.name}`,
+        description: provider.configured ? `Credential configured${provider.authLabel ? ` · ${provider.authLabel}` : ''}` : 'Add an API key or provider credential',
+        providerId: provider.id,
+        providerName: provider.name,
+        authType: 'api_key' as const,
+      }] : []),
+    ]);
+    const selected = await vscode.window.showQuickPick(methods, {
+      placeHolder: 'Choose a provider sign-in method',
+      ignoreFocusOut: true,
+    });
+    if (!selected) return;
+    const answer = await vscode.window.showWarningMessage(
+      `Continue with ${selected.label}? Pi will store the credential in its existing configuration and may replace a saved credential for this provider.`,
+      { modal: true },
+      'Continue',
+    );
+    if (answer !== 'Continue') return;
+    this.worker?.postMessage({ type: 'providerLogin', providerId: selected.providerId, authType: selected.authType });
+  }
+
+  private async handleProviderAuthPrompt(message: RuntimeMessage, worker: Worker): Promise<void> {
+    if (typeof message.requestId !== 'string' || message.requestId.length > 128) return;
+    const prompt = typeof message.message === 'string' ? message.message.slice(0, 1000) : 'Provider sign-in';
+    const promptType = message.promptType;
+    const controller = new AbortController();
+    this.providerAuthPromptCancels.set(message.requestId, { worker, cancel: () => controller.abort() });
+    let value: string | undefined;
+    try {
+      if (promptType === 'select' && Array.isArray(message.options)) {
+        const options = (message.options as Array<Record<string, unknown>>).slice(0, 100)
+          .filter((option) => typeof option.id === 'string' && option.id.length <= 256)
+          .map((option) => ({
+            label: typeof option.label === 'string' ? option.label.slice(0, 256) : String(option.id),
+            description: typeof option.description === 'string' ? option.description.slice(0, 500) : undefined,
+            id: option.id as string,
+          }));
+        value = await this.showProviderSelectPrompt(options, prompt, controller.signal);
+      } else if (promptType === 'text' || promptType === 'secret' || promptType === 'manual_code') {
+        value = await this.showProviderInputPrompt(
+          prompt,
+          typeof message.placeholder === 'string' ? message.placeholder.slice(0, 256) : undefined,
+          promptType === 'secret',
+          controller.signal,
+        );
+        if (value && value.length > 8192) {
+          this.post({ type: 'notice', message: 'The provider credential input is too long; sign-in was cancelled.', isError: true });
+          value = undefined;
+        }
+      }
+    } catch (error) {
+      this.post({ type: 'notice', message: `Provider sign-in prompt failed (${error instanceof Error ? error.name : 'error'}).`, isError: true });
+    } finally {
+      const pending = this.providerAuthPromptCancels.get(message.requestId);
+      if (pending?.worker === worker) this.providerAuthPromptCancels.delete(message.requestId);
+      if (this.worker === worker) worker.postMessage({ type: 'extensionUiResponse', requestId: message.requestId, value });
+    }
+  }
+
+  private showProviderInputPrompt(prompt: string, placeholder: string | undefined, password: boolean, signal: AbortSignal): Promise<string | undefined> {
+    if (signal.aborted) return Promise.resolve(undefined);
+    const input = vscode.window.createInputBox();
+    input.title = 'Pi provider sign-in';
+    input.prompt = prompt;
+    input.placeholder = placeholder ?? '';
+    input.password = password;
+    input.ignoreFocusOut = true;
+    return new Promise((resolve) => {
+      let settled = false;
+      let accept: vscode.Disposable | undefined;
+      let hide: vscode.Disposable | undefined;
+      const onAbort = () => finish(undefined);
+      const finish = (value: string | undefined) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        accept?.dispose();
+        hide?.dispose();
+        input.hide();
+        input.dispose();
+        resolve(value);
+      };
+      accept = input.onDidAccept(() => finish(input.value));
+      hide = input.onDidHide(() => finish(undefined));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) finish(undefined);
+      else input.show();
+    });
+  }
+
+  private showProviderSelectPrompt(options: Array<{ label: string; description?: string; id: string }>, prompt: string, signal: AbortSignal): Promise<string | undefined> {
+    if (signal.aborted) return Promise.resolve(undefined);
+    type AuthChoice = vscode.QuickPickItem & { id: string };
+    const picker = vscode.window.createQuickPick<AuthChoice>();
+    picker.title = 'Pi provider sign-in';
+    picker.placeholder = prompt;
+    picker.ignoreFocusOut = true;
+    picker.items = options;
+    return new Promise((resolve) => {
+      let settled = false;
+      let accept: vscode.Disposable | undefined;
+      let hide: vscode.Disposable | undefined;
+      const onAbort = () => finish(undefined);
+      const finish = (value: string | undefined) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        accept?.dispose();
+        hide?.dispose();
+        picker.hide();
+        picker.dispose();
+        resolve(value);
+      };
+      accept = picker.onDidAccept(() => finish(picker.selectedItems[0]?.id));
+      hide = picker.onDidHide(() => finish(undefined));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) finish(undefined);
+      else picker.show();
+    });
+  }
+
+  private cancelProviderAuthPrompts(worker?: Worker): void {
+    for (const [requestId, pending] of this.providerAuthPromptCancels) {
+      if (worker && pending.worker !== worker) continue;
+      this.providerAuthPromptCancels.delete(requestId);
+      pending.cancel();
+    }
+  }
+
+  private async handleProviderAuthEvent(message: RuntimeMessage, worker: Worker): Promise<void> {
+    if (this.worker !== worker) return;
+    const provider = typeof message.providerName === 'string' ? message.providerName.slice(0, 128) : 'provider';
+    const instructions = typeof message.instructions === 'string' ? message.instructions.slice(0, 1000) : '';
+    try {
+      if (message.eventType === 'auth_url') {
+        const uri = this.safeProviderUri(message.url);
+        const action = await vscode.window.showInformationMessage(
+          `${provider} sign-in${instructions ? `: ${instructions}` : ` is ready${uri ? ` at ${uri.authority}` : ''}.`}`,
+          { modal: true },
+          ...(uri ? ['Open sign-in page'] : []),
+          'Cancel sign-in',
+        );
+        if (action === 'Open sign-in page' && uri) await vscode.env.openExternal(uri);
+        else if (action === 'Cancel sign-in' || action === undefined) worker.postMessage({ type: 'cancelProviderLogin' });
+        return;
+      }
+      if (message.eventType === 'device_code') {
+        const uri = this.safeProviderUri(message.verificationUri);
+        const code = typeof message.userCode === 'string' ? message.userCode.slice(0, 128) : '';
+        const actions = [
+          ...(uri ? ['Open verification page'] : []),
+          ...(code ? ['Copy code'] : []),
+          'Cancel sign-in',
+        ];
+        const action = await vscode.window.showInformationMessage(
+          `${provider} sign-in${code ? `. Enter code ${code}` : ''}${uri ? ` at ${uri.authority}` : ''}.`,
+          { modal: true },
+          ...actions,
+        );
+        if (action === 'Open verification page' && uri) await vscode.env.openExternal(uri);
+        else if (action === 'Copy code' && code) await vscode.env.clipboard.writeText(code);
+        else if (action === 'Cancel sign-in' || action === undefined) worker.postMessage({ type: 'cancelProviderLogin' });
+        return;
+      }
+      if (typeof message.message === 'string' && message.message) {
+        this.post({ type: 'notice', message: `${provider}: ${message.message.slice(0, 1000)}` });
+      }
+    } catch (error) {
+      this.post({ type: 'notice', message: `Provider sign-in interaction failed (${error instanceof Error ? error.name : 'error'}).`, isError: true });
+      if (this.worker === worker) worker.postMessage({ type: 'cancelProviderLogin' });
+    }
+  }
+
+  private safeProviderUri(value: unknown): vscode.Uri | undefined {
+    if (typeof value !== 'string' || value.length > 2048) return undefined;
+    try {
+      const uri = vscode.Uri.parse(value, true);
+      if (!uri.authority || uri.authority.includes('@')) return undefined;
+      if (uri.scheme === 'https') return uri;
+      if (uri.scheme === 'http' && /^(localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(uri.authority)) return uri;
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async openModelsConfig(): Promise<void> {
+    if (!this.modelsConfigPath || !path.isAbsolute(this.modelsConfigPath)) {
+      this.post({ type: 'notice', message: 'Pi did not provide a custom models file path. Open a chat, then try again.', isError: true });
+      return;
+    }
+    await this.openPiConfigFile(
+      this.modelsConfigPath,
+      'custom models file',
+      `${JSON.stringify({ $schema: 'https://pi.dev/schemas/models.schema.json', providers: {} }, null, 2)}\n`,
+      'Create Pi’s custom model configuration file? Pi reads provider endpoints and model definitions from this file. Values starting with ! may run a command when a provider is used.',
+    );
+  }
+
+  private async openPiSettings(): Promise<void> {
+    if (!this.settingsConfigPath || !path.isAbsolute(this.settingsConfigPath)) {
+      this.post({ type: 'notice', message: 'Pi did not provide a settings file path. Open a chat, then try again.', isError: true });
+      return;
+    }
+    await this.openPiConfigFile(
+      this.settingsConfigPath,
+      'settings file',
+      '{}\n',
+      'Create Pi’s settings file? This file changes Pi behavior for all sessions that use this configuration.',
+    );
+  }
+
+  private async openPiConfigFile(filePath: string, label: string, initialContent: string, createPrompt: string): Promise<void> {
+    try {
+      try {
+        await access(filePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const answer = await vscode.window.showWarningMessage(
+          createPrompt,
+          { modal: true },
+          'Create and open',
+        );
+        if (answer !== 'Create and open') return;
+        let file;
+        try {
+          file = await openFile(filePath, 'wx', 0o600);
+          await file.writeFile(initialContent, 'utf8');
+        } catch (createError) {
+          if ((createError as NodeJS.ErrnoException).code !== 'EEXIST') throw createError;
+        } finally {
+          await file?.close();
+        }
+      }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      this.post({ type: 'notice', message: `Could not open Pi’s ${label}. ${error instanceof Error ? error.message : ''}`, isError: true });
+    }
+  }
+
   private async createPromptTemplate(): Promise<void> {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
@@ -1011,7 +1421,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     return accepted;
   }
 
-  private async collectAutomaticContext(): Promise<Attachment[]> {
+  private async collectAutomaticContext(attachedPaths: Set<string> = new Set()): Promise<Attachment[]> {
     const settings = vscode.workspace.getConfiguration('piChat.context');
     const editor = vscode.window.activeTextEditor;
     const workspace = vscode.workspace.workspaceFolders?.[0];
@@ -1022,7 +1432,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     if (editor) {
       const relativePath = this.workspaceRelativePath(editor.document.uri, workspace);
       if (relativePath) {
-        if (followSelection && !editor.selection.isEmpty) {
+        const comparablePath = process.platform === 'win32' ? relativePath.toLocaleLowerCase() : relativePath;
+        const isAlreadyAttached = attachedPaths.has(comparablePath);
+        if (!isAlreadyAttached && followSelection && !editor.selection.isEmpty) {
           const start = editor.selection.start.line + 1;
           const end = Math.max(start, editor.selection.end.line + (editor.selection.end.character === 0 ? 0 : 1));
           attachments.push({
@@ -1031,7 +1443,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             path: relativePath,
             context: `@${relativePath}:${start}-${end}`,
           });
-        } else if (followActiveFile) {
+        } else if (!isAlreadyAttached && followActiveFile) {
           attachments.push({
             id: randomBytes(8).toString('hex'),
             label: `${path.basename(relativePath)} · active file`,
@@ -1210,7 +1622,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <button id="skills-toggle" class="control-button" type="button" aria-expanded="false" disabled>Skills / prompts</button>
             <button id="delivery-mode" class="control-button delivery-mode" type="button" aria-label="Queued message mode" title="Click to switch between queue and steer" hidden>Queue next</button>
             <section id="model-popover" class="control-popover model-popover" aria-label="Choose a model" hidden>
-              <div class="model-search-row"><input id="model-search" class="session-search" type="search" aria-label="Search models" placeholder="Search models, providers, or vision"><button id="refresh-models" class="icon-button small" type="button" title="Refresh model catalog" aria-label="Refresh model catalog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg></button></div>
+              <div class="model-search-row"><input id="model-search" class="session-search" type="search" aria-label="Search models" placeholder="Search models, providers, or vision"><button id="refresh-models" class="icon-button small" type="button" title="Refresh models; may contact providers and run configured API-key commands" aria-label="Refresh model catalog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg></button></div>
+              <div class="provider-actions"><span id="provider-status" class="provider-status"></span><button id="connect-provider" class="text-button" type="button">Connect</button><button id="edit-models-config" class="text-button" type="button" title="Edit Pi's custom models and providers">Models</button><button id="edit-pi-settings" class="text-button" type="button" title="Open Pi's user settings">Pi settings</button></div>
               <div id="model-list" class="option-list" role="listbox" aria-label="Available models"></div>
             </section>
             <section id="tools-popover" class="control-popover tools-popover" aria-label="Tools for this chat" hidden>
@@ -1237,6 +1650,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 12.5 6.3-6.3a3.2 3.2 0 0 1 4.5 4.5L11 19.5a5 5 0 0 1-7.1-7.1l8.4-8.5"/></svg>
               </button>
               <button id="attach-editor" class="text-button" type="button">Add editor context</button>
+              <button id="pin-active-file" class="text-button" type="button" aria-pressed="false" title="Keep the active file or selected line range attached until you remove it">Pin active file</button>
               <button id="attach-range" class="text-button" type="button" title="Attach a line range from the active file">Lines</button>
               <button id="attach-folder" class="text-button" type="button" title="Attach a folder">Folder</button>
               <button id="attach-diagnostics" class="text-button" type="button" title="Attach problems from the active file">Problems</button>

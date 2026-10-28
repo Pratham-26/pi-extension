@@ -20,6 +20,8 @@ const state = {
   messages: [],
   bookmarks: [],
   attachments: [],
+  pinnedFile: undefined,
+  pinnedFileEnabled: false,
   hasSession: false,
   switchingSession: false,
   busy: false,
@@ -27,6 +29,7 @@ const state = {
   streamIndex: -1,
   model: '',
   currentModel: undefined,
+  providers: [],
   models: [],
   modelSearch: '',
   chatSearch: '',
@@ -109,6 +112,10 @@ const ui = {
   modelPopover: el('model-popover'),
   modelSearch: el('model-search'),
   modelList: el('model-list'),
+  providerStatus: el('provider-status'),
+  connectProvider: el('connect-provider'),
+  editModelsConfig: el('edit-models-config'),
+  editPiSettings: el('edit-pi-settings'),
   contextMeter: el('context-meter'),
   contextMeterFill: el('context-meter-fill'),
   contextMeterLabel: el('context-meter-label'),
@@ -130,6 +137,7 @@ const ui = {
   newPromptTemplate: el('new-prompt-template'),
   reloadResources: el('reload-pi-resources'),
   deliveryMode: el('delivery-mode'),
+  pinActiveFile: el('pin-active-file'),
 };
 
 function post(type, payload = {}) {
@@ -261,7 +269,7 @@ function updateWorkspace(name, hasWorkspace) {
 }
 
 function updateControls() {
-  const hasText = Boolean(ui.prompt.value.trim() || state.attachments.length);
+  const hasText = Boolean(ui.prompt.value.trim() || state.attachments.length || state.pinnedFile);
   ui.send.disabled = !state.hasWorkspace || !hasText;
   ui.prompt.disabled = !state.hasWorkspace || state.switchingSession;
   ui.stop.hidden = !state.busy || !state.stopAllowed;
@@ -275,6 +283,10 @@ function updateControls() {
   ui.thinkingChoice.disabled = !state.hasSession || state.busy || state.thinkingLevels.length === 0;
   ui.compactSession.disabled = !state.hasSession || state.busy;
   ui.bookmarkToggle.disabled = !state.hasSession;
+  ui.connectProvider.disabled = !state.hasWorkspace || state.busy || state.providers.length === 0;
+  ui.editModelsConfig.disabled = !state.hasWorkspace || state.busy;
+  ui.editPiSettings.disabled = !state.hasWorkspace || state.busy;
+  ui.pinActiveFile.disabled = !state.hasWorkspace;
   ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
   ui.reloadResources.disabled = !state.hasSession || state.busy;
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
@@ -643,9 +655,9 @@ function stepChatSearch(direction) {
 
 function renderAttachments() {
   ui.attachments.replaceChildren();
-  for (const attachment of state.attachments) {
+  const appendChip = (attachment, isPinned = false) => {
     const chip = document.createElement('span');
-    chip.className = 'attachment-chip';
+    chip.className = `attachment-chip${isPinned ? ' pinned' : ''}`;
     chip.title = attachment.path;
     const name = document.createElement('span');
     name.className = 'attachment-name';
@@ -660,14 +672,25 @@ function renderAttachments() {
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'attachment-remove';
+    remove.title = isPinned ? 'Unpin active file' : 'Remove attachment';
     remove.setAttribute('aria-label', `Remove ${attachment.label}`);
     remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
     remove.addEventListener('click', () => {
-      state.attachments = state.attachments.filter((item) => item.id !== attachment.id);
+      if (isPinned) {
+        state.pinnedFile = undefined;
+        state.pinnedFileEnabled = false;
+        post('unpinActiveFile');
+      } else {
+        state.attachments = state.attachments.filter((item) => item.id !== attachment.id);
+      }
       renderAttachments();
     });
     chip.append(name, remove);
     ui.attachments.append(chip);
+  };
+  if (state.pinnedFile) appendChip(state.pinnedFile, true);
+  for (const attachment of state.attachments) {
+    appendChip(attachment);
   }
   updateControls();
 }
@@ -711,9 +734,11 @@ function closeHistory() {
 
 function sendPrompt(value = ui.prompt.value) {
   const text = String(value || '').trim();
-  const attachments = state.attachments.map((item) => ({ ...item }));
+  const attachments = [...state.attachments, ...(state.pinnedFile ? [{ ...state.pinnedFile }] : [])];
   if ((!text && !attachments.length) || !state.hasWorkspace) return;
-  const promptText = text || (attachments.some((item) => item.image) ? 'Please inspect the attached image.' : '');
+  const promptText = text || (attachments.some((item) => item.image)
+    ? 'Please inspect the attached image.'
+    : attachments.some((item) => item.context) ? 'Please inspect the attached context.' : '');
   if (text) rememberPrompt(text);
   const context = attachments.map((item) => item.context).join('\n');
   if (state.busy) {
@@ -742,6 +767,14 @@ function sendPrompt(value = ui.prompt.value) {
 
 function renderModelChoices(data) {
   state.models = Array.isArray(data.models) ? data.models : [];
+  state.providers = Array.isArray(data.providers) ? data.providers.slice(0, 200).filter((provider) => provider
+    && typeof provider.id === 'string' && typeof provider.name === 'string'
+    && (provider.supportsApiKey === true || provider.supportsOAuth === true)).map((provider) => ({
+      ...provider,
+      id: provider.id.slice(0, 128),
+      name: provider.name.slice(0, 128),
+      authLabel: typeof provider.authLabel === 'string' ? provider.authLabel.slice(0, 128) : '',
+    })) : [];
   state.currentModel = data.currentModel;
   state.presets = Array.isArray(data.presets) ? data.presets : state.presets;
   const selectedKey = data.currentModel ? `${data.currentModel.provider}/${data.currentModel.id}` : '';
@@ -775,8 +808,17 @@ function renderModelChoices(data) {
   renderPresets();
   renderTools();
   renderCommands();
+  renderProviderStatus();
   renderResourceDiagnostics();
   updateControls();
+}
+
+function renderProviderStatus() {
+  const configured = state.providers.filter((provider) => provider.configured).length;
+  ui.providerStatus.textContent = state.providers.length
+    ? `${configured} of ${state.providers.length} interactive providers configured`
+    : 'No provider sign-in methods are available.';
+  ui.providerStatus.title = state.providers.map((provider) => `${provider.name}: ${provider.configured ? provider.authLabel || 'configured' : 'not connected'}`).join('\n');
 }
 
 function renderModelList() {
@@ -1500,6 +1542,15 @@ window.addEventListener('message', (event) => {
         renderAttachments();
       }
       break;
+    case 'pinned-file':
+      state.pinnedFileEnabled = Boolean(data.enabled);
+      state.pinnedFile = data.enabled && data.attachment && typeof data.attachment.path === 'string'
+        ? data.attachment
+        : undefined;
+      ui.pinActiveFile.textContent = state.pinnedFileEnabled ? 'Unpin active file' : 'Pin active file';
+      ui.pinActiveFile.setAttribute('aria-pressed', String(state.pinnedFileEnabled));
+      renderAttachments();
+      break;
     case 'mention-results':
       if (data.query === state.mentionQuery && Array.isArray(data.results)) {
         state.mentionResults = data.results;
@@ -1668,6 +1719,7 @@ el('chat-search-close').addEventListener('click', () => {
   updateChatSearch();
 });
 el('attach-file').addEventListener('click', () => post('attachFile'));
+ui.pinActiveFile.addEventListener('click', () => post('togglePinActiveFile'));
 el('attach-editor').addEventListener('click', () => post('attachEditor'));
 el('attach-range').addEventListener('click', () => post('attachRange'));
 el('attach-folder').addEventListener('click', () => post('attachFolder'));
@@ -1730,6 +1782,9 @@ ui.modelSearch.addEventListener('input', () => {
   renderModelList();
 });
 el('refresh-models').addEventListener('click', () => post('refreshModels'));
+ui.connectProvider.addEventListener('click', () => post('connectProvider'));
+ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
+ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));
 ui.thinkingChoice.addEventListener('change', () => post('setThinkingLevel', { thinkingLevel: ui.thinkingChoice.value }));
 ui.toolsToggle.addEventListener('click', () => {
   const open = ui.toolsPopover.hidden;

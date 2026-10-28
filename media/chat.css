@@ -252,6 +252,9 @@ button:focus-visible, textarea:focus-visible {
 .prompt-template-preview { min-height: 0; border: 1px solid var(--line); border-radius: 5px; }
 .prompt-template-preview summary { padding: 6px 8px; color: var(--muted); cursor: pointer; font-size: 10px; }
 .prompt-template-preview pre { max-height: 28vh; overflow: auto; margin: 0; padding: 8px; border-top: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; }
+.provider-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.provider-status { width: 100%; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.provider-actions .text-button { flex: 0 0 auto; padding: 3px 5px; font-size: 9px; }
 
 .messages { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 8px 14px 18px; }
 .empty-state { max-width: 440px; margin: clamp(34px, 11vh, 100px) auto 30px; text-align: center; }
@@ -325,6 +328,7 @@ button:focus-visible, textarea:focus-visible {
 .attachments { display: flex; flex-wrap: wrap; gap: 5px; max-width: 68ch; margin: 0 auto 6px; padding: 1px; border-radius: 6px; }
 .attachments.drop-active { outline: 1px dashed var(--focus); outline-offset: 3px; }
 .attachment-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 5px 3px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 10px; }
+.attachment-chip.pinned { border-style: dashed; color: var(--accent); }
 .attachment-preview { width: 25px; height: 25px; object-fit: cover; border-radius: 3px; }
 .attachment-name { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-remove { display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 3px; color: var(--muted); background: transparent; cursor: pointer; }

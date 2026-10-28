@@ -1,5 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { watch, type FSWatcher } from 'node:fs';
+import { join } from 'node:path';
 import { createAgentSession, getAgentDir, SessionManager } from '@earendil-works/pi-coding-agent';
 
 type WorkerInput = {
@@ -13,6 +14,8 @@ type WorkerInput = {
   requestId?: string;
   value?: unknown;
   provider?: string;
+  providerId?: string;
+  authType?: 'api_key' | 'oauth';
   modelId?: string;
   thinkingLevel?: string;
   presetName?: string;
@@ -32,7 +35,18 @@ type SessionLike = {
   modelRuntime?: {
     getAvailableSnapshot: () => Array<{ provider: string; id: string; name?: string; contextWindow?: number; input?: string[] }>;
     getModel: (provider: string, id: string) => unknown;
-    refresh: (options?: { allowNetwork?: boolean }) => Promise<unknown>;
+    refresh: (options?: { allowNetwork?: boolean; providers?: readonly string[] }) => Promise<unknown>;
+    getProviders?: () => ReadonlyArray<{
+      id: string;
+      name: string;
+      auth?: {
+        apiKey?: { name?: string; login?: unknown };
+        oauth?: { name?: string; loginLabel?: string; login?: unknown };
+      };
+    }>;
+    getProvider?: (providerId: string) => { id: string; name: string; auth?: { apiKey?: { name?: string; login?: unknown }; oauth?: { name?: string; loginLabel?: string; login?: unknown } } } | undefined;
+    getProviderAuthStatus?: (providerId: string) => { configured: boolean; label?: string };
+    login?: (providerId: string, type: 'api_key' | 'oauth', interaction: unknown) => Promise<unknown>;
   };
   resourceLoader?: {
     getExtensions?: () => { errors?: Array<{ path?: string; error?: string }>; warnings?: Array<{ path?: string; warning?: string }> };
@@ -83,6 +97,8 @@ let unsubscribe: (() => void) | undefined;
 let busy = false;
 let compacting = false;
 let reloadingResources = false;
+let authenticatingProvider = false;
+let providerAuthController: AbortController | undefined;
 let defaultTools: string[] = [];
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
@@ -91,6 +107,7 @@ let uiRequestSequence = 0;
 let modelWatcher: FSWatcher | undefined;
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 const pendingUiRequests = new Map<string, (value: unknown) => void>();
+const pendingProviderAuthRequests = new Set<string>();
 
 function send(type: string, payload: Record<string, unknown> = {}): void {
   parentPort?.postMessage({ type, ...payload });
@@ -125,6 +142,40 @@ function requestExtensionUi(kind: string, title: string, payload: Record<string,
   return new Promise((resolve) => {
     pendingUiRequests.set(requestId, resolve);
     send('extension-ui-request', { requestId, kind, title, ...payload });
+  });
+}
+
+function requestProviderAuthPrompt(prompt: any): Promise<unknown> {
+  const signal = prompt.signal as AbortSignal | undefined;
+  if (signal?.aborted) return Promise.resolve(undefined);
+  const requestId = `pi-auth-${++uiRequestSequence}`;
+  return new Promise((resolve) => {
+    const cancel = () => {
+      if (!pendingProviderAuthRequests.delete(requestId)) return;
+      pendingUiRequests.delete(requestId);
+      send('provider-auth-prompt-cancel', { requestId });
+      resolve(undefined);
+    };
+    pendingUiRequests.set(requestId, (value) => {
+      pendingProviderAuthRequests.delete(requestId);
+      signal?.removeEventListener('abort', cancel);
+      resolve(value);
+    });
+    pendingProviderAuthRequests.add(requestId);
+    signal?.addEventListener('abort', cancel, { once: true });
+    send('provider-auth-prompt', {
+      requestId,
+      message: String(prompt.message ?? 'Provider sign-in').slice(0, 1000),
+      promptType: String(prompt.type ?? 'text').slice(0, 32),
+      placeholder: typeof prompt.placeholder === 'string' ? prompt.placeholder.slice(0, 256) : undefined,
+      options: Array.isArray(prompt.options)
+        ? prompt.options.slice(0, 100).map((option: any) => ({
+          id: String(option.id ?? '').slice(0, 256),
+          label: String(option.label ?? option.id ?? '').slice(0, 256),
+          description: typeof option.description === 'string' ? option.description.slice(0, 500) : undefined,
+        }))
+        : undefined,
+    });
   });
 }
 
@@ -244,6 +295,28 @@ function sendOptions(): void {
   const loadedSkills = session.resourceLoader?.getSkills();
   const loadedPrompts = session.resourceLoader?.getPrompts();
   const loadedExtensions = session.resourceLoader?.getExtensions?.();
+  const providers: Array<Record<string, unknown>> = [];
+  try {
+    for (const provider of (session.modelRuntime?.getProviders?.() ?? []).slice(0, 200)) {
+      try {
+        const status = session.modelRuntime?.getProviderAuthStatus?.(provider.id);
+        providers.push({
+          id: provider.id.slice(0, 128),
+          name: provider.name.slice(0, 128),
+          supportsApiKey: typeof provider.auth?.apiKey?.login === 'function',
+          apiKeyName: (provider.auth?.apiKey?.name ?? 'API key').slice(0, 128),
+          supportsOAuth: typeof provider.auth?.oauth?.login === 'function',
+          oauthLabel: (provider.auth?.oauth?.loginLabel ?? provider.auth?.oauth?.name ?? 'Sign in').slice(0, 128),
+          configured: Boolean(status?.configured),
+          authLabel: (status?.label ?? '').slice(0, 128),
+        });
+      } catch {
+        // A broken optional provider should not prevent the remaining model controls from rendering.
+      }
+    }
+  } catch {
+    // The model catalog remains usable if a provider registry cannot be enumerated.
+  }
   const skills = loadedSkills?.skills.slice(0, 200).map((skill) => ({
     name: skill.name.slice(0, 128),
     description: (skill.description ?? '').slice(0, 1000),
@@ -299,6 +372,9 @@ function sendOptions(): void {
     })) ?? [];
   send('options', {
     models,
+    providers: providers.filter((provider) => provider.supportsApiKey || provider.supportsOAuth),
+    modelsConfigPath: join(getAgentDir(), 'models.json'),
+    settingsConfigPath: join(getAgentDir(), 'settings.json'),
     currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
     thinkingLevel: session.thinkingLevel,
     thinkingLevels: session.getAvailableThinkingLevels?.() ?? [],
@@ -315,14 +391,18 @@ function sendOptions(): void {
 }
 
 function bindSession(next: SessionLike): void {
+  providerAuthController?.abort();
+  providerAuthController = undefined;
   for (const resolve of pendingUiRequests.values()) resolve(undefined);
   pendingUiRequests.clear();
+  pendingProviderAuthRequests.clear();
   unsubscribe?.();
   session?.dispose();
   session = next;
   busy = false;
   compacting = false;
   reloadingResources = false;
+  authenticatingProvider = false;
   defaultTools = next.getActiveToolNames?.() ?? [];
   const skillData = next.sessionManager?.getEntries()
     .filter((entry) => entry.type === 'custom' && entry.customType === 'pi-chat.session-settings')
@@ -442,10 +522,18 @@ async function handle(input: WorkerInput): Promise<void> {
         await listSessions(typeof input.query === 'string' ? input.query : sessionQuery);
         return;
       case 'newSession':
+        if (authenticatingProvider) {
+          send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
+          return;
+        }
         send('session-opening');
         await createSession();
         return;
       case 'openSession':
+        if (authenticatingProvider) {
+          send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
+          return;
+        }
         if (input.path) {
           send('session-opening');
           await createSession(input.path);
@@ -460,11 +548,88 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'refreshModels': {
-        if (!session?.modelRuntime?.refresh) return;
-        await session.modelRuntime.refresh({ allowNetwork: false });
+        if (!session?.modelRuntime?.refresh || busy) return;
+        try {
+          const result = await session.modelRuntime.refresh({ allowNetwork: true });
+          if (result && typeof result === 'object' && 'errors' in result && result.errors instanceof Map && result.errors.size) {
+            send('notice', { message: `Some model catalogs could not refresh: ${[...result.errors.keys()].slice(0, 8).join(', ')}.` });
+          }
+        } catch (error) {
+          send('notice', { message: 'Model catalog refresh failed. Check your Pi provider settings and try again.', isError: true });
+        }
         sendOptions();
         return;
       }
+      case 'providerLogin': {
+        const runtime = session?.modelRuntime;
+        if (!runtime?.getProvider || !runtime.login || busy) return;
+        if (typeof input.providerId !== 'string' || input.providerId.length > 128) return;
+        const provider = runtime.getProvider(input.providerId);
+        const authType = input.authType;
+        if (authType !== 'oauth' && authType !== 'api_key') return;
+        const canLogin = authType === 'oauth'
+          ? typeof provider?.auth?.oauth?.login === 'function'
+          : authType === 'api_key' && typeof provider?.auth?.apiKey?.login === 'function';
+        if (!provider || !canLogin) throw new Error('That provider sign-in method is unavailable. Refresh providers and try again.');
+
+        busy = true;
+        authenticatingProvider = true;
+        providerAuthController = new AbortController();
+        const controller = providerAuthController;
+        send('run-started', { canStop: false, activity: `Connecting ${provider.name}` });
+        try {
+          await runtime.login(input.providerId, authType, {
+            signal: controller.signal,
+            prompt: async (prompt: any) => {
+              const value = await requestProviderAuthPrompt(prompt);
+              if (typeof value !== 'string') {
+                controller.abort();
+                throw new Error('Provider sign-in cancelled.');
+              }
+              return value;
+            },
+            notify: (event: any) => {
+              send('provider-auth-event', {
+                providerName: provider.name.slice(0, 128),
+                eventType: String(event.type ?? 'info').slice(0, 32),
+                message: typeof event.message === 'string' ? event.message.slice(0, 1000) : undefined,
+                instructions: typeof event.instructions === 'string' ? event.instructions.slice(0, 1000) : undefined,
+                url: typeof event.url === 'string' ? event.url.slice(0, 2048) : undefined,
+                verificationUri: typeof event.verificationUri === 'string' ? event.verificationUri.slice(0, 2048) : undefined,
+                userCode: typeof event.userCode === 'string' ? event.userCode.slice(0, 128) : undefined,
+              });
+            },
+          });
+          await runtime.refresh({ allowNetwork: false, providers: [input.providerId] });
+          send('notice', { message: `Connected to ${provider.name}. Pi saved the credential in its existing configuration.` });
+        } catch (error) {
+          if (controller.signal.aborted || (error instanceof Error && error.message === 'Provider sign-in cancelled.')) {
+            send('notice', { message: `Sign-in to ${provider.name} was cancelled.` });
+          } else {
+            send('notice', { message: `Sign-in to ${provider.name} failed. Check your provider settings and try again.`, isError: true });
+          }
+        } finally {
+          if (providerAuthController === controller) providerAuthController = undefined;
+          authenticatingProvider = false;
+          if (busy) {
+            busy = false;
+            send('run-finished', { aborted: false, providerLogin: true });
+          }
+          snapshot();
+          sendOptions();
+        }
+        return;
+      }
+      case 'cancelProviderLogin':
+        providerAuthController?.abort();
+        for (const requestId of pendingProviderAuthRequests) {
+          send('provider-auth-prompt-cancel', { requestId });
+          pendingProviderAuthRequests.delete(requestId);
+          const resolve = pendingUiRequests.get(requestId);
+          pendingUiRequests.delete(requestId);
+          resolve?.(undefined);
+        }
+        return;
       case 'usePreset': {
         if (!session || busy || !input.provider || !input.modelId) return;
         const model = session.modelRuntime?.getModel(input.provider, input.modelId);
@@ -636,6 +801,7 @@ async function handle(input: WorkerInput): Promise<void> {
           session?.abortCompaction?.();
           return;
         }
+        if (authenticatingProvider) return;
         if (reloadingResources) return;
         if (session && busy) await session.abort();
         if (busy) {
