@@ -5,7 +5,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 ## Pi runtime, models, and settings
 
 - [x] Use Pi's SDK and the user's existing Pi configuration, credentials, extensions, skills, prompt templates, and workspace session files; request trust before loading project-local Pi resources.
-- [x] Pick an available model; show provider, context-window size, and image support.
+- [x] Pick an available model before the first prompt; show provider, context-window size, and image support.
 - [x] Search models by provider, name, ID, or vision support; refresh manually and watch `models.json` for updates.
 - [x] Choose a thinking level supported by the selected model.
 - [x] Save, rename, remove, reorder, and use model/thinking presets.

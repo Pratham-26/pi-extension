@@ -181,6 +181,7 @@ type ConfiguredPiResource = {
   sourceLabel: string;
 };
 let session: SessionLike | undefined;
+let sessionCreationPromise: Promise<boolean> | undefined;
 let packageManager: DefaultPackageManager | undefined;
 let configuredPiResources = new Map<string, ConfiguredPiResource>();
 let unsubscribe: (() => void) | undefined;
@@ -2118,7 +2119,23 @@ function titleFromFirstPrompt(prompt: string): string {
   return shortened || normalized.slice(0, 64).trim();
 }
 
-async function createSession(path?: string): Promise<boolean> {
+async function createSession(path?: string, forceNew = false): Promise<boolean> {
+  while (sessionCreationPromise) {
+    const pending = sessionCreationPromise;
+    const opened = await pending;
+    if (!forceNew && (!path || session?.sessionFile === path)) return opened;
+  }
+  if (!forceNew && !path && session) return true;
+  const pending = createSessionInternal(path);
+  sessionCreationPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (sessionCreationPromise === pending) sessionCreationPromise = undefined;
+  }
+}
+
+async function createSessionInternal(path?: string): Promise<boolean> {
   let createdSession: SessionLike | undefined;
   let createdExtensionsBound = false;
   try {
@@ -2380,6 +2397,11 @@ async function handle(input: WorkerInput): Promise<void> {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
           return;
         }
+        send('session-opening');
+        await createSession(undefined, true);
+        return;
+      case 'initializeSession':
+        if (busy || reloadingResources || authenticatingProvider || session) return;
         send('session-opening');
         await createSession();
         return;

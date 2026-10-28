@@ -251,6 +251,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private openLatestSessionOnStart: boolean;
   private latestSessionOpenAttempted = false;
   private sessionInteractionStarted = false;
+  private sessionInitializationRequested = false;
   private knownSessionPaths = new Set<string>();
   private knownPromptPaths = new Set<string>();
   private knownResourcePaths = new Set<string>();
@@ -848,6 +849,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.activeSessionPath = '';
     this.latestSessionOpenAttempted = false;
     this.sessionInteractionStarted = false;
+    this.sessionInitializationRequested = false;
     this.failPendingMcpSetting(previous);
     this.failPendingMcpServerRequests(previous);
     if (previous) this.stopWorker(previous);
@@ -1126,16 +1128,23 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         void this.refreshRunningSessionStatuses();
         this.consumePendingSessionHandoff(worker);
         this.post({ ...message, sessions });
-        if (this.openLatestSessionOnStart && !this.latestSessionOpenAttempted) {
-          this.latestSessionOpenAttempted = true;
-          if (!this.sessionInteractionStarted && !this.activeSessionPath) {
+        if (!this.sessionInteractionStarted && !this.activeSessionPath) {
+          let openingLatestSession = false;
+          if (this.openLatestSessionOnStart && !this.latestSessionOpenAttempted) {
+            this.latestSessionOpenAttempted = true;
             const latest = sessions
               .filter((item) => item['isCurrentWorkspace'] === true && this.isKnownSessionPath(item['path']))
               .reduce<Record<string, unknown> | undefined>((current, item) =>
                 !current || Number(item['modified'] ?? 0) > Number(current['modified'] ?? 0) ? item : current, undefined);
             if (latest && typeof latest['path'] === 'string') {
+              openingLatestSession = true;
+              this.sessionInteractionStarted = true;
               this.worker?.postMessage({ type: 'openSession', path: latest['path'] });
             }
+          }
+          if (!openingLatestSession && !this.sessionInitializationRequested) {
+            this.sessionInitializationRequested = true;
+            this.worker?.postMessage({ type: 'initializeSession' });
           }
         }
       } else if (message.type === 'pi-resources') {
