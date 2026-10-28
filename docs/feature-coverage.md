@@ -67,7 +67,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 ## Git review, notifications, and privacy
 
-- [ ] Show edit diffs and changed-file summaries; safely revert recorded edits.
+- [~] Show branch and changed-file summaries, open bounded Git diffs, and discard confirmed tracked unstaged changes by restoring from the index; Pi edit-history review and untracked-file deletion are unavailable.
 - [ ] Generate commit messages and pull-request descriptions from Git changes.
 - [x] Show VS Code notifications for a finished run or extension input request while the chat view is hidden.
 - [ ] Notification sound, user-defined command hooks, and local diagnostic logs.

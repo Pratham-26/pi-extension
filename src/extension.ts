@@ -36,10 +36,44 @@ type ProviderSetup = {
   authLabel: string;
 };
 
+type GitChangeRecord = {
+  uri?: vscode.Uri;
+  resourceUri?: vscode.Uri;
+  status?: unknown;
+};
+
+type GitRepositoryLike = {
+  rootUri: vscode.Uri;
+  state: {
+    HEAD?: { name?: string; upstream?: { remote?: string; name?: string }; ahead?: number; behind?: number };
+    indexChanges?: GitChangeRecord[];
+    workingTreeChanges?: GitChangeRecord[];
+    untrackedChanges?: GitChangeRecord[];
+    mergeChanges?: GitChangeRecord[];
+  };
+  status?: () => Promise<void>;
+  diffWithHEAD?: (path?: string) => Promise<string | GitChangeRecord[]>;
+  diffWithHEADShortStats?: () => Promise<{ files: number; insertions: number; deletions: number }>;
+  restore?: (paths: string[], options?: { staged?: boolean; ref?: string }) => Promise<void>;
+};
+
+type GitApiLike = {
+  repositories: GitRepositoryLike[];
+};
+
+type GitFileStatus = {
+  path: string;
+  status: string[];
+  canDiscard: boolean;
+  isUntracked: boolean;
+};
+
 const VIEW_ID = 'piChat.chatView';
 const MAX_ATTACHMENT_BYTES = 1024 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_CHARS = 40_000;
+const MAX_GIT_REVIEW_FILES = 500;
+const MAX_GIT_DIFF_CHARS = 500_000;
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new PiChatViewProvider(context);
@@ -198,6 +232,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = worker;
     worker.on('message', (message: RuntimeMessage) => {
       if (this.worker !== worker) return;
+      if (message.type === 'run-finished') void this.refreshGitChanges();
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
         this.activeSessionPath = message.sessionFile;
         this.post(message);
@@ -325,7 +360,17 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'ready':
         await this.ensureRuntime();
         this.worker?.postMessage({ type: 'listSessions' });
+        await this.refreshGitChanges();
         this.publishPinnedActiveFile();
+        return;
+      case 'refreshGitChanges':
+        await this.refreshGitChanges();
+        return;
+      case 'openGitDiff':
+        await this.openGitDiff(message.path);
+        return;
+      case 'discardGitChange':
+        await this.discardGitChange(message.path);
         return;
       case 'newSession':
         await this.newSession();
@@ -885,29 +930,31 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createGitStateAttachment(workspace: vscode.WorkspaceFolder): Promise<Attachment | undefined> {
-    const extension = vscode.extensions.getExtension('vscode.git');
-    if (!extension) throw new Error('The built-in Git extension is unavailable.');
-    const git = extension.isActive ? extension.exports : await extension.activate();
-    const api = git.getAPI(1);
-    const repository = api.repositories.find((item: any) => this.workspaceRelativePath(item.rootUri, workspace) !== undefined);
-    if (!repository) return undefined;
+    const handle = await this.getGitRepository(workspace);
+    if (!handle) return undefined;
+    const { repository } = handle;
     const state = repository.state;
-    const names = (changes: any[]) => changes.slice(0, 100).map((change) => {
+    const names = (changes: GitChangeRecord[]) => changes.slice(0, 100).map((change) => {
       const uri = change.uri ?? change.resourceUri;
       return uri ? this.workspaceRelativePath(uri, workspace) : undefined;
     }).filter(Boolean);
     const branch = String(state.HEAD?.name ?? '(detached HEAD)').slice(0, 200);
-    const upstream = state.HEAD?.upstream ? `\nUpstream: ${String(state.HEAD.upstream).slice(0, 200)}` : '';
+    const upstreamName = state.HEAD?.upstream
+      ? `${state.HEAD.upstream.remote ?? ''}/${state.HEAD.upstream.name ?? ''}`.replace(/^\/|\/$/g, '')
+      : '';
+    const upstream = upstreamName ? `\nUpstream: ${upstreamName.slice(0, 200)}` : '';
     const commits = state.HEAD?.ahead !== undefined || state.HEAD?.behind !== undefined
       ? `\nAhead: ${Number(state.HEAD.ahead) || 0}; behind: ${Number(state.HEAD.behind) || 0}`
       : '';
     const index = names(state.indexChanges ?? []);
     const working = names(state.workingTreeChanges ?? []);
+    const untracked = names(state.untrackedChanges ?? []);
     const conflicts = names(state.mergeChanges ?? []);
     const context = [
       `Branch: ${branch}${upstream}${commits}`,
       `Staged (${state.indexChanges?.length ?? 0}): ${index.join(', ') || 'none'}`,
       `Unstaged (${state.workingTreeChanges?.length ?? 0}): ${working.join(', ') || 'none'}`,
+      `Untracked (${state.untrackedChanges?.length ?? 0}): ${untracked.join(', ') || 'none'}`,
       `Conflicts (${state.mergeChanges?.length ?? 0}): ${conflicts.join(', ') || 'none'}`,
     ].join('\n');
     return {
@@ -916,6 +963,207 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       path: workspace.name,
       context: `Git workspace state:\n${context}`.slice(0, MAX_ATTACHMENT_CHARS),
     };
+  }
+
+  private async getGitRepository(workspace: vscode.WorkspaceFolder): Promise<{ api: GitApiLike; repository: GitRepositoryLike } | undefined> {
+    const extension = vscode.extensions.getExtension('vscode.git');
+    if (!extension) throw new Error('The built-in Git extension is unavailable.');
+    const git = extension.isActive ? extension.exports : await extension.activate();
+    const api = git.getAPI(1) as GitApiLike;
+    const containing = api.repositories
+      .filter((item) => this.relativePathFrom(item.rootUri, workspace.uri) !== undefined)
+      .sort((a, b) => b.rootUri.fsPath.length - a.rootUri.fsPath.length);
+    const nested = api.repositories
+      .filter((item) => this.relativePathFrom(workspace.uri, item.rootUri) !== undefined)
+      .sort((a, b) => a.rootUri.fsPath.length - b.rootUri.fsPath.length);
+    const repository = containing[0] ?? nested[0];
+    return repository ? { api, repository } : undefined;
+  }
+
+  private async refreshGitChanges(): Promise<void> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      this.post({ type: 'git-changes', available: false, message: 'Open a workspace to review Git changes.', files: [] });
+      return;
+    }
+    try {
+      const handle = await this.getGitRepository(workspace);
+      if (!handle) {
+        this.post({ type: 'git-changes', available: false, message: 'This workspace is not inside a Git repository.', files: [] });
+        return;
+      }
+      const { repository } = handle;
+      await repository.status?.();
+      const state = repository.state;
+      const files = new Map<string, GitFileStatus>();
+      const add = (changes: GitChangeRecord[] | undefined, label: string, canDiscard = false) => {
+        for (const change of (changes ?? []).slice(0, MAX_GIT_REVIEW_FILES)) {
+          const uri = change.uri ?? change.resourceUri;
+          const relativePath = uri ? this.workspaceRelativePath(uri, workspace) : undefined;
+          if (!relativePath) continue;
+          let item = files.get(relativePath);
+          if (!item) {
+            item = { path: relativePath.slice(0, 4096), status: [], canDiscard: false, isUntracked: false };
+            files.set(relativePath, item);
+          }
+          if (!item.status.includes(label)) item.status.push(label);
+          if (label === 'Untracked') item.isUntracked = true;
+          if (canDiscard && !item.isUntracked) item.canDiscard = true;
+        }
+      };
+      add(state.indexChanges, 'Staged');
+      add(state.workingTreeChanges, 'Modified', true);
+      add(state.untrackedChanges, 'Untracked');
+      add(state.mergeChanges, 'Conflict');
+      for (const item of files.values()) {
+        if (item.status.includes('Conflict') || item.isUntracked) item.canDiscard = false;
+      }
+      let stats: { files: number; insertions: number; deletions: number } | undefined;
+      try {
+        stats = await repository.diffWithHEADShortStats?.();
+      } catch {
+        // File names and statuses remain useful when Git cannot compute diff statistics.
+      }
+      const head = state.HEAD;
+      const summary = {
+        branch: String(head?.name ?? '(detached HEAD)').slice(0, 200),
+        staged: state.indexChanges?.length ?? 0,
+        modified: state.workingTreeChanges?.length ?? 0,
+        untracked: state.untrackedChanges?.length ?? 0,
+        conflicts: state.mergeChanges?.length ?? 0,
+        files: files.size,
+        insertions: stats?.insertions ?? 0,
+        deletions: stats?.deletions ?? 0,
+      };
+      this.post({
+        type: 'git-changes',
+        available: true,
+        summary,
+        files: [...files.values()].slice(0, MAX_GIT_REVIEW_FILES),
+        truncated: files.size > MAX_GIT_REVIEW_FILES,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message.slice(0, 300) : 'Git status is unavailable.';
+      this.post({ type: 'git-changes', available: false, message: `Could not read Git changes. ${reason}`, files: [] });
+    }
+  }
+
+  private async findCurrentGitChange(value: unknown): Promise<{ workspace: vscode.WorkspaceFolder; repository: GitRepositoryLike; uri: vscode.Uri; relativePath: string; isUntracked: boolean } | undefined> {
+    if (typeof value !== 'string' || value.length < 1 || value.length > 4096 || path.isAbsolute(value)) return undefined;
+    const normalized = value.replaceAll('\\', '/');
+    if (normalized.split('/').some((part) => !part || part === '.' || part === '..')) return undefined;
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) return undefined;
+    const handle = await this.getGitRepository(workspace);
+    if (!handle) return undefined;
+    await handle.repository.status?.();
+    const state = handle.repository.state;
+    const groups: Array<{ changes: GitChangeRecord[] | undefined; isUntracked: boolean }> = [
+      { changes: state.indexChanges, isUntracked: false },
+      { changes: state.workingTreeChanges, isUntracked: false },
+      { changes: state.untrackedChanges, isUntracked: true },
+      { changes: state.mergeChanges, isUntracked: false },
+    ];
+    for (const group of groups) {
+      for (const change of group.changes ?? []) {
+        const uri = change.uri ?? change.resourceUri;
+        if (!uri || this.workspaceRelativePath(uri, workspace) !== normalized) continue;
+        return { workspace, repository: handle.repository, uri, relativePath: normalized, isUntracked: group.isUntracked };
+      }
+    }
+    return undefined;
+  }
+
+  private async openGitDiff(value: unknown): Promise<void> {
+    try {
+      const target = await this.findCurrentGitChange(value);
+      if (!target) {
+        this.post({ type: 'notice', message: 'That file is no longer listed as a Git change. Refresh and try again.', isError: true });
+        await this.refreshGitChanges();
+        return;
+      }
+      if (target.isUntracked) {
+        await vscode.window.showTextDocument(target.uri, { preview: false });
+        return;
+      }
+      const repositoryPath = this.relativePathFrom(target.repository.rootUri, target.uri);
+      if (!repositoryPath) {
+        this.post({ type: 'notice', message: 'Could not resolve this file inside its Git repository.' });
+        return;
+      }
+      const patch = await target.repository.diffWithHEAD?.(repositoryPath);
+      if (typeof patch !== 'string' || !patch.trim()) {
+        this.post({ type: 'notice', message: 'Git returned no diff for that file.' });
+        return;
+      }
+      const boundedPatch = patch.length > MAX_GIT_DIFF_CHARS
+        ? `${patch.slice(0, MAX_GIT_DIFF_CHARS)}\n\n[Diff truncated in this editor. Open the file in Source Control for the full change.]`
+        : patch;
+      const document = await vscode.workspace.openTextDocument({ language: 'diff', content: boundedPatch });
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      this.post({ type: 'notice', message: `Could not open this Git change. ${error instanceof Error ? error.message.slice(0, 300) : ''}`, isError: true });
+    }
+  }
+
+  private async discardGitChange(value: unknown): Promise<void> {
+    const target = await this.findCurrentGitChange(value);
+    if (!target || target.isUntracked || !target.repository.restore) {
+      this.post({ type: 'notice', message: 'Only tracked unstaged changes can be discarded here. Refresh the Git list and try again.', isError: true });
+      await this.refreshGitChanges();
+      return;
+    }
+    const hasConflict = (target.repository.state.mergeChanges ?? []).some((change) => {
+      const uri = change.uri ?? change.resourceUri;
+      return uri && this.workspaceRelativePath(uri, target.workspace) === target.relativePath;
+    });
+    const hasUnstagedChange = (target.repository.state.workingTreeChanges ?? []).some((change) => {
+      const uri = change.uri ?? change.resourceUri;
+      return uri && this.workspaceRelativePath(uri, target.workspace) === target.relativePath;
+    });
+    if (!hasUnstagedChange || hasConflict) {
+      this.post({ type: 'notice', message: 'That file no longer has a discardable unstaged change. Refresh and try again.', isError: true });
+      await this.refreshGitChanges();
+      return;
+    }
+    const answer = await vscode.window.showWarningMessage(
+      `Discard unstaged changes to ${target.relativePath}? This restores the file to its staged version; staged changes are retained.`,
+      { modal: true },
+      'Discard unstaged changes',
+    );
+    if (answer !== 'Discard unstaged changes') return;
+    const current = await this.findCurrentGitChange(target.relativePath);
+    if (!current || current.isUntracked || current.uri.fsPath !== target.uri.fsPath) {
+      this.post({ type: 'notice', message: 'The Git state changed while confirmation was open. Nothing was discarded.', isError: true });
+      await this.refreshGitChanges();
+      return;
+    }
+    const latestWorkingChange = (current.repository.state.workingTreeChanges ?? []).some((change) => {
+      const uri = change.uri ?? change.resourceUri;
+      return uri && this.workspaceRelativePath(uri, current.workspace) === current.relativePath;
+    });
+    const latestConflict = (current.repository.state.mergeChanges ?? []).some((change) => {
+      const uri = change.uri ?? change.resourceUri;
+      return uri && this.workspaceRelativePath(uri, current.workspace) === current.relativePath;
+    });
+    if (!latestWorkingChange || latestConflict
+      || this.normalizeSessionPath(current.repository.rootUri.fsPath) !== this.normalizeSessionPath(target.repository.rootUri.fsPath)) {
+      this.post({ type: 'notice', message: 'The Git state changed while confirmation was open. Nothing was discarded.', isError: true });
+      await this.refreshGitChanges();
+      return;
+    }
+    try {
+      const repositoryPath = this.relativePathFrom(current.repository.rootUri, current.uri);
+      if (!repositoryPath) {
+        this.post({ type: 'notice', message: 'Could not resolve this file inside its Git repository. Nothing was discarded.', isError: true });
+        return;
+      }
+      // Git restore without --staged restores the worktree from the index, preserving staged content.
+      await current.repository.restore!([repositoryPath]);
+      await this.refreshGitChanges();
+    } catch (error) {
+      this.post({ type: 'notice', message: `Could not discard this Git change. ${error instanceof Error ? error.message.slice(0, 300) : ''}`, isError: true });
+    }
   }
 
   private async attachUris(rawUris: string[]): Promise<void> {
@@ -1536,8 +1784,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private workspaceRelativePath(uri: vscode.Uri, folder: vscode.WorkspaceFolder): string | undefined {
-    if (uri.scheme !== folder.uri.scheme) return undefined;
-    const relative = path.relative(folder.uri.fsPath, uri.fsPath);
+    return this.relativePathFrom(folder.uri, uri);
+  }
+
+  private relativePathFrom(root: vscode.Uri, uri: vscode.Uri): string | undefined {
+    if (uri.scheme !== root.scheme) return undefined;
+    const relative = path.relative(root.fsPath, uri.fsPath);
     if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) return undefined;
     return relative.replaceAll(path.sep, '/');
   }
@@ -1733,6 +1985,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <button id="chat-search-toggle" class="icon-button" type="button" title="Search this chat" aria-label="Search this chat" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></svg>
         </button>
+        <button id="git-review-toggle" class="icon-button" type="button" title="Review Git changes" aria-label="Review Git changes" aria-expanded="false" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v12a4 4 0 0 0 4 4h8"/><path d="m14 15 4 4-4 4"/><circle cx="6" cy="3" r="2"/></svg>
+        </button>
         <button id="bookmark-toggle" class="text-button header-action" type="button" title="Show bookmarked messages" aria-expanded="false">★</button>
         <button id="export-session" class="text-button header-action" type="button" title="Export session">Export</button>
         <button id="open-settings" class="icon-button" type="button" title="Pi Chat settings" aria-label="Pi Chat settings">
@@ -1772,6 +2027,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <div class="history-heading"><span>Queued messages</span><button id="clear-queue" class="text-button" type="button">Clear all</button><button id="close-queue" class="icon-button small" type="button" title="Close" aria-label="Close queued messages">×</button></div>
         <div id="queue-list" class="session-list"></div>
         <div id="queue-empty" class="session-empty">No queued messages.</div>
+      </aside>
+      <aside id="git-review-panel" class="history-panel git-review-panel" aria-label="Git changes" hidden>
+        <div class="history-heading"><span>Git changes</span><div class="git-review-actions"><button id="refresh-git-changes" class="icon-button small" type="button" title="Refresh Git changes" aria-label="Refresh Git changes">↻</button><button id="close-git-review" class="icon-button small" type="button" title="Close" aria-label="Close Git changes">×</button></div></div>
+        <div id="git-change-summary" class="git-change-summary">Checking workspace…</div>
+        <div id="git-change-list" class="session-list"></div>
+        <div id="git-change-empty" class="session-empty" hidden>No Git changes in this workspace.</div>
       </aside>
 
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>

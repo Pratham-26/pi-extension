@@ -55,6 +55,10 @@ const state = {
   defaultTools: [],
   disabledSkills: [],
   branchPoints: [],
+  gitChanges: [],
+  gitSummary: undefined,
+  gitReviewAvailable: false,
+  gitChangesTruncated: false,
   deliverAs: 'followUp',
   queue: { steering: [], followUp: [] },
   toolMessagesBySession: new Map(),
@@ -76,6 +80,11 @@ const ui = {
   chatSearchInput: el('chat-search-input'),
   chatSearchCount: el('chat-search-count'),
   chatSearchToggle: el('chat-search-toggle'),
+  gitReviewToggle: el('git-review-toggle'),
+  gitReviewPanel: el('git-review-panel'),
+  gitChangeSummary: el('git-change-summary'),
+  gitChangeList: el('git-change-list'),
+  gitChangeEmpty: el('git-change-empty'),
   empty: el('empty-state'),
   prompt: el('prompt'),
   send: el('send'),
@@ -308,6 +317,8 @@ function updateControls() {
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
   ui.mcpEnabled.disabled = !state.hasSession || state.busy || state.mcpSettingPending;
   ui.editMcpConfig.disabled = !state.hasWorkspace || state.busy;
+  ui.gitReviewToggle.disabled = !state.hasWorkspace;
+  el('refresh-git-changes').disabled = !state.hasWorkspace;
   ui.pinActiveFile.disabled = !state.hasWorkspace;
   for (const button of ui.messageList.querySelectorAll('.context-action')) button.disabled = state.busy;
   ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
@@ -1065,6 +1076,53 @@ function renderBookmarks() {
   }
 }
 
+function renderGitChanges() {
+  ui.gitChangeList.replaceChildren();
+  if (!state.gitReviewAvailable) {
+    ui.gitChangeSummary.textContent = state.gitSummary?.message || 'Git status is unavailable.';
+    ui.gitChangeEmpty.hidden = true;
+    return;
+  }
+  const summary = state.gitSummary || {};
+  const counts = [
+    `${Number(summary.files) || 0} files`,
+    `+${Number(summary.insertions) || 0}`,
+    `−${Number(summary.deletions) || 0}`,
+  ];
+  const statuses = [
+    Number(summary.staged) ? `${summary.staged} staged` : '',
+    Number(summary.modified) ? `${summary.modified} modified` : '',
+    Number(summary.untracked) ? `${summary.untracked} untracked` : '',
+    Number(summary.conflicts) ? `${summary.conflicts} conflicts` : '',
+  ].filter(Boolean);
+  ui.gitChangeSummary.textContent = `${String(summary.branch || '(detached HEAD)')} · ${counts.join(' · ')}${statuses.length ? `\n${statuses.join(' · ')}` : ''}${state.gitChangesTruncated ? '\nSome files are omitted from this list.' : ''}`;
+  ui.gitChangeEmpty.hidden = state.gitChanges.length > 0;
+  for (const change of state.gitChanges) {
+    const row = document.createElement('div');
+    row.className = 'git-change-row';
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'git-change-open';
+    open.textContent = String(change.path || 'Unknown file').slice(0, 4096);
+    open.title = change.isUntracked ? 'Open this untracked file' : 'Open the Git diff for this file';
+    open.addEventListener('click', () => post('openGitDiff', { path: change.path }));
+    const details = document.createElement('div');
+    details.className = 'git-change-status';
+    details.textContent = Array.isArray(change.status) ? change.status.map(String).join(' · ') : 'Changed';
+    row.append(open, details);
+    if (change.canDiscard === true) {
+      const discard = document.createElement('button');
+      discard.type = 'button';
+      discard.className = 'git-change-discard';
+      discard.textContent = 'Discard unstaged';
+      discard.title = 'Discard only the unstaged change after confirmation';
+      discard.addEventListener('click', () => post('discardGitChange', { path: change.path }));
+      row.append(discard);
+    }
+    ui.gitChangeList.append(row);
+  }
+}
+
 function renderBranchPoints() {
   ui.branchList.replaceChildren();
   ui.branchEmpty.hidden = state.branchPoints.length > 0;
@@ -1729,6 +1787,20 @@ window.addEventListener('message', (event) => {
     case 'workspace':
       updateWorkspace(data.name, data.hasWorkspace);
       break;
+    case 'git-changes':
+      state.gitReviewAvailable = data.available === true;
+      state.gitSummary = state.gitReviewAvailable && data.summary && typeof data.summary === 'object'
+        ? data.summary
+        : { message: String(data.message || 'Git status is unavailable.') };
+      state.gitChanges = Array.isArray(data.files) ? data.files.slice(0, 500) : [];
+      state.gitChangesTruncated = data.truncated === true;
+      renderGitChanges();
+      break;
+    case 'git-review-open':
+      ui.gitReviewPanel.hidden = false;
+      ui.gitReviewToggle.setAttribute('aria-expanded', 'true');
+      post('refreshGitChanges');
+      break;
     case 'sessions':
       state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
       renderSessions();
@@ -1927,6 +1999,27 @@ el('history-toggle').addEventListener('click', () => {
   ui.history.hidden = !open;
   ui.historyToggle.setAttribute('aria-expanded', String(open));
   if (open) post('listSessions', { query: state.sessionQuery });
+});
+ui.gitReviewToggle.addEventListener('click', () => {
+  const open = ui.gitReviewPanel.hidden;
+  ui.gitReviewPanel.hidden = !open;
+  ui.gitReviewToggle.setAttribute('aria-expanded', String(open));
+  if (open) {
+    ui.history.hidden = true;
+    ui.historyToggle.setAttribute('aria-expanded', 'false');
+    ui.bookmarkPanel.hidden = true;
+    ui.bookmarkToggle.setAttribute('aria-expanded', 'false');
+    ui.branchPanel.hidden = true;
+    ui.branchHistoryToggle.setAttribute('aria-expanded', 'false');
+    ui.queuePanel.hidden = true;
+    ui.queueToggle.setAttribute('aria-expanded', 'false');
+    post('refreshGitChanges');
+  }
+});
+el('refresh-git-changes').addEventListener('click', () => post('refreshGitChanges'));
+el('close-git-review').addEventListener('click', () => {
+  ui.gitReviewPanel.hidden = true;
+  ui.gitReviewToggle.setAttribute('aria-expanded', 'false');
 });
 ui.bookmarkToggle.addEventListener('click', () => {
   const open = ui.bookmarkPanel.hidden;

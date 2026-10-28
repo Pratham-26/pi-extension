@@ -158,6 +158,16 @@ button:focus-visible, textarea:focus-visible {
 .branch-panel { right: 8px; left: auto; width: min(286px, calc(100vw - 64px)); }
 .queue-panel { right: 8px; left: auto; width: min(340px, calc(100vw - 64px)); }
 .bookmark-panel { width: min(320px, calc(100vw - 64px)); }
+.git-review-panel { right: 8px; left: auto; width: min(380px, calc(100vw - 64px)); }
+.git-review-actions { display: flex; align-items: center; gap: 3px; }
+.git-change-summary { flex: 0 0 auto; margin: 0 10px 8px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: color-mix(in srgb, var(--text) 4%, transparent); white-space: pre-line; overflow-wrap: anywhere; font-size: 10px; line-height: 1.5; }
+.git-change-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 6px; margin: 2px 0; padding: 5px; border-radius: 5px; }
+.git-change-row:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.git-change-open { min-width: 0; padding: 4px 3px; border: 0; color: var(--text); text-align: left; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; background: transparent; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; }
+.git-change-open:hover { color: var(--focus); }
+.git-change-status { grid-column: 1; min-width: 0; padding-left: 3px; color: var(--muted); overflow-wrap: anywhere; font-size: 9px; }
+.git-change-discard { grid-column: 2; grid-row: 1 / span 2; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 9px; }
+.git-change-discard:hover { color: var(--danger); border-color: var(--danger); }
 .history-heading { min-height: 42px; padding: 0 10px 0 13px; display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
 .session-search { flex: 0 0 auto; min-width: 0; margin: 0 7px 5px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 11px; }
 .session-search::placeholder { color: var(--muted); }
