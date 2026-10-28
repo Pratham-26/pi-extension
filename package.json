@@ -1,0 +1,118 @@
+{
+  "name": "pi-chat-vscode",
+  "displayName": "Pi Chat",
+  "description": "Work with Pi coding sessions from a VS Code sidebar.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Pratham-26/pi-extension.git"
+  },
+  "homepage": "https://github.com/Pratham-26/pi-extension#readme",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "pi",
+    "coding-agent",
+    "chat",
+    "workspace-context"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:piChat.chatView"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "piChat",
+          "title": "Pi Chat",
+          "icon": "media/pi.svg"
+        }
+      ]
+    },
+    "views": {
+      "piChat": [
+        {
+          "type": "webview",
+          "id": "piChat.chatView",
+          "name": "Pi Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "piChat.newSession",
+        "title": "New Pi Chat",
+        "category": "Pi Chat",
+        "icon": "$(add)"
+      },
+      {
+        "command": "piChat.openSettings",
+        "title": "Pi Chat: Open Settings",
+        "category": "Pi Chat"
+      }
+    ],
+    "configuration": {
+      "title": "Pi Chat",
+      "properties": {
+        "piChat.context.followSelection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the active editor selection as a file and line reference when you send a message."
+        },
+        "piChat.context.followActiveFile": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include the active editor file as a reference with each message when there is no selection."
+        },
+        "piChat.notifications.runFinished": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a VS Code notification when a Pi run finishes while the chat view is hidden."
+        },
+        "piChat.notifications.inputRequired": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a VS Code notification when a Pi extension asks for input while the chat view is hidden."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "piChat.newSession",
+          "when": "view == piChat.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "piChat.openSettings",
+          "when": "view == piChat.chatView",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "npm run compile:extension && npm run compile:worker",
+    "compile:extension": "esbuild src/extension.ts --bundle --platform=node --target=node22 --external:vscode --outfile=dist/extension.js",
+    "compile:worker": "esbuild src/pi-worker.ts --bundle --platform=node --target=node22 --format=esm --external:@earendil-works/pi-coding-agent --outfile=dist/pi-worker.mjs",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run compile && vsce package"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/vscode": "^1.109.0",
+    "@vscode/vsce": "^3.3.2",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.3"
+  }
+}
