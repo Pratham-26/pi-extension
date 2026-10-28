@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.45",
+  "version": "0.1.47",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -63,6 +63,11 @@
         "title": "Pi Chat: Create Git Worktree",
         "category": "Pi Chat",
         "icon": "$(git-branch)"
+      },
+      {
+        "command": "piChat.removeWorktree",
+        "title": "Pi Chat: Remove Git Worktree",
+        "category": "Pi Chat"
       },
       {
         "command": "piChat.openSettings",

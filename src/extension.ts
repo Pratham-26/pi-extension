@@ -1,12 +1,25 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { execFile } from 'node:child_process';
 import { access, lstat, mkdir, open as openFile, opendir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { isPiPackageSource } from './package-source';
 import { appendDiagnosticLog, DIAGNOSTIC_LOG_FILENAME, type DiagnosticCategory } from './diagnostic-log';
+import {
+  copyIgnoredFileSafely,
+  isPathInside,
+  isSafeRepositoryRelativePath,
+  listGitWorktrees,
+  listIgnoredFileChoices,
+  runGitCommand,
+  MAX_IGNORED_COPY_BYTES,
+  MAX_IGNORED_FILES_FOR_PICKER,
+  type GitCommandResult,
+  type GitWorktreeEntry,
+  type IgnoredFileChoice,
+  type IgnoredFileListing,
+} from './git-worktree-files';
 
 type Attachment = {
   id: string;
@@ -66,8 +79,6 @@ type GitApiLike = {
   repositories: GitRepositoryLike[];
 };
 
-type GitCommandResult = { stdout: string; stderr: string; exitCode: number };
-
 type GitFileStatus = {
   path: string;
   status: string[];
@@ -90,6 +101,7 @@ type ContextFileChoice = { path: string; enabled: boolean };
 type RunningSessionRecord = {
   version: 1;
   sessionKey: string;
+  workspaceKey?: string;
   activity: string;
   updatedAt: number;
 };
@@ -110,44 +122,6 @@ const MAX_RUNNING_SESSION_RECORDS = 200;
 const RUNNING_SESSION_RECORD_TTL_MS = 12_000;
 const MAX_GIT_BRANCHES_FOR_PICKER = 500;
 const GIT_WORKTREE_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
-
-function runGitCommand(gitPath: string, cwd: string, args: string[], timeout: number): Promise<GitCommandResult> {
-  const allowedEnvironmentKeys = new Set([
-    'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
-    'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL',
-  ]);
-  const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && allowedEnvironmentKeys.has(key.toUpperCase())) env[key] = value;
-  }
-  env.GIT_TERMINAL_PROMPT = '0';
-  return new Promise((resolve, reject) => {
-    execFile(gitPath, args, {
-      cwd,
-      env,
-      encoding: 'utf8',
-      shell: false,
-      windowsHide: true,
-      timeout,
-      maxBuffer: 2 * 1024 * 1024,
-    }, (error, stdout, stderr) => {
-      if (error && typeof (error as NodeJS.ErrnoException).code !== 'number') {
-        reject(error);
-        return;
-      }
-      resolve({
-        stdout: String(stdout),
-        stderr: String(stderr),
-        exitCode: error ? Number((error as NodeJS.ErrnoException).code) : 0,
-      });
-    });
-  });
-}
-
-function isPathInside(parentPath: string, candidatePath: string): boolean {
-  const relative = path.relative(parentPath, candidatePath);
-  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
-}
 
 function readPiOfflineMode(): PiOfflineMode {
   const value = vscode.workspace.getConfiguration('piChat').get<string>('offlineMode', 'inherit');
@@ -198,6 +172,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piChat.createWorktree', () => provider.createGitWorktreeSession()),
+    vscode.commands.registerCommand('piChat.removeWorktree', () => provider.removeGitWorktreeSession()),
     vscode.commands.registerCommand('piChat.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.pi-chat-vscode')),
     vscode.commands.registerCommand('piChat.chooseAgentDir', () => provider.chooseAgentDir()),
     vscode.commands.registerCommand('piChat.restartRuntime', () => provider.restartPiRuntime()),
@@ -354,6 +329,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       void vscode.window.showErrorMessage('Open a local workspace folder before creating a Git worktree.');
       return;
     }
+    if (!vscode.workspace.isTrusted) {
+      void vscode.window.showErrorMessage('Trust this workspace in VS Code before creating a Git worktree.');
+      return;
+    }
 
     try {
       const handle = await this.getGitRepository(workspace);
@@ -459,6 +438,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         'Create worktree',
       );
       if (confirmation !== 'Create worktree') return;
+      if (!vscode.workspace.isTrusted) {
+        void vscode.window.showErrorMessage('Workspace trust changed. Trust this workspace before creating a Git worktree.');
+        return;
+      }
 
       if (await realpath(handle.repository.rootUri.fsPath) !== repositoryPath || await realpath(parentPath) !== parentPath) {
         void vscode.window.showErrorMessage('The repository or destination folder changed. Start the worktree operation again.');
@@ -506,6 +489,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      try {
+        await this.offerIgnoredFilesForWorktree(gitPath, repositoryPath, targetPath);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 240) : 'Unknown error.';
+        void vscode.window.showErrorMessage(`The worktree was created, but ignored files could not be copied. ${detail}`);
+      }
+
       const open = await vscode.window.showInformationMessage(`Git worktree created at ${targetPath}.`, 'Open in New Window');
       if (open === 'Open in New Window') {
         try {
@@ -522,6 +512,218 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         : error instanceof Error ? error.message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) : 'Unknown error.';
       void vscode.window.showErrorMessage(`Could not create a Git worktree. ${detail}`);
     }
+  }
+
+  async removeGitWorktreeSession(): Promise<void> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace || workspace.uri.scheme !== 'file') {
+      void vscode.window.showErrorMessage('Open a local workspace folder before removing a Git worktree.');
+      return;
+    }
+    if (!vscode.workspace.isTrusted) {
+      void vscode.window.showErrorMessage('Trust this workspace in VS Code before removing a Git worktree.');
+      return;
+    }
+
+    try {
+      const handle = await this.getGitRepository(workspace);
+      if (!handle) {
+        void vscode.window.showErrorMessage('The current workspace is not inside a Git repository.');
+        return;
+      }
+      const gitPath = handle.api.git?.path || 'git';
+      const repositoryPath = await realpath(handle.repository.rootUri.fsPath);
+      const currentPath = this.normalizeSessionPath(repositoryPath);
+      const entries = await listGitWorktrees(gitPath, repositoryPath);
+      const candidates: Array<GitWorktreeEntry & { canonicalPath: string }> = [];
+      for (const entry of entries) {
+        if (entry.bare || entry.locked || entry.prunable || this.normalizeSessionPath(entry.path) === currentPath) continue;
+        try {
+          const stats = await lstat(entry.path);
+          if (!stats.isDirectory() || stats.isSymbolicLink()) continue;
+          const canonicalPath = await realpath(entry.path);
+          if (this.normalizeSessionPath(canonicalPath) !== this.normalizeSessionPath(entry.path)) continue;
+          candidates.push({ ...entry, canonicalPath });
+        } catch {
+          // Missing or inaccessible worktrees are not offered for removal.
+        }
+      }
+      if (candidates.length === 0) {
+        void vscode.window.showInformationMessage('There are no other unlocked Git worktrees available to remove.');
+        return;
+      }
+
+      const selected = await vscode.window.showQuickPick(candidates.map((entry) => ({
+        label: path.basename(entry.canonicalPath) || entry.canonicalPath,
+        description: entry.branch ? `Branch: ${entry.branch}` : entry.detached ? 'Detached HEAD' : 'No branch',
+        detail: entry.canonicalPath,
+        path: entry.canonicalPath,
+        branch: entry.branch,
+      })), {
+        title: 'Remove a Git worktree',
+        placeHolder: 'Choose a worktree to inspect before removal',
+        ignoreFocusOut: true,
+      });
+      if (!selected) return;
+
+      const workspaceKey = this.runningWorkspaceKey(selected.path);
+      if (!workspaceKey) {
+        void vscode.window.showErrorMessage('Could not safely identify the selected worktree.');
+        return;
+      }
+      const hasActiveWork = (await this.readRunningSessionRecords()).some((record) => !record.workspaceKey || record.workspaceKey === workspaceKey);
+      if (hasActiveWork) {
+        void vscode.window.showErrorMessage('A Pi session may still be working in this worktree. Stop its run and try again.');
+        return;
+      }
+
+      const inspectWorktree = async () => {
+        const status = await runGitCommand(gitPath, selected.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'], 15_000);
+        if (status.exitCode !== 0) throw new Error('Git could not verify the worktree status.');
+        const ignoredResult = await runGitCommand(gitPath, selected.path, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'], 15_000);
+        if (ignoredResult.exitCode !== 0) throw new Error('Git could not verify ignored worktree files.');
+        const ignoredPaths = ignoredResult.stdout.split('\0').filter(Boolean);
+        if (ignoredPaths.some((item) => !isSafeRepositoryRelativePath(item))) throw new Error('Git returned a worktree path that could not be checked safely.');
+        return { changeCount: status.stdout.split('\0').filter(Boolean).length, ignoredPaths };
+      };
+
+      const stateBeforeConfirmation = await inspectWorktree();
+      if (stateBeforeConfirmation.changeCount > 0) {
+        void vscode.window.showErrorMessage(`This worktree has ${stateBeforeConfirmation.changeCount} tracked or untracked change entries. Commit or move them before removing the worktree.`);
+        return;
+      }
+
+      const branchUsedElsewhere = Boolean(selected.branch) && entries.some((entry) =>
+        entry.branch === selected.branch && this.normalizeSessionPath(entry.path) !== this.normalizeSessionPath(selected.path));
+      const confirmRemove = stateBeforeConfirmation.ignoredPaths.length > 0
+        ? 'Remove worktree and ignored files'
+        : 'Remove worktree';
+      const confirmRemoveAndBranch = selected.branch && !branchUsedElsewhere
+        ? stateBeforeConfirmation.ignoredPaths.length > 0
+          ? 'Remove worktree, ignored files, and branch'
+          : 'Remove worktree and branch'
+        : undefined;
+      const ignoredPreview = stateBeforeConfirmation.ignoredPaths.slice(0, 8).join('\n');
+      const ignoredMore = stateBeforeConfirmation.ignoredPaths.length > 8
+        ? `\n…and ${stateBeforeConfirmation.ignoredPaths.length - 8} more`
+        : '';
+      const warning = [
+        `Remove this Git worktree?\n\nPath: ${selected.path}${selected.branch ? `\nBranch: ${selected.branch}` : ''}`,
+        stateBeforeConfirmation.ignoredPaths.length > 0
+          ? `\n\nThis also deletes ${stateBeforeConfirmation.ignoredPaths.length} ignored file${stateBeforeConfirmation.ignoredPaths.length === 1 ? '' : 's'}:\n${ignoredPreview}${ignoredMore}`
+          : '',
+        '\n\nThis action deletes the worktree folder. Close other VS Code windows using it first. Pi session files remain in your session history.',
+      ].join('');
+      const options = confirmRemoveAndBranch ? [confirmRemove, confirmRemoveAndBranch] : [confirmRemove];
+      const confirmation = await vscode.window.showWarningMessage(warning, { modal: true }, ...options);
+      if (!confirmation) return;
+      if (!vscode.workspace.isTrusted) {
+        void vscode.window.showErrorMessage('Workspace trust changed. Trust this workspace before removing a Git worktree.');
+        return;
+      }
+      if ((await this.readRunningSessionRecords()).some((record) => !record.workspaceKey || record.workspaceKey === workspaceKey)) {
+        void vscode.window.showErrorMessage('A Pi session started in this worktree while confirmation was open. Stop it before removing the worktree.');
+        return;
+      }
+
+      const currentEntries = await listGitWorktrees(gitPath, repositoryPath);
+      const currentEntry = currentEntries.find((entry) => this.normalizeSessionPath(entry.path) === this.normalizeSessionPath(selected.path));
+      if (!currentEntry || currentEntry.bare || currentEntry.locked || currentEntry.prunable) {
+        void vscode.window.showErrorMessage('The selected worktree changed while confirmation was open. Run the command again.');
+        return;
+      }
+      const currentPathStats = await lstat(selected.path);
+      if (!currentPathStats.isDirectory() || currentPathStats.isSymbolicLink()
+        || this.normalizeSessionPath(await realpath(selected.path)) !== this.normalizeSessionPath(selected.path)) {
+        void vscode.window.showErrorMessage('The selected worktree path changed while confirmation was open. Run the command again.');
+        return;
+      }
+      const stateAfterConfirmation = await inspectWorktree();
+      if (stateAfterConfirmation.changeCount > 0
+        || JSON.stringify(stateAfterConfirmation.ignoredPaths) !== JSON.stringify(stateBeforeConfirmation.ignoredPaths)) {
+        void vscode.window.showErrorMessage('Files in this worktree changed while confirmation was open. Run the command again to review its current state.');
+        return;
+      }
+
+      const removeResult = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Removing Git worktree',
+        cancellable: false,
+      }, () => runGitCommand(gitPath, repositoryPath, ['worktree', 'remove', selected.path], GIT_WORKTREE_COMMAND_TIMEOUT_MS));
+      if (removeResult.exitCode !== 0) {
+        const detail = removeResult.stderr.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 400);
+        void vscode.window.showErrorMessage(`Git refused to remove the worktree. No force removal was attempted.${detail ? ` ${detail}` : ''}`);
+        return;
+      }
+
+      if (confirmation === confirmRemoveAndBranch && selected.branch && !branchUsedElsewhere) {
+        const deleteResult = await runGitCommand(gitPath, repositoryPath, ['branch', '-d', '--', selected.branch], 15_000);
+        if (deleteResult.exitCode !== 0) {
+          const detail = deleteResult.stderr.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 300);
+          void vscode.window.showWarningMessage(`The worktree was removed, but Git kept branch "${selected.branch}".${detail ? ` ${detail}` : ''}`);
+          return;
+        }
+      }
+      void vscode.window.showInformationMessage('Git worktree removed. Pi session files remain in history.');
+    } catch (error) {
+      const detail = error instanceof Error ? error.message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) : 'Unknown error.';
+      void vscode.window.showErrorMessage(`Could not remove the Git worktree. ${detail}`);
+    }
+  }
+
+  private async offerIgnoredFilesForWorktree(gitPath: string, repositoryPath: string, worktreePath: string): Promise<void> {
+    let listing: IgnoredFileListing;
+    try {
+      listing = await listIgnoredFileChoices(gitPath, repositoryPath);
+    } catch {
+      void vscode.window.showInformationMessage('The worktree was created; Git could not list ignored files to copy.');
+      return;
+    }
+    if (listing.choices.length === 0) return;
+
+    const selected = await vscode.window.showQuickPick(listing.choices, {
+      canPickMany: true,
+      title: 'Copy ignored files into the worktree?',
+      placeHolder: `Select files to copy${listing.truncated ? ` (showing the first ${MAX_IGNORED_FILES_FOR_PICKER})` : ''}; files may contain secrets`,
+      ignoreFocusOut: true,
+    });
+    if (!selected?.length) return;
+
+    const preview = selected.slice(0, 8).map((item) => item.relativePath).join('\n');
+    const more = selected.length > 8 ? `\n…and ${selected.length - 8} more` : '';
+    const confirmation = await vscode.window.showWarningMessage(
+      `Copy ${selected.length} selected ignored file${selected.length === 1 ? '' : 's'} into the new worktree? Ignored files can contain credentials or other private data. Existing destination files will not be overwritten.\n\n${preview}${more}\n\nLimits: 2 MB per file and 10 MB total.`,
+      { modal: true },
+      'Copy selected files',
+    );
+    if (confirmation !== 'Copy selected files') return;
+
+    const copied: string[] = [];
+    const skipped: string[] = [];
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'Copying selected ignored files',
+      cancellable: false,
+    }, async (progress) => {
+      let copiedBytes = 0;
+      for (let index = 0; index < selected.length; index += 1) {
+        const item = selected[index];
+        progress.report({ increment: 100 / selected.length, message: `${index + 1} of ${selected.length}` });
+        try {
+          const outcome = await copyIgnoredFileSafely(repositoryPath, worktreePath, item.relativePath, item.size, MAX_IGNORED_COPY_BYTES - copiedBytes);
+          if (outcome === 'copied') {
+            copied.push(item.relativePath);
+            copiedBytes += item.size;
+          } else {
+            skipped.push(item.relativePath);
+          }
+        } catch {
+          skipped.push(item.relativePath);
+        }
+      }
+    });
+    const skippedText = skipped.length ? ` ${skipped.length} skipped because they changed, collided with existing files, or failed path checks.` : '';
+    void vscode.window.showInformationMessage(`Copied ${copied.length} ignored file${copied.length === 1 ? '' : 's'} into the worktree.${skippedText}`);
   }
 
   async exportDiagnostics(): Promise<void> {
@@ -3020,6 +3222,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private runningWorkspaceKey(workspacePath: string): string | undefined {
+    if (!path.isAbsolute(workspacePath) || workspacePath.length > 4096 || /[\u0000-\u001f\u007f]/.test(workspacePath)) return undefined;
+    try {
+      return createHash('sha256').update(this.normalizeSessionPath(workspacePath)).digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
+
   private safeRunningActivity(value: unknown): string {
     if (typeof value !== 'string') return 'Working in Pi';
     const activity = value.trim();
@@ -3033,8 +3244,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private makeRunningSessionRecord(): RunningSessionRecord | undefined {
     if ((!this.runtimeBusy && this.queuedWorkCount <= 0) || !this.activeSessionPath || !this.workerWorkspace) return undefined;
     const sessionKey = this.runningSessionKey(this.activeSessionPath, this.workerWorkspace);
-    if (!sessionKey) return undefined;
-    return { version: 1, sessionKey, activity: this.safeRunningActivity(this.runtimeActivity), updatedAt: Date.now() };
+    const workspaceKey = this.runningWorkspaceKey(this.workerWorkspace);
+    if (!sessionKey || !workspaceKey) return undefined;
+    return { version: 1, sessionKey, workspaceKey, activity: this.safeRunningActivity(this.runtimeActivity), updatedAt: Date.now() };
   }
 
   private refreshRunningSessionLease(): void {
@@ -3051,7 +3263,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const signature = `${record.sessionKey}\0${record.activity}`;
+    const signature = `${record.sessionKey}\0${record.workspaceKey}\0${record.activity}`;
     const now = Date.now();
     if (this.runningSessionLeasePublished && signature === this.runningSessionLeaseSignature
       && now - this.runningSessionLeaseWrittenAt < 4000) return;
@@ -3138,10 +3350,17 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         }
         const value = JSON.parse(text) as Partial<RunningSessionRecord>;
         if (value.version !== 1 || typeof value.sessionKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.sessionKey)
+          || (value.workspaceKey !== undefined && (typeof value.workspaceKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.workspaceKey)))
           || typeof value.activity !== 'string' || this.safeRunningActivity(value.activity) !== value.activity
           || !Number.isSafeInteger(value.updatedAt) || Number(value.updatedAt) > now + 2000
           || now - Number(value.updatedAt) > RUNNING_SESSION_RECORD_TTL_MS) continue;
-        records.push({ version: 1, sessionKey: value.sessionKey, activity: value.activity, updatedAt: Number(value.updatedAt) });
+        records.push({
+          version: 1,
+          sessionKey: value.sessionKey,
+          workspaceKey: typeof value.workspaceKey === 'string' ? value.workspaceKey : undefined,
+          activity: value.activity,
+          updatedAt: Number(value.updatedAt),
+        });
       } catch {
         // A partially-written or malformed local status record is ignored.
       }
