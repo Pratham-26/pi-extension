@@ -145,6 +145,8 @@ const MAX_RUNTIME_ENV_VARIABLES = 32;
 const MAX_RUNTIME_ENV_VALUE_CHARS = 4096;
 const MAX_RUNTIME_ENV_TOTAL_CHARS = 8192;
 const MAX_WINDOWS_WORKER_ENVIRONMENT_CHARS = 30_000;
+const MAX_PACKAGE_SEARCH_RESPONSE_BYTES = 512 * 1024;
+const MAX_PACKAGE_SEARCHES_PER_MINUTE = 20;
 const RESERVED_RUNTIME_ENV_NAMES = new Set([
   'PATH', 'PATHEXT', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
   'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'PI_CODING_AGENT_DIR', 'PI_OFFLINE',
@@ -181,6 +183,66 @@ function readPiExtensionStatusPreferences(): PiExtensionStatusPreferences {
         && !/[\u0000-\u001f\u007f]/.test(key)))].slice(0, 32)
       : [],
   };
+}
+
+type PiPackageSearchResult = { name: string; version: string; description: string; source: string };
+
+async function readBoundedJsonResponse(response: Response, maximumBytes: number): Promise<unknown> {
+  const contentLength = response.headers.get('content-length');
+  if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > maximumBytes) {
+    throw new Error('The package search response is too large.');
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('The package search response was empty.');
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maximumBytes) {
+        await reader.cancel();
+        throw new Error('The package search response is too large.');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+}
+
+function parsePiPackageSearchResults(value: unknown): PiPackageSearchResult[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  const objects = (value as Record<string, unknown>).objects;
+  if (!Array.isArray(objects)) return [];
+  const results: PiPackageSearchResult[] = [];
+  const seen = new Set<string>();
+  for (const object of objects.slice(0, 20)) {
+    if (!object || typeof object !== 'object' || Array.isArray(object)) continue;
+    const packageData = (object as Record<string, unknown>).package;
+    if (!packageData || typeof packageData !== 'object' || Array.isArray(packageData)) continue;
+    const fields = packageData as Record<string, unknown>;
+    const name = typeof fields.name === 'string' ? fields.name : '';
+    const version = typeof fields.version === 'string' ? fields.version : '';
+    if (!name || name.length > 214 || seen.has(name)
+      || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) continue;
+    const source = `npm:${name}@${version}`;
+    if (!isPiPackageSource(source)) continue;
+    const description = typeof fields.description === 'string'
+      ? fields.description.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240)
+      : '';
+    seen.add(name);
+    results.push({ name, version, description, source });
+  }
+  return results;
 }
 
 type PendingSessionHandoff = {
@@ -333,6 +395,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private pendingMcpServerRequests = new Map<string, { worker: Worker; resolve: (message: RuntimeMessage | undefined) => void; timer: NodeJS.Timeout }>();
   private mcpServerManagementInFlight = false;
   private pendingPiResourcePicker?: { worker: Worker; requestId: string };
+  private pendingPackageSearch?: { controller: AbortController; timer: NodeJS.Timeout };
+  private packageSearchesAt: number[] = [];
   private pendingExtensionUiRequestIds = new Set<string>();
   private providerAuthPromptCancels = new Map<string, { worker: Worker; cancel: () => void }>();
   private activeEditorSubscription: vscode.Disposable;
@@ -366,6 +430,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   dispose(): void {
     clearInterval(this.runningSessionPoller);
     this.clearRunningSessionLease();
+    this.cancelPackageSearch(false);
     this.cancelProviderAuthPrompts();
     this.outputChannel.dispose();
     this.extensionStatusBarItem?.dispose();
@@ -429,6 +494,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (this.view === view) {
         this.view = undefined;
         this.cancelPendingExtensionUiRequests(this.worker);
+        this.cancelPackageSearch(false);
       }
     });
 
@@ -1424,6 +1490,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.worker?.postMessage({ type: 'listPackages' });
         await this.refreshGitChanges();
         this.publishPinnedActiveFile();
+        return;
+      case 'searchPiPackages':
+        await this.searchPiPackages(message);
+        return;
+      case 'cancelPiPackageSearch':
+        this.cancelPackageSearch(true);
         return;
       case 'refreshGitChanges':
         await this.refreshGitChanges();
@@ -4020,6 +4092,82 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.updateExtensionStatusBar();
   }
 
+  private cancelPackageSearch(notify: boolean): void {
+    const pending = this.pendingPackageSearch;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingPackageSearch = undefined;
+    pending.controller.abort();
+    if (notify) this.post({ type: 'package-search-results', status: 'Search cancelled.', results: [] });
+  }
+
+  private async searchPiPackages(message: RuntimeMessage): Promise<void> {
+    const query = typeof message.query === 'string' ? message.query.trim() : '';
+    if (!query || query.length > 128 || /[\u0000-\u001f\u007f]/.test(query)) {
+      this.post({ type: 'package-search-results', status: 'Enter a search term up to 128 characters.', results: [] });
+      return;
+    }
+    const now = Date.now();
+    this.packageSearchesAt = this.packageSearchesAt.filter((at) => now - at < 60_000);
+    if (this.packageSearchesAt.length >= MAX_PACKAGE_SEARCHES_PER_MINUTE) {
+      this.post({ type: 'package-search-results', status: 'Search limit reached. Wait a minute and try again.', results: [] });
+      return;
+    }
+    this.packageSearchesAt.push(now);
+    this.cancelPackageSearch(false);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    this.pendingPackageSearch = { controller, timer };
+    this.post({ type: 'package-search-state', status: 'Searching the public npm registry…' });
+    try {
+      const url = new URL('https://registry.npmjs.org/-/v1/search');
+      url.searchParams.set('text', query);
+      url.searchParams.set('size', '20');
+      url.searchParams.set('from', '0');
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        redirect: 'error',
+        credentials: 'omit',
+        signal: controller.signal,
+      });
+      const responseUrl = new URL(response.url);
+      if (responseUrl.origin !== 'https://registry.npmjs.org' || responseUrl.pathname !== '/-/v1/search') {
+        throw new Error('Unexpected package registry response.');
+      }
+      if (!response.ok) {
+        this.post({
+          type: 'package-search-results',
+          status: `The npm registry returned HTTP ${response.status}.`,
+          results: [],
+        });
+        return;
+      }
+      const payload = await readBoundedJsonResponse(response, MAX_PACKAGE_SEARCH_RESPONSE_BYTES);
+      if (this.pendingPackageSearch?.controller !== controller) return;
+      const results = parsePiPackageSearchResults(payload);
+      this.post({
+        type: 'package-search-results',
+        status: results.length ? `${results.length} results. Select Use to fill a version-pinned source.` : 'No matching packages were found.',
+        results,
+      });
+    } catch {
+      if (this.pendingPackageSearch?.controller !== controller) return;
+      this.post({
+        type: 'package-search-results',
+        status: controller.signal.aborted
+          ? 'Search timed out. Try again.'
+          : 'Could not reach the public npm registry. Check your connection and try again.',
+        results: [],
+      });
+    } finally {
+      if (this.pendingPackageSearch?.controller === controller) {
+        clearTimeout(timer);
+        this.pendingPackageSearch = undefined;
+      }
+    }
+  }
+
   private postExtensionStatusPreferences(): void {
     const preferences = readPiExtensionStatusPreferences();
     this.post({
@@ -5137,6 +5285,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div id="package-status" class="package-status" aria-live="polite"></div>
               <div id="package-list" class="package-list"></div>
               <div id="package-empty" class="package-empty">Package manager is unavailable until a Pi session is ready.</div>
+              <div class="package-gallery">
+                <div class="package-gallery-heading"><strong>Discover packages</strong></div>
+                <div class="package-search-form"><input id="package-search" type="search" maxlength="128" autocomplete="off" aria-label="Search Pi packages on npm" placeholder="Search Pi packages on npm"><button id="package-search-button" class="text-button" type="button" disabled>Search</button></div>
+                <p class="package-safety-note">Search sends these terms to the public npm registry. Selecting a result fills a version-pinned source; installing still requires confirmation.</p>
+                <div id="package-search-status" class="package-status" aria-live="polite"></div>
+                <div id="package-search-results" class="package-list"></div>
+              </div>
             </section>
           </div>
           <div id="extension-editor-view" class="extension-editor-view" role="textbox" aria-label="Pi extension editor" aria-multiline="true" tabindex="0" hidden></div>

@@ -62,6 +62,9 @@ const state = {
   resourceDiagnostics: [],
   packages: [],
   packagesAvailable: false,
+  packageSearchResults: [],
+  packageSearchStatus: '',
+  packageSearchBusy: false,
   projectTrusted: false,
   packageStatus: '',
   promptTemplateForm: undefined,
@@ -220,6 +223,10 @@ const ui = {
   packageList: el('package-list'),
   packageEmpty: el('package-empty'),
   packageStatus: el('package-status'),
+  packageSearch: el('package-search'),
+  packageSearchButton: el('package-search-button'),
+  packageSearchStatus: el('package-search-status'),
+  packageSearchResults: el('package-search-results'),
   packageSource: el('package-source'),
   packageScope: el('package-scope'),
   installPackage: el('install-package'),
@@ -432,6 +439,10 @@ function updateControls() {
   ui.managePiResources.disabled = !state.hasSession || state.busy;
   ui.updatePackages.disabled = !state.hasSession || state.busy || state.packages.length === 0;
   ui.packageList.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
+  ui.packageSearch.disabled = false;
+  ui.packageSearchButton.disabled = !state.packageSearchBusy && !ui.packageSearch.value.trim();
+  ui.packageSearchButton.textContent = state.packageSearchBusy ? 'Cancel' : 'Search';
+  ui.packageSearchResults.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
   ui.skillsToggle.disabled = !state.hasSession;
   ui.toolsPopover.querySelectorAll('input').forEach((input) => { input.disabled = state.busy; });
@@ -2849,7 +2860,39 @@ function renderPackages() {
     ui.packageList.append(row);
   }
   ui.packageEmpty.hidden = state.packages.length > 0;
+  renderPackageSearchResults();
   updateControls();
+}
+
+function renderPackageSearchResults() {
+  ui.packageSearchStatus.textContent = state.packageSearchStatus;
+  ui.packageSearchResults.replaceChildren();
+  for (const item of state.packageSearchResults) {
+    if (!item || typeof item.name !== 'string' || typeof item.version !== 'string'
+      || typeof item.source !== 'string' || typeof item.description !== 'string') continue;
+    const row = document.createElement('div');
+    row.className = 'package-row package-search-result';
+    const details = document.createElement('div');
+    details.className = 'package-details';
+    const name = document.createElement('strong');
+    name.textContent = `${item.name}@${item.version}`.slice(0, 260);
+    name.title = name.textContent;
+    const description = document.createElement('small');
+    description.textContent = item.description.slice(0, 240) || 'No description provided.';
+    details.append(name, description);
+    const use = document.createElement('button');
+    use.type = 'button';
+    use.className = 'session-action';
+    use.textContent = 'Use';
+    use.title = `Fill the package source ${item.source.slice(0, 260)}`;
+    use.addEventListener('click', () => {
+      ui.packageSource.value = item.source.slice(0, 512);
+      updateControls();
+      ui.packageSource.focus();
+    });
+    row.append(details, use);
+    ui.packageSearchResults.append(row);
+  }
 }
 
 function addPromptOption(parent, prompt) {
@@ -3891,6 +3934,19 @@ window.addEventListener('message', (event) => {
       state.packageStatus = String(data.message || 'Managing Pi packages…').slice(0, 240);
       renderPackages();
       break;
+    case 'package-search-state':
+      state.packageSearchBusy = true;
+      state.packageSearchStatus = String(data.status || 'Searching…').slice(0, 240);
+      renderPackageSearchResults();
+      updateControls();
+      break;
+    case 'package-search-results':
+      state.packageSearchBusy = false;
+      state.packageSearchStatus = String(data.status || '').slice(0, 240);
+      state.packageSearchResults = Array.isArray(data.results) ? data.results.slice(0, 20) : [];
+      renderPackageSearchResults();
+      updateControls();
+      break;
     case 'sessions':
       state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
       {
@@ -4473,6 +4529,36 @@ ui.installPackage.addEventListener('click', () => post('installPackage', {
 ui.managePiResources.addEventListener('click', () => post('managePiResources'));
 ui.updatePackages.addEventListener('click', () => post('managePackage', { action: 'update' }));
 el('refresh-packages').addEventListener('click', () => post('listPackages'));
+ui.packageSearch.addEventListener('input', updateControls);
+ui.packageSearch.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  if (state.packageSearchBusy) return;
+  const query = ui.packageSearch.value.trim().slice(0, 128);
+  if (!query) return;
+  state.packageSearchBusy = true;
+  state.packageSearchStatus = 'Searching the public npm registry…';
+  renderPackageSearchResults();
+  updateControls();
+  post('searchPiPackages', { query });
+});
+ui.packageSearchButton.addEventListener('click', () => {
+  if (state.packageSearchBusy) {
+    state.packageSearchBusy = false;
+    state.packageSearchStatus = 'Cancelling search…';
+    renderPackageSearchResults();
+    updateControls();
+    post('cancelPiPackageSearch');
+    return;
+  }
+  const query = ui.packageSearch.value.trim().slice(0, 128);
+  if (!query) return;
+  state.packageSearchBusy = true;
+  state.packageSearchStatus = 'Searching the public npm registry…';
+  renderPackageSearchResults();
+  updateControls();
+  post('searchPiPackages', { query });
+});
 el('prompt-template-cancel').addEventListener('click', closePromptTemplateForm);
 el('prompt-template-use').addEventListener('click', usePromptTemplate);
 el('send').addEventListener('click', () => sendPrompt());
