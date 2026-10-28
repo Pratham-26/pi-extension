@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.111",
+  "version": "0.1.112",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -50,6 +50,7 @@
       {
         "command": "piChat.newSession",
         "title": "New Pi Chat",
+        "shortTitle": "New chat",
         "category": "Pi Chat",
         "icon": "$(add)"
       },
@@ -71,18 +72,21 @@
       {
         "command": "piChat.newEditorChat",
         "title": "Pi Chat: Open New Chat Beside Active Editor",
+        "shortTitle": "New editor chat",
         "category": "Pi Chat",
         "icon": "$(new-file)"
       },
       {
         "command": "piChat.cloneSession",
         "title": "Clone Active Pi Chat",
+        "shortTitle": "Clone chat",
         "category": "Pi Chat",
         "icon": "$(copy)"
       },
       {
         "command": "piChat.createWorktree",
         "title": "Pi Chat: Create Git Worktree",
+        "shortTitle": "Create worktree",
         "category": "Pi Chat",
         "icon": "$(git-branch)"
       },
@@ -94,6 +98,7 @@
       {
         "command": "piChat.openSettings",
         "title": "Pi Chat: Open Settings",
+        "shortTitle": "Settings",
         "category": "Pi Chat",
         "icon": "$(gear)"
       },
@@ -120,6 +125,7 @@
       {
         "command": "piChat.exportDiagnostics",
         "title": "Pi Chat: Export Redacted Diagnostic Report",
+        "shortTitle": "Export diagnostics",
         "category": "Pi Chat",
         "icon": "$(output)"
       },
@@ -170,7 +176,12 @@
         },
         "piChat.extensionStatus.display": {
           "type": "string",
-          "enum": ["footer", "statusBar", "both", "hidden"],
+          "enum": [
+            "footer",
+            "statusBar",
+            "both",
+            "hidden"
+          ],
           "enumDescriptions": [
             "Show extension status values in the chat footer.",
             "Show extension status values in the VS Code status bar.",
@@ -183,7 +194,10 @@
         },
         "piChat.extensionStatus.keys": {
           "type": "array",
-          "items": { "type": "string", "maxLength": 128 },
+          "items": {
+            "type": "string",
+            "maxLength": 128
+          },
           "maxItems": 32,
           "default": [],
           "scope": "window",
@@ -215,6 +229,89 @@
           "scope": "window",
           "description": "Prevent Pi from loading configured or workspace instruction files such as AGENTS.md and CLAUDE.md. Restart the Pi runtime after changing this setting."
         },
+        "piChat.prompts.systemPromptText": {
+          "type": "string",
+          "maxLength": 100000,
+          "default": "",
+          "scope": "window",
+          "description": "Replace Pi's system prompt with this text. If set, it takes precedence over the system prompt file. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.prompts.systemPromptFile": {
+          "type": "string",
+          "maxLength": 4096,
+          "default": "",
+          "scope": "window",
+          "description": "Replace Pi's system prompt with a UTF-8 file path, relative to the workspace or absolute. Ignored when systemPromptText is set. Files are limited to 1 MiB. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.prompts.appendSystemPromptText": {
+          "type": "string",
+          "maxLength": 100000,
+          "default": "",
+          "scope": "window",
+          "description": "Append this text after Pi's configured system prompt and discovered append prompt files. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.prompts.appendSystemPromptFiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 8,
+          "default": [],
+          "scope": "window",
+          "description": "Append UTF-8 prompt files after Pi's configured instructions. Paths are relative to the workspace or absolute; each file is limited to 1 MiB. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.resources.additionalExtensionPaths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 64,
+          "default": [],
+          "scope": "window",
+          "description": "Load additional local Pi extension files or directories. Workspace settings are ignored until the workspace is trusted. Package sources are managed through Pi package controls. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.resources.additionalSkillPaths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 64,
+          "default": [],
+          "scope": "window",
+          "description": "Load additional local Pi skill files or directories. Paths are relative to the workspace or absolute. Workspace settings are ignored until the workspace is trusted. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.resources.additionalPromptTemplatePaths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 64,
+          "default": [],
+          "scope": "window",
+          "description": "Load additional local Pi prompt-template files or directories. Paths are relative to the workspace or absolute. Workspace settings are ignored until the workspace is trusted. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.resources.disableExtensionDiscovery": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Stop Pi from discovering configured extensions automatically; explicitly listed additional extension paths and the chat's built-in integrations remain enabled. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.resources.disableSkillDiscovery": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Stop Pi from discovering configured skills automatically; explicitly listed additional skill paths remain enabled. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.resources.disablePromptTemplateDiscovery": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Stop Pi from discovering configured prompt templates automatically; explicitly listed additional prompt-template paths remain enabled. Restart the Pi runtime after changing this setting."
+        },
         "piChat.sessions.autoName": {
           "type": "boolean",
           "default": true,
@@ -233,14 +330,21 @@
         },
         "piChat.sessions.sortOrder": {
           "type": "string",
-          "enum": ["manual", "updated", "name"],
+          "enum": [
+            "manual",
+            "updated",
+            "name"
+          ],
           "default": "manual",
           "scope": "machine",
           "description": "Sort Pi session history manually, by recent activity, or by title. Pinned sessions stay at the top."
         },
         "piChat.queue.defaultAction": {
           "type": "string",
-          "enum": ["followUp", "steer"],
+          "enum": [
+            "followUp",
+            "steer"
+          ],
           "default": "followUp",
           "scope": "window",
           "enumDescriptions": [
@@ -262,9 +366,14 @@
         },
         "piChat.tools.defaultToolNames": {
           "type": "array",
-          "items": { "type": "string", "maxLength": 128 },
+          "items": {
+            "type": "string",
+            "maxLength": 128
+          },
           "maxItems": 256,
-          "default": ["*"],
+          "default": [
+            "*"
+          ],
           "scope": "machine",
           "description": "Choose the default tools for new Pi chats. Use the single value * to keep Pi's configured defaults, an empty list for no tools, or registered tool names for a custom set."
         },
@@ -344,21 +453,6 @@
         },
         {
           "command": "piChat.cloneSession",
-          "when": "view == piChat.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "piChat.createWorktree",
-          "when": "view == piChat.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "piChat.openSettings",
-          "when": "view == piChat.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "piChat.exportDiagnostics",
           "when": "view == piChat.chatView",
           "group": "navigation"
         }

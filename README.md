@@ -10,6 +10,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Adjustable transcript appearance: align or tint user messages, raise text/separator contrast, set a base font size or follow VS Code, and enable smooth navigation while respecting reduced-motion preferences
 - Searchable model catalog with provider sign-in, guided custom endpoint setup for six Pi API formats and API identifiers registered by loaded Pi extensions, API keys in VS Code SecretStorage, custom `models.json` editing, Pi runtime controls, per-workspace selection of discovered `AGENTS.md` context files, an option to suppress all context-file loading, confirmed manual refresh, optional confirmed refresh at runtime startup (skipped offline), thinking levels and presets; model and thinking pickers are also available from the Command Palette
 - Per-session tool selection restored with the session, save/reset controls for the default tool set on new chats, skill invocation, extension command suggestions, opt-in MCP servers with per-server enablement and exposure controls, confirmed Pi package install/update/remove, and per-resource enable/disable controls; prompt template argument forms, previews, create/edit, and resource diagnostics/reload
+- User-configured system prompt overrides and appended prompt text/files, extra local extension/skill/prompt-template paths, and switches for automatic resource discovery
 - Workspace `@` file search, file/folder/image attachments with expandable text-context previews, selected-line and active-file context, a persistent active-file pin, diagnostics, Git status, and selected Git diff quoting; optional automatic diagnostics/Git context and numbered line ranges, plus a setting to prevent Pi from loading workspace instruction files
 - Git branch and changed-file review, bounded diffs, editable commit-message/PR-description prompts, confirmation-gated discard of tracked unstaged changes while preserving staged content, and confirmed removal of regular untracked files with VS Code requesting OS Trash when supported
 - Create a Git worktree on a new local branch, review the destination and checkout-hook/filter warning, optionally copy explicitly selected ignored files without overwriting, and optionally open it in a separate VS Code window; remove clean worktrees with a separate confirmation
@@ -23,7 +24,7 @@ See [the feature coverage checklist](docs/feature-coverage.md) for implemented a
 
 ## Local verification
 
-Run `npm run smoke:worker` to open a real Pi SDK worker with a temporary configuration and a loopback-only mock model. The check selects a model, streams one response, verifies the persisted session transcript, and removes its temporary data. It uses Pi offline mode, an empty tool set, and a temporary config; it does not read the user's Pi credentials or call an external provider.
+Run `npm run smoke:worker` to open a real Pi SDK worker with a temporary configuration and a loopback-only mock model. The check covers prompt overrides, appended prompt files, extra local resource paths, discovery switches, model selection, streamed output, and the persisted session transcript, then removes its temporary data. It uses Pi offline mode and a temporary config; it does not read the user's Pi credentials or call an external provider.
 
 Run `npm run smoke:sessions` to verify pinned priority, saved manual order, recent/title sorting, and the recent-order fallback without modifying Pi session files. Run `npm run smoke:drafts` to exercise saved-draft session isolation, text/image context, swap restore, delete undo, retention limits, persisted-data validation, and storage bounds.
 
@@ -34,6 +35,8 @@ The extension instantiates the bundled Pi SDK directly in a worker thread; it do
 Use **Pi Chat: Choose Pi Configuration Folder** to select another machine-local Pi configuration directory. The picker restarts Pi after confirmation when there is no running or queued work. If you change `piChat.agentDir` or `piChat.offlineMode` directly in VS Code Settings, use **Pi Chat: Restart Pi Runtime** to apply the change; the command refuses while Pi work is active. Offline mode disables automatic startup network operations, but it does not block model API requests.
 
 Use **Pi Chat: Manage Pi Runtime Environment Variables** to add or remove custom runtime values. Values are stored in VS Code SecretStorage and are not shown in diagnostics. After a manual runtime restart, Pi, its tools, and loaded extensions can read them, so only add values you intend to expose to those local processes.
+
+Use `piChat.prompts.systemPromptText` or `piChat.prompts.systemPromptFile` to replace Pi's system prompt; text takes precedence over the file. `piChat.prompts.appendSystemPromptText` and `piChat.prompts.appendSystemPromptFiles` add instructions after Pi's configured prompt files. Files must be UTF-8 and are limited to 1 MiB each. `piChat.resources.additionalExtensionPaths`, `additionalSkillPaths`, and `additionalPromptTemplatePaths` add local resources, while the `disable*Discovery` settings turn off automatic discovery for each resource type. These settings apply after **Pi Chat: Restart Pi Runtime**. Workspace-level prompt and resource settings are ignored until the workspace is trusted. Only add extension paths you trust, because Pi loads extension code into its runtime.
 
 Pi's configured tools and extensions retain the same local permissions they have when Pi runs directly. This extension does not add an OS sandbox; use the **Read-only** or **None** tool presets when you want to limit agent actions.
 
@@ -51,10 +54,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.111.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.112.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.111.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.112.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.

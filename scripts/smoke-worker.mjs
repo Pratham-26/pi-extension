@@ -12,12 +12,35 @@ const workspacePath = join(temporaryRoot, 'workspace');
 const projectPath = join(workspacePath, 'nested');
 const agentDir = join(temporaryRoot, 'agent');
 const extensionDir = join(agentDir, 'extensions');
+const extraExtensionPath = join(temporaryRoot, 'extra-smoke-extension.mjs');
+const agentSkillPath = join(agentDir, 'skills', 'base-smoke-skill', 'SKILL.md');
+const extraSkillPath = join(temporaryRoot, 'extra-smoke-skill.md');
+const agentPromptPath = join(agentDir, 'prompts', 'base-smoke-prompt.md');
+const extraPromptPath = join(temporaryRoot, 'extra-smoke-prompt.md');
+const appendedPromptPath = join(temporaryRoot, 'appended-system-prompt.md');
 const providerCallsPath = join(temporaryRoot, 'provider-calls.jsonl');
-await Promise.all([mkdir(projectPath, { recursive: true }), mkdir(extensionDir, { recursive: true })]);
+await Promise.all([
+  mkdir(projectPath, { recursive: true }),
+  mkdir(extensionDir, { recursive: true }),
+  mkdir(dirname(agentSkillPath), { recursive: true }),
+  mkdir(dirname(agentPromptPath), { recursive: true }),
+]);
 await Promise.all([
   writeFile(providerCallsPath, ''),
+  writeFile(extraExtensionPath, `export default function (pi) {
+  pi.registerCommand('extra-smoke-command', {
+    description: 'Explicitly added extension for the isolated smoke check.',
+    handler: async () => undefined,
+  });
+}
+`),
   writeFile(join(workspacePath, 'AGENTS.md'), 'Temporary parent workspace instructions for the isolated smoke check.\n'),
   writeFile(join(projectPath, 'CLAUDE.md'), 'Temporary nested workspace instructions for the isolated smoke check.\n'),
+  writeFile(agentSkillPath, '---\nname: base-smoke-skill\ndescription: Baseline skill for the isolated smoke check.\n---\nBASE_SMOKE_SKILL_MARKER\n'),
+  writeFile(extraSkillPath, '---\nname: extra-smoke-skill\ndescription: Explicitly added skill for the isolated smoke check.\n---\nEXTRA_SMOKE_SKILL_MARKER\n'),
+  writeFile(agentPromptPath, '---\nname: base-smoke-prompt\ndescription: Baseline prompt template for the isolated smoke check.\n---\nBASE_SMOKE_PROMPT_MARKER\n'),
+  writeFile(extraPromptPath, '---\nname: extra-smoke-prompt\ndescription: Explicitly added prompt template for the isolated smoke check.\n---\nEXTRA_SMOKE_PROMPT_MARKER\n'),
+  writeFile(appendedPromptPath, 'APPENDED_SYSTEM_PROMPT_FILE_MARKER\n'),
 ]);
 
 let worker;
@@ -78,14 +101,24 @@ export default function (pi) {
     api: 'openai-completions',
     models: [{ id: 'smoke-model', name: 'Local Smoke Model', reasoning: false, input: ['text'], contextWindow: 4096, maxTokens: 64 }],
     streamSimple(model, context) {
-      const systemText = context.messages.filter((message) => message.role === 'system').map((message) => textOf(message.content)).join('\\n');
+      const systemText = [context.systemPrompt, ...context.messages.filter((message) => message.role === 'system').flatMap((message) => [
+        textOf(message.content),
+        ...(message.sections && typeof message.sections === 'object' ? Object.values(message.sections).filter((section) => typeof section === 'string') : []),
+      ])]
+        .filter((value) => typeof value === 'string').join('\\n');
       const userText = context.messages.filter((message) => message.role === 'user').map((message) => textOf(message.content)).join('\\n');
       const kind = systemText.includes('Create exactly three concise') ? 'suggestion-recovery'
         : systemText.includes('Suggest three concise') ? 'suggestion-primary' : 'main';
       const text = kind === 'main' ? 'LOCAL_SMOKE_OK'
         : kind === 'suggestion-primary' ? '1. Identify one missing edge case in the implementation.'
           : '2. Suggest a focused regression test for the behavior.';
-      appendFileSync(callLogPath, JSON.stringify({ kind, hasSmokePrompt: userText.includes('LOCAL_SMOKE_REQUEST') }) + '\\n', { encoding: 'utf8', mode: 0o600 });
+      appendFileSync(callLogPath, JSON.stringify({
+        kind,
+        hasSmokePrompt: userText.includes('LOCAL_SMOKE_REQUEST'),
+        hasCustomSystemPrompt: systemText.includes('CUSTOM_SYSTEM_PROMPT_MARKER'),
+        hasAppendedPromptText: systemText.includes('APPENDED_SYSTEM_PROMPT_TEXT_MARKER'),
+        hasAppendedPromptFile: systemText.includes('APPENDED_SYSTEM_PROMPT_FILE_MARKER'),
+      }) + '\\n', { encoding: 'utf8', mode: 0o600 });
       const stream = createAssistantMessageEventStream();
       const message = { role: 'assistant', content: [{ type: 'text', text: '' }], api: model.api, provider: model.provider, model: model.id, usage: usage(), stopReason: 'pending', timestamp: Date.now() };
       stream.push({ type: 'start', partial: message });
@@ -149,6 +182,14 @@ export default function (pi) {
     workerData: {
       cwd: projectPath,
       extensionRoot: repositoryRoot,
+      piPromptResources: {
+        additionalExtensionPaths: [extraExtensionPath],
+        systemPromptText: 'CUSTOM_SYSTEM_PROMPT_MARKER',
+        appendSystemPromptText: 'APPENDED_SYSTEM_PROMPT_TEXT_MARKER',
+        appendSystemPromptFiles: [appendedPromptPath],
+        additionalSkillPaths: [extraSkillPath],
+        additionalPromptTemplatePaths: [extraPromptPath],
+      },
       autoNameSessions: false,
       autoRefreshModels: false,
       mcpEnabled: false,
@@ -185,6 +226,16 @@ export default function (pi) {
   assert.deepEqual(newSessionToolOptions.newSessionToolNames, ['read'], 'the worker should report its configured new-chat default');
   assert.deepEqual(discoveredOptions.contextFiles.map((item) => item.path).sort(), [join(projectPath, 'CLAUDE.md'), join(workspacePath, 'AGENTS.md')].sort(),
     'the default Pi runtime should load nested and parent instruction files');
+  assert.ok(discoveredOptions.skills.some((skill) => skill.name === 'base-smoke-skill'),
+    'Pi should keep discovering the configured agent-directory skills');
+  assert.ok(discoveredOptions.skills.some((skill) => skill.name === 'extra-smoke-skill'),
+    'an explicitly listed additional skill path should load');
+  assert.ok(discoveredOptions.prompts.some((prompt) => prompt.name === 'base-smoke-prompt'),
+    'Pi should keep discovering the configured agent-directory prompt templates');
+  assert.ok(discoveredOptions.prompts.some((prompt) => prompt.name === 'extra-smoke-prompt'),
+    'an explicitly listed additional prompt-template path should load');
+  assert.ok(discoveredOptions.extensionCommands.some((command) => command.name === 'extra-smoke-command'),
+    'an explicitly listed additional extension path should load');
 
   const sessionListRequestId = 'b'.repeat(32);
   const sessionListPromise = waitForWorkerMessage((message) => message?.type === 'sessions'
@@ -211,7 +262,13 @@ export default function (pi) {
   assert.ok(assistantUpdateCount >= 2, 'the reply should reach the worker as multiple streaming updates');
   assert.ok(streamedAssistantText.includes('LOCAL_SMOKE_OK'), 'the streamed worker output should contain the local reply');
   let providerCalls = (await readFile(providerCallsPath, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-  assert.deepEqual(providerCalls, [{ kind: 'main', hasSmokePrompt: true }], 'the worker should stream through the isolated in-process provider without network access');
+  assert.deepEqual(providerCalls, [{
+    kind: 'main',
+    hasSmokePrompt: true,
+    hasCustomSystemPrompt: true,
+    hasAppendedPromptText: true,
+    hasAppendedPromptFile: true,
+  }], 'the worker should apply bounded custom system prompt text and append configured text/files');
 
   const latestAssistant = savedTranscript.messages.findLast((entry) => entry.role === 'assistant' && typeof entry.entryId === 'string');
   assert.ok(latestAssistant, 'the saved assistant reply should expose an entry ID for follow-up suggestions');
@@ -249,6 +306,10 @@ export default function (pi) {
       newSessionToolNames: ['read'],
       disabledContextFiles: [],
       disableContextFiles: true,
+      piPromptResources: {
+        disableSkillDiscovery: true,
+        disablePromptTemplateDiscovery: true,
+      },
       extensionUiMode: 'rpc',
     },
   });
@@ -257,12 +318,17 @@ export default function (pi) {
     && message.sessionFile === sessionFile, 'reopened smoke session');
   const restoredToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
     && Array.isArray(message.activeTools) && message.activeTools.length === 0
-    && Array.isArray(message.contextFiles), 'restored per-session tool selection and context-file settings');
+    && Array.isArray(message.contextFiles)
+    && Array.isArray(message.skills) && message.skills.length === 0
+    && Array.isArray(message.prompts) && message.prompts.length === 0,
+  'restored per-session tool selection, context-file settings, and resource discovery switches');
   worker.postMessage({ type: 'openSession', path: sessionFile });
   const [, restoredToolOptions] = await Promise.all([reopenedSnapshotPromise, restoredToolOptionsPromise]);
   assert.deepEqual(restoredToolOptions.defaultTools, [], 'the session choice should not replace Pi defaults');
   assert.deepEqual(restoredToolOptions.activeTools, [], 'the saved session choice should override the new-chat default');
   assert.deepEqual(restoredToolOptions.contextFiles, [], 'disabling Pi context files should suppress AGENTS.md and CLAUDE.md discovery');
+  assert.deepEqual(restoredToolOptions.skills, [], 'disabling skill discovery should suppress discovered skills and additional skill paths');
+  assert.deepEqual(restoredToolOptions.prompts, [], 'disabling prompt-template discovery should suppress discovered and additional prompt paths');
 
   const freshSessionToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
     && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'new chat tool defaults');
@@ -270,7 +336,7 @@ export default function (pi) {
   const freshSessionToolOptions = await freshSessionToolOptionsPromise;
   assert.deepEqual(freshSessionToolOptions.activeTools, ['read'], 'new chats should use the configured default tool set');
 
-  console.log('Worker smoke check passed: in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
+  console.log('Worker smoke check passed: prompt overrides and explicit resources loaded; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   const resolvedTemporaryRoot = resolve(temporaryRoot);

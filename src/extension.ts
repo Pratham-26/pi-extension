@@ -183,6 +183,18 @@ type PiExtensionUiMode = 'rpc' | 'tui';
 type PiExtensionStatusDisplay = 'footer' | 'statusBar' | 'both' | 'hidden';
 type PiExtensionStatusPreferences = { display: PiExtensionStatusDisplay; keys: string[] };
 type ContextFileChoice = { path: string; enabled: boolean };
+type PiPromptResourceSettings = {
+  systemPromptText?: string;
+  systemPromptFile?: string;
+  appendSystemPromptText?: string;
+  appendSystemPromptFiles: string[];
+  additionalExtensionPaths: string[];
+  additionalSkillPaths: string[];
+  additionalPromptTemplatePaths: string[];
+  disableExtensionDiscovery: boolean;
+  disableSkillDiscovery: boolean;
+  disablePromptTemplateDiscovery: boolean;
+};
 
 type RunningSessionRecord = {
   version: 1;
@@ -241,6 +253,52 @@ function readPiOfflineMode(): PiOfflineMode {
 
 function readPiExtensionUiMode(): PiExtensionUiMode {
   return vscode.workspace.getConfiguration('piChat').get<string>('extensionUiMode', 'rpc') === 'tui' ? 'tui' : 'rpc';
+}
+
+function readPiPromptResourceSettings(): PiPromptResourceSettings {
+  const prompts = vscode.workspace.getConfiguration('piChat.prompts');
+  const resources = vscode.workspace.getConfiguration('piChat.resources');
+  const read = <T>(configuration: vscode.WorkspaceConfiguration, key: string, fallback: T): T => {
+    const inspected = configuration.inspect<T>(key);
+    const workspaceOverride = inspected?.workspaceValue !== undefined || inspected?.workspaceFolderValue !== undefined;
+    if (!vscode.workspace.isTrusted && workspaceOverride) {
+      return (inspected?.globalValue ?? inspected?.defaultValue ?? fallback) as T;
+    }
+    return configuration.get<T>(key, fallback);
+  };
+  const readText = (configuration: vscode.WorkspaceConfiguration, key: string, maxChars: number): string => {
+    const value = read<unknown>(configuration, key, '');
+    return typeof value === 'string' && value.length <= maxChars && !value.includes('\0') ? value : '';
+  };
+  const isLocalPath = (value: string): boolean => value.length > 0 && value.length <= 4096
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && (!/^[a-z][a-z0-9+.-]*:/i.test(value) || /^[a-z]:[\\/]/i.test(value));
+  const readPaths = (key: string, maxItems: number): string[] => {
+    const value = read<unknown>(resources, key, []);
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim()).filter(isLocalPath))].slice(0, maxItems);
+  };
+  const systemPromptText = readText(prompts, 'systemPromptText', 100_000);
+  const systemPromptFile = readText(prompts, 'systemPromptFile', 4096).trim();
+  const appendSystemPromptText = readText(prompts, 'appendSystemPromptText', 100_000);
+  const appendSystemPromptFilesValue = read<unknown>(prompts, 'appendSystemPromptFiles', []);
+  const appendSystemPromptFiles = Array.isArray(appendSystemPromptFilesValue)
+    ? [...new Set(appendSystemPromptFilesValue.filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim()).filter(isLocalPath))].slice(0, 8)
+    : [];
+  return {
+    ...(systemPromptText.trim() ? { systemPromptText } : {}),
+    ...(!systemPromptText.trim() && isLocalPath(systemPromptFile) ? { systemPromptFile } : {}),
+    ...(appendSystemPromptText.trim() ? { appendSystemPromptText } : {}),
+    appendSystemPromptFiles,
+    additionalExtensionPaths: readPaths('additionalExtensionPaths', 64),
+    additionalSkillPaths: readPaths('additionalSkillPaths', 64),
+    additionalPromptTemplatePaths: readPaths('additionalPromptTemplatePaths', 64),
+    disableExtensionDiscovery: read<unknown>(resources, 'disableExtensionDiscovery', false) === true,
+    disableSkillDiscovery: read<unknown>(resources, 'disableSkillDiscovery', false) === true,
+    disablePromptTemplateDiscovery: read<unknown>(resources, 'disablePromptTemplateDiscovery', false) === true,
+  };
 }
 
 function readPiExtensionStatusPreferences(): PiExtensionStatusPreferences {
@@ -417,6 +475,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.models.autoRefresh')) activeProvider.onModelRefreshConfigurationChanged();
         if (event.affectsConfiguration('piChat.queue.defaultAction')) activeProvider.onQueueDefaultActionConfigurationChanged();
         if (event.affectsConfiguration('piChat.context.disableFiles')) activeProvider.onContextFilesConfigurationChanged();
+        if (event.affectsConfiguration('piChat.prompts') || event.affectsConfiguration('piChat.resources')) activeProvider.onPiPromptResourceConfigurationChanged();
         if (event.affectsConfiguration('piChat.composer.promptHistory')) activeProvider.onPromptHistoryConfigurationChanged();
         if (event.affectsConfiguration('piChat.appearance')) activeProvider.onAppearanceConfigurationChanged();
       }
@@ -443,6 +502,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerOfflineModeSetting: PiOfflineMode = 'inherit';
   private workerExtensionUiModeSetting: PiExtensionUiMode = 'rpc';
   private workerDisableContextFiles = false;
+  private workerPromptResourceSettingsKey = '';
   private runtimeBusy = false;
   private turnFileCapture?: TurnFileCapture;
   private queuedWorkCount = 0;
@@ -582,7 +642,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       });
     } else {
       view.onDidChangeViewState((event) => {
-        if (!event.webviewPanel.visible) dismissComposerPopovers();
+        // An editor-area webview can remain visible while another editor tab
+        // is active. Its document won't receive that outside click, so use the
+        // workbench activation state as the dismissal signal too.
+        if (!event.webviewPanel.visible || !event.webviewPanel.active) dismissComposerPopovers();
       });
     }
     view.webview.options = {
@@ -1265,6 +1328,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.workerOfflineModeSetting = 'inherit';
     this.workerExtensionUiModeSetting = 'rpc';
     this.workerDisableContextFiles = false;
+    this.workerPromptResourceSettingsKey = '';
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
@@ -1427,6 +1491,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const offlineMode = readPiOfflineMode();
     const extensionUiMode = readPiExtensionUiMode();
     const disableContextFiles = vscode.workspace.getConfiguration('piChat.context').get<boolean>('disableFiles', false);
+    const piPromptResourceSettings = readPiPromptResourceSettings();
+    const promptResourceSettingsKey = JSON.stringify(piPromptResourceSettings);
     const workerEnv: NodeJS.Dict<string> = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (typeof value === 'string') workerEnv[key] = value;
@@ -1462,6 +1528,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           newSessionToolNames: this.readNewSessionToolNames(),
           disabledContextFiles: this.readDisabledContextFiles(),
           disableContextFiles,
+          piPromptResources: piPromptResourceSettings,
           extensionUiMode,
         },
       });
@@ -1475,6 +1542,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.workerOfflineModeSetting = offlineMode;
     this.workerExtensionUiModeSetting = extensionUiMode;
     this.workerDisableContextFiles = disableContextFiles;
+    this.workerPromptResourceSettingsKey = promptResourceSettingsKey;
     this.runtimeBusy = false;
     this.queuedWorkCount = 0;
     worker.on('message', (message: RuntimeMessage) => {
@@ -4980,6 +5048,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       : 'Pi context-file loading changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
   }
 
+  onPiPromptResourceConfigurationChanged(): void {
+    if (!this.worker || JSON.stringify(readPiPromptResourceSettings()) === this.workerPromptResourceSettingsKey) return;
+    this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
+      ? 'Pi prompt or resource settings changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply them.'
+      : 'Pi prompt or resource settings changed. Use Pi Chat: Restart Pi Runtime to apply them.' });
+  }
+
   onExtensionStatusConfigurationChanged(): void {
     this.postExtensionStatusPreferences();
     this.updateExtensionStatusBar();
@@ -6050,13 +6125,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
     <section class="main-panel" aria-label="Pi chat">
       <header class="topbar">
-        <div class="title-stack">
-          <div id="conversation-title" class="conversation-title">New chat</div>
-          <div id="workspace-name" class="workspace-name">Waiting for workspace</div>
-        </div>
+        <div class="topbar-title">
+          <div class="title-stack">
+            <div id="conversation-title" class="conversation-title">New chat</div>
+            <div id="workspace-name" class="workspace-name">Waiting for workspace</div>
+          </div>
         <button id="rename-session" class="icon-button" type="button" title="Rename session" aria-label="Rename session">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16.5-.8 4.3 4.3-.8L19.8 7.7a2.8 2.8 0 0 0-4-4L4 16.5Z"/><path d="m14.5 5.5 4 4"/></svg>
         </button>
+        </div>
+        <div class="topbar-actions" role="group" aria-label="Conversation actions">
         <button id="branch-history-toggle" class="icon-button" type="button" title="Branch history" aria-label="Branch history" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4v11a4 4 0 0 0 4 4h8"/><path d="m14 15 4 4-4 4M6 4a2 2 0 1 0 0 .1M18 19a2 2 0 1 0 0 .1"/></svg>
         </button>
@@ -6077,6 +6155,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <button id="refresh-sessions" class="icon-button" type="button" title="Refresh sessions" aria-label="Refresh sessions">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg>
         </button>
+        </div>
       </header>
 
       <div id="chat-search-bar" class="chat-search-bar" hidden>

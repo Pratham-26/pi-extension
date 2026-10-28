@@ -1,7 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { existsSync, lstatSync, mkdirSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isPiPackageSource } from './package-source';
 import { resolveModelScopePatterns } from './model-scope';
@@ -167,8 +167,85 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; disableContextFiles?: boolean; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui' } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; disableContextFiles?: boolean; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui'; piPromptResources?: unknown } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
+type PiPromptResourceSettings = {
+  systemPromptText?: string;
+  systemPromptFile?: string;
+  appendSystemPromptText?: string;
+  appendSystemPromptFiles: string[];
+  additionalExtensionPaths: string[];
+  additionalSkillPaths: string[];
+  additionalPromptTemplatePaths: string[];
+  disableExtensionDiscovery: boolean;
+  disableSkillDiscovery: boolean;
+  disablePromptTemplateDiscovery: boolean;
+};
+const MAX_PROMPT_SETTING_CHARS = 100_000;
+const MAX_PROMPT_FILE_BYTES = 1024 * 1024;
+function isLocalPiResourcePath(value: string): boolean {
+  return value.length > 0 && value.length <= 4096
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && (!/^[a-z][a-z0-9+.-]*:/i.test(value) || /^[a-z]:[\\/]/i.test(value));
+}
+function parsePiPromptResourceSettings(value: unknown): PiPromptResourceSettings {
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const readText = (key: string): string | undefined => {
+    const candidate = input[key];
+    return typeof candidate === 'string' && candidate.length <= MAX_PROMPT_SETTING_CHARS && !candidate.includes('\0')
+      && candidate.trim() ? candidate : undefined;
+  };
+  const readPaths = (key: string, maxItems: number): string[] => {
+    const candidate = input[key];
+    if (!Array.isArray(candidate)) return [];
+    const paths = [...new Set(candidate.filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim()).filter(isLocalPiResourcePath))];
+    return paths.slice(0, maxItems);
+  };
+  const systemPromptText = readText('systemPromptText');
+  const systemPromptFile = !systemPromptText && typeof input.systemPromptFile === 'string'
+    && isLocalPiResourcePath(input.systemPromptFile.trim()) ? input.systemPromptFile.trim() : undefined;
+  const appendSystemPromptText = readText('appendSystemPromptText');
+  return {
+    ...(systemPromptText ? { systemPromptText } : {}),
+    ...(systemPromptFile ? { systemPromptFile } : {}),
+    ...(appendSystemPromptText ? { appendSystemPromptText } : {}),
+    appendSystemPromptFiles: readPaths('appendSystemPromptFiles', 8),
+    additionalExtensionPaths: readPaths('additionalExtensionPaths', 64),
+    additionalSkillPaths: readPaths('additionalSkillPaths', 64),
+    additionalPromptTemplatePaths: readPaths('additionalPromptTemplatePaths', 64),
+    disableExtensionDiscovery: input.disableExtensionDiscovery === true,
+    disableSkillDiscovery: input.disableSkillDiscovery === true,
+    disablePromptTemplateDiscovery: input.disablePromptTemplateDiscovery === true,
+  };
+}
+const piPromptResourceSettings = parsePiPromptResourceSettings(workerOptions?.piPromptResources);
+function readPromptFile(source: string, label: string): string | undefined {
+  let descriptor: number | undefined;
+  try {
+    const filePath = isAbsolute(source) ? source : resolve(cwd, source);
+    descriptor = openSync(filePath, 'r');
+    const fileStats = fstatSync(descriptor);
+    if (!fileStats.isFile() || fileStats.size < 0 || fileStats.size > MAX_PROMPT_FILE_BYTES) throw new Error('Invalid prompt file size.');
+    const buffer = Buffer.alloc(fileStats.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const count = readSync(descriptor, buffer, offset, buffer.length - offset, offset);
+      if (count <= 0) break;
+      offset += count;
+    }
+    const content = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, offset)).replace(/^\uFEFF/, '');
+    if (content.includes('\0')) throw new Error('Prompt file contains a null byte.');
+    return content;
+  } catch {
+    send('notice', { message: `Configured ${label} could not be loaded. Check its path, UTF-8 encoding, and 1 MiB size limit.`, isError: true });
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* Ignore a descriptor that could not be closed. */ }
+    }
+  }
+}
 const modelScopeOverrides = new WeakMap<object, string[] | null>();
 const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbsolute(workerOptions.extensionRoot)
   ? workerOptions.extensionRoot
@@ -3712,13 +3789,34 @@ async function createSessionInternal(path?: string): Promise<boolean> {
         openUrl: (url) => send('mcp-open-url', { url: String(url).slice(0, 2048) }),
       })] : []),
     ];
+    const customSystemPrompt = piPromptResourceSettings.systemPromptText
+      ?? (piPromptResourceSettings.systemPromptFile
+        ? readPromptFile(piPromptResourceSettings.systemPromptFile, 'system prompt file')
+        : undefined);
+    const appendedPromptText = [
+      ...(piPromptResourceSettings.appendSystemPromptText ? [piPromptResourceSettings.appendSystemPromptText] : []),
+      ...piPromptResourceSettings.appendSystemPromptFiles.flatMap((filePath) => {
+        const content = readPromptFile(filePath, 'appended system prompt file');
+        return content === undefined ? [] : [content];
+      }),
+    ];
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir: getAgentDir(),
       settingsManager,
       extensionFactories,
+      additionalExtensionPaths: piPromptResourceSettings.additionalExtensionPaths,
+      additionalSkillPaths: piPromptResourceSettings.additionalSkillPaths,
+      additionalPromptTemplatePaths: piPromptResourceSettings.additionalPromptTemplatePaths,
+      noExtensions: piPromptResourceSettings.disableExtensionDiscovery,
       disabledBuiltinExtensions: ['mcp'],
+      noSkills: piPromptResourceSettings.disableSkillDiscovery,
+      noPromptTemplates: piPromptResourceSettings.disablePromptTemplateDiscovery,
       noContextFiles: workerOptions?.disableContextFiles === true,
+      ...(customSystemPrompt !== undefined ? { systemPromptOverride: () => customSystemPrompt } : {}),
+      ...(appendedPromptText.length > 0
+        ? { appendSystemPromptOverride: (base: string[]) => [...base, ...appendedPromptText] }
+        : {}),
       agentsFilesOverride: (current) => {
         contextFileCandidates = current.agentsFiles
           .map((file) => file.path)

@@ -3059,8 +3059,7 @@ function renderModelList() {
     option.append(name, description);
     option.addEventListener('click', () => {
       post('setModel', { provider: model.provider, modelId: model.id });
-      ui.modelPopover.hidden = true;
-      ui.modelToggle.setAttribute('aria-expanded', 'false');
+      closeComposerPopovers();
     });
     ui.modelList.append(option);
   }
