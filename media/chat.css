@@ -180,7 +180,7 @@ button:focus-visible, textarea:focus-visible {
 .session-row {
   display: grid;
   grid-template-columns: 7px minmax(0, 1fr);
-  grid-template-rows: auto auto;
+  grid-template-rows: auto auto auto;
   align-items: center;
   column-gap: 6px;
   width: 100%;
@@ -209,8 +209,9 @@ button:focus-visible, textarea:focus-visible {
 .session-action.danger-action:hover:not(:disabled) { color: var(--danger); }
 .session-row-title { grid-column: 2; grid-row: 1; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .session-row-id { grid-column: 2; grid-row: 2; display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.session-row-match { grid-column: 2; grid-row: 3; display: block; max-width: 100%; margin-top: 3px; overflow: hidden; color: var(--vscode-descriptionForeground, var(--muted)); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .branch-point { grid-template-columns: minmax(0, 1fr); }
-.branch-point .session-row-title, .branch-point .session-row-id { grid-column: 1; }
+.branch-point .session-row-title, .branch-point .session-row-id, .branch-point .session-row-match { grid-column: 1; }
 .session-empty { padding: 12px; color: var(--muted); font-size: 12px; }
 .queue-group-heading { padding: 8px 7px 4px; color: var(--muted); font-size: 10px; font-weight: 600; }
 .queued-item { display: flex; align-items: flex-start; gap: 5px; padding: 7px; border: 1px solid var(--line); border-radius: 5px; margin: 4px 0; }

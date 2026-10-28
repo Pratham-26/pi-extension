@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { watch, type FSWatcher } from 'node:fs';
+import { statSync, watch, type FSWatcher } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { isPiPackageSource } from './package-source';
@@ -166,6 +166,11 @@ let sessionExtensionsBound = false;
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
 let sessionQuery = '';
+const sessionSearchCache = new Map<string, { modified: number; text: string }>();
+let sessionSearchCacheChars = 0;
+const MAX_SESSION_SEARCH_CACHE_ENTRIES = 32;
+const MAX_SESSION_SEARCH_CACHE_CHARS = 2_000_000;
+const MAX_SESSION_SEARCH_INDEX_CHARS = 128_000;
 let uiRequestSequence = 0;
 let modelWatcher: FSWatcher | undefined;
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -921,18 +926,124 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   snapshot();
 }
 
+function removeSessionSearchCacheEntry(path: string): void {
+  const cached = sessionSearchCache.get(path);
+  if (!cached) return;
+  sessionSearchCache.delete(path);
+  sessionSearchCacheChars = Math.max(0, sessionSearchCacheChars - cached.text.length);
+}
+
+function sessionSupplementalSearchMatches(path: string, query: string): boolean {
+  let modified: number;
+  try {
+    modified = statSync(path).mtimeMs;
+  } catch {
+    return false;
+  }
+  const cached = sessionSearchCache.get(path);
+  if (cached?.modified === modified) {
+    sessionSearchCache.delete(path);
+    sessionSearchCache.set(path, cached);
+    return cached.text.includes(query);
+  }
+  removeSessionSearchCacheEntry(path);
+
+  let matches = false;
+  let cacheable = true;
+  let indexChars = 0;
+  const indexParts: string[] = [];
+  const addSearchText = (value: unknown): void => {
+    if (typeof value !== 'string' || !value) return;
+    const normalized = value.toLocaleLowerCase();
+    if (normalized.includes(query)) matches = true;
+    if (!cacheable) return;
+    if (indexChars + normalized.length + 1 > MAX_SESSION_SEARCH_INDEX_CHARS) {
+      cacheable = false;
+      indexParts.length = 0;
+      indexChars = 0;
+      return;
+    }
+    indexParts.push(normalized);
+    indexChars += normalized.length + 1;
+  };
+
+  try {
+    const entries = SessionManager.open(path).getEntries() as Array<Record<string, any>>;
+    for (const entry of entries) {
+      if (entry.type !== 'message' || !entry.message || typeof entry.message !== 'object') continue;
+      const message = entry.message as Record<string, any>;
+      if (message.role === 'assistant' && Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (!part || typeof part !== 'object') continue;
+          if (part.type === 'thinking' && part.redacted !== true) addSearchText(part.thinking);
+          else if (part.type === 'toolCall') {
+            addSearchText(part.name);
+            if (part.arguments !== undefined) {
+              try {
+                addSearchText(JSON.stringify(part.arguments));
+              } catch {
+                // Skip malformed extension or legacy tool arguments.
+              }
+            }
+          }
+        }
+      } else if (message.role === 'toolResult') {
+        addSearchText(message.toolName);
+        if (Array.isArray(message.content)) {
+          for (const part of message.content) {
+            if (part?.type === 'text') addSearchText(part.text);
+          }
+        }
+        if (message.details !== undefined) {
+          try {
+            addSearchText(JSON.stringify(boundedStructuredToolValue(message.details, { remaining: MAX_TOOL_DETAILS_CHARS })));
+          } catch {
+            // Details are optional and may be malformed in legacy session data.
+          }
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  if (cacheable) {
+    const text = indexParts.join('\n');
+    if (text.length <= MAX_SESSION_SEARCH_CACHE_CHARS) {
+      while (sessionSearchCache.size >= MAX_SESSION_SEARCH_CACHE_ENTRIES
+        || sessionSearchCacheChars + text.length > MAX_SESSION_SEARCH_CACHE_CHARS) {
+        const oldestPath = sessionSearchCache.keys().next().value as string | undefined;
+        if (!oldestPath) break;
+        removeSessionSearchCacheEntry(oldestPath);
+      }
+      sessionSearchCache.set(path, { modified, text });
+      sessionSearchCacheChars += text.length;
+    }
+  }
+  return matches;
+}
+
 async function listSessions(query = sessionQuery): Promise<void> {
   try {
     sessionQuery = query;
     const sessions = await SessionManager.list(cwd);
     const normalizedQuery = query.trim().toLocaleLowerCase();
+    const matchingSessions = sessions.flatMap((item: any) => {
+      if (!normalizedQuery) return [{ item, supplementalMatch: false }];
+      const primaryText = `${item.name ?? ''}\n${item.firstMessage ?? ''}\n${item.allMessagesText ?? ''}`.toLocaleLowerCase();
+      const primaryMatch = primaryText.includes(normalizedQuery);
+      const supplementalMatch = !primaryMatch && typeof item.path === 'string'
+        && sessionSupplementalSearchMatches(item.path, normalizedQuery);
+      return primaryMatch || supplementalMatch ? [{ item, supplementalMatch }] : [];
+    });
     send('sessions', {
       sessionPaths: sessions.map((item: any) => String(item.path ?? '')),
-      sessions: sessions.filter((item: any) => !normalizedQuery || `${item.name ?? ''}\n${item.firstMessage ?? ''}\n${item.allMessagesText ?? ''}`.toLocaleLowerCase().includes(normalizedQuery)).map((item: any) => ({
+      sessions: matchingSessions.map(({ item, supplementalMatch }) => ({
         id: String(item.id ?? ''),
         path: String(item.path ?? ''),
         title: String(item.name ?? item.firstMessage ?? 'New chat').replace(/\s+/g, ' ').slice(0, 96),
         modified: item.modified instanceof Date ? item.modified.getTime() : 0,
+        ...(supplementalMatch ? { searchMatch: 'thinking-or-tool-activity' } : {}),
       })),
     });
   } catch (error) {

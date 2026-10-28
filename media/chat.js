@@ -413,6 +413,12 @@ function renderSessions() {
     id.className = 'session-row-id';
     id.textContent = session.id ? session.id.slice(0, 8) : 'Pi session';
     row.append(color, title, id);
+    if (session.searchMatch === 'thinking-or-tool-activity') {
+      const match = document.createElement('span');
+      match.className = 'session-row-match';
+      match.textContent = 'Matched thinking or tool activity';
+      row.append(match);
+    }
     row.addEventListener('click', () => {
       closeHistory();
       state.switchingSession = true;

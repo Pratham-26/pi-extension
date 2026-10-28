@@ -2463,7 +2463,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
       <aside id="history-panel" class="history-panel" aria-label="Recent sessions" hidden>
         <div class="history-heading"><span>Recent sessions</span><button id="close-history" class="icon-button small" type="button" title="Close" aria-label="Close recent sessions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-        <input id="session-search" class="session-search" type="search" aria-label="Search sessions" placeholder="Search chats and messages">
+        <input id="session-search" class="session-search" type="search" aria-label="Search sessions" placeholder="Search chats, thinking, and tool activity">
         <div id="session-list" class="session-list"></div>
         <div id="session-empty" class="session-empty" hidden>No matching sessions.</div>
       </aside>
