@@ -171,6 +171,7 @@ let sessionSearchCacheChars = 0;
 const MAX_SESSION_SEARCH_CACHE_ENTRIES = 32;
 const MAX_SESSION_SEARCH_CACHE_CHARS = 2_000_000;
 const MAX_SESSION_SEARCH_INDEX_CHARS = 128_000;
+const MAX_PENDING_UI_REQUESTS = 64;
 let uiRequestSequence = 0;
 let modelWatcher: FSWatcher | undefined;
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -465,11 +466,40 @@ function toolArgsPreview(args: unknown): string {
   }
 }
 
+function boundedUiText(value: unknown, maxLength: number): string {
+  try {
+    return String(value ?? '').slice(0, maxLength);
+  } catch {
+    return '';
+  }
+}
+
 function requestExtensionUi(kind: string, title: string, payload: Record<string, unknown> = {}): Promise<unknown> {
+  if (pendingUiRequests.size >= MAX_PENDING_UI_REQUESTS) return Promise.resolve(undefined);
   const requestId = `pi-ui-${++uiRequestSequence}`;
+  let boundedPayload: Record<string, unknown>;
+  try {
+    if (kind === 'select') {
+      boundedPayload = {
+        options: Array.isArray(payload.options)
+          ? payload.options.slice(0, 100).map((option) => boundedUiText(option, 512))
+          : [],
+      };
+    } else if (kind === 'confirm') {
+      boundedPayload = { message: boundedUiText(payload.message, 4000) };
+    } else if (kind === 'input') {
+      boundedPayload = { placeholder: boundedUiText(payload.placeholder, 256) };
+    } else if (kind === 'editor') {
+      boundedPayload = { prefill: boundedUiText(payload.prefill, 8000) };
+    } else {
+      return Promise.resolve(undefined);
+    }
+  } catch {
+    return Promise.resolve(undefined);
+  }
   return new Promise((resolve) => {
     pendingUiRequests.set(requestId, resolve);
-    send('extension-ui-request', { requestId, kind, title, ...payload });
+    send('extension-ui-request', { requestId, kind, title: boundedUiText(title, 256), ...boundedPayload });
   });
 }
 
@@ -841,6 +871,7 @@ function sendOptions(): void {
 async function bindSession(next: SessionLike, extensionsBound = false): Promise<void> {
   providerAuthController?.abort();
   providerAuthController = undefined;
+  if (pendingUiRequests.size) send('extension-ui-reset');
   for (const resolve of pendingUiRequests.values()) resolve(undefined);
   pendingUiRequests.clear();
   pendingProviderAuthRequests.clear();

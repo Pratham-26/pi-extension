@@ -75,6 +75,8 @@ const state = {
   extensionWidgets: new Map(),
   extensionStatuses: new Map(),
   extensionRequest: undefined,
+  extensionRequestQueue: [],
+  extensionQueueFullNotified: false,
   showWorking: true,
   contextUsage: undefined,
   sessionStats: undefined,
@@ -2752,9 +2754,32 @@ function finishExtensionDialog(value) {
   state.extensionRequest = undefined;
   ui.dialogLayer.hidden = true;
   post('extensionUiResponse', { requestId: request.requestId, value });
+  const next = state.extensionRequestQueue.shift();
+  if (state.extensionRequestQueue.length < MAX_QUEUED_EXTENSION_DIALOGS) state.extensionQueueFullNotified = false;
+  if (next) showExtensionDialog(next);
 }
 
+const MAX_QUEUED_EXTENSION_DIALOGS = 20;
+const EXTENSION_DIALOG_KINDS = new Set(['select', 'confirm', 'input', 'editor']);
+
 function showExtensionDialog(data) {
+  const requestId = typeof data?.requestId === 'string' ? data.requestId : '';
+  if (!requestId || requestId.length > 128 || !EXTENSION_DIALOG_KINDS.has(data.kind)) {
+    if (requestId && requestId.length <= 128) post('extensionUiResponse', { requestId, value: undefined });
+    return;
+  }
+  if (state.extensionRequest) {
+    if (state.extensionRequestQueue.length >= MAX_QUEUED_EXTENSION_DIALOGS) {
+      post('extensionUiResponse', { requestId, value: undefined });
+      if (!state.extensionQueueFullNotified) {
+        state.extensionQueueFullNotified = true;
+        showNotice('Too many Pi extension dialogs are waiting. The extra request was cancelled.', true);
+      }
+      return;
+    }
+    state.extensionRequestQueue.push(data);
+    return;
+  }
   state.extensionRequest = { requestId: data.requestId, kind: data.kind };
   ui.dialogTitle.textContent = data.title || 'Pi extension';
   ui.dialogMessage.textContent = data.message || '';
@@ -2785,6 +2810,18 @@ function showExtensionDialog(data) {
   if (data.kind === 'input' || data.kind === 'editor') ui.dialogInput.focus();
   else if (data.kind === 'select') ui.dialogOptions.querySelector('input')?.focus();
   else ui.dialogSubmit.focus();
+}
+
+function resetExtensionDialogs() {
+  state.extensionRequest = undefined;
+  state.extensionRequestQueue = [];
+  state.extensionQueueFullNotified = false;
+  ui.dialogLayer.hidden = true;
+  ui.dialogOptions.replaceChildren();
+  ui.dialogInput.value = '';
+  ui.dialogTitle.textContent = '';
+  ui.dialogMessage.textContent = '';
+  ui.dialogMessage.hidden = true;
 }
 
 function beginAssistantMessage() {
@@ -2919,6 +2956,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'extension-ui-request':
       showExtensionDialog(data);
+      break;
+    case 'extension-ui-reset':
+      resetExtensionDialogs();
       break;
     case 'extension-ui-notice':
       showNotice(data.message || 'Pi extension notification', data.level === 'error' || data.level === 'warning');
@@ -3280,8 +3320,7 @@ ui.dialogSubmit.addEventListener('click', () => {
 });
 ui.dialogCancel.addEventListener('click', () => finishExtensionDialog(undefined));
 ui.dialogInput.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') finishExtensionDialog(undefined);
-  else if (event.key === 'Enter' && !event.shiftKey && state.extensionRequest?.kind === 'input') {
+  if (event.key === 'Enter' && !event.shiftKey && state.extensionRequest?.kind === 'input') {
     event.preventDefault();
     finishExtensionDialog(ui.dialogInput.value);
   }
