@@ -231,6 +231,27 @@ button:focus-visible, textarea:focus-visible {
 .extension-dialog textarea { width: 100%; min-height: 68px; max-height: 38vh; resize: vertical; padding: 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-input); font: inherit; line-height: 1.45; }
 .extension-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 4px; }
 .extension-dialog-actions .send-button { padding: 0 9px; font-size: 10px; }
+.prompt-heading { flex-direction: row; justify-content: space-between; align-items: center; }
+.prompt-heading-actions { display: flex; align-items: center; gap: 4px; }
+.prompt-heading-actions .text-button { padding: 3px 4px; }
+.prompt-option-row { display: flex; align-items: center; min-width: 0; gap: 3px; }
+.prompt-option-row .command-option { flex: 1; }
+.prompt-option-row .session-action { flex: 0 0 auto; }
+.resource-diagnostics { padding: 0 6px 6px; }
+.resource-diagnostics details { border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line)); border-radius: 5px; }
+.resource-diagnostics summary { padding: 6px 7px; color: var(--danger); cursor: pointer; font-size: 10px; }
+.resource-diagnostic { padding: 6px 7px; border-top: 1px solid var(--line); }
+.resource-diagnostic strong { color: var(--danger); font-size: 10px; }
+.resource-diagnostic p { margin: 3px 0 0; color: var(--text); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.resource-diagnostic small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+.prompt-template-dialog { max-height: 90%; }
+.prompt-template-fields { display: flex; flex-direction: column; gap: 7px; max-height: 34vh; overflow: auto; }
+.prompt-template-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 10px; }
+.prompt-template-field input, .prompt-template-field textarea { width: 100%; min-width: 0; resize: vertical; padding: 6px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 11px; }
+.prompt-template-field textarea { min-height: 58px; max-height: 18vh; }
+.prompt-template-preview { min-height: 0; border: 1px solid var(--line); border-radius: 5px; }
+.prompt-template-preview summary { padding: 6px 8px; color: var(--muted); cursor: pointer; font-size: 10px; }
+.prompt-template-preview pre { max-height: 28vh; overflow: auto; margin: 0; padding: 8px; border-top: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; }
 
 .messages { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 8px 14px 18px; }
 .empty-state { max-width: 440px; margin: clamp(34px, 11vh, 100px) auto 30px; text-align: center; }

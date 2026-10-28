@@ -56,10 +56,10 @@ This checklist follows Pendant's published [guide](https://pendant.sh/guide/) as
 - [x] Choose Pi defaults, a read-only built-in tool set, no tools, or individual tools per session.
 - [x] Browse/invoke skills and persist per-session switches for automatic skill invocation.
 - [x] Browse/invoke Pi slash prompt templates.
-- [ ] Prompt-template argument forms/previews, create/edit actions, and resource diagnostics.
+- [x] Prompt-template argument forms/previews; create project templates; edit loaded templates; show extension, skill, prompt, and theme diagnostics; explicitly reload Pi resources.
 - [ ] Browse/install/update/remove packages; choose user/project scope; enable/disable package resources; recommendations.
 - [~] Support extension select/confirm/input/editor dialogs, notices, status values, plain-text widgets, and composer text. Concurrent dialogs, timeouts/signals, custom components, renderers, terminal cards, checklist/plan presentation, and native subagent UI are missing.
-- [ ] Show extension load errors and provide resource/package reload controls.
+- [~] Show and open extension load-error sources and reload Pi resources; package-manager controls are missing.
 - [ ] Extension command/action picker and argument autocomplete.
 - [ ] MCP server manager and supported web/MCP tool cards.
 - [ ] Recognize supported subagent tools and show their runs, transcripts, and controls.

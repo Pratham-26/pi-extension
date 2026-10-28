@@ -23,6 +23,7 @@ const state = {
   hasSession: false,
   switchingSession: false,
   busy: false,
+  stopAllowed: true,
   streamIndex: -1,
   model: '',
   currentModel: undefined,
@@ -37,6 +38,8 @@ const state = {
   supportsThinking: false,
   skills: [],
   prompts: [],
+  resourceDiagnostics: [],
+  promptTemplateForm: undefined,
   tools: [],
   activeTools: [],
   defaultTools: [],
@@ -83,6 +86,11 @@ const ui = {
   dialogInput: el('extension-dialog-input'),
   dialogCancel: el('extension-dialog-cancel'),
   dialogSubmit: el('extension-dialog-submit'),
+  promptTemplateLayer: el('prompt-template-layer'),
+  promptTemplateTitle: el('prompt-template-title'),
+  promptTemplateDescription: el('prompt-template-description'),
+  promptTemplateFields: el('prompt-template-fields'),
+  promptTemplatePreview: el('prompt-template-preview'),
   history: el('history-panel'),
   historyToggle: el('history-toggle'),
   branchHistoryToggle: el('branch-history-toggle'),
@@ -118,6 +126,9 @@ const ui = {
   skillsPopover: el('skills-popover'),
   skillList: el('skill-list'),
   promptList: el('prompt-list'),
+  resourceDiagnostics: el('resource-diagnostics'),
+  newPromptTemplate: el('new-prompt-template'),
+  reloadResources: el('reload-pi-resources'),
   deliveryMode: el('delivery-mode'),
 };
 
@@ -253,7 +264,7 @@ function updateControls() {
   const hasText = Boolean(ui.prompt.value.trim() || state.attachments.length);
   ui.send.disabled = !state.hasWorkspace || !hasText;
   ui.prompt.disabled = !state.hasWorkspace || state.switchingSession;
-  ui.stop.hidden = !state.busy;
+  ui.stop.hidden = !state.busy || !state.stopAllowed;
   ui.activity.hidden = !state.busy || !state.showWorking;
   ui.empty.hidden = state.messages.length > 0;
   ui.model.textContent = state.model;
@@ -264,6 +275,8 @@ function updateControls() {
   ui.thinkingChoice.disabled = !state.hasSession || state.busy || state.thinkingLevels.length === 0;
   ui.compactSession.disabled = !state.hasSession || state.busy;
   ui.bookmarkToggle.disabled = !state.hasSession;
+  ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
+  ui.reloadResources.disabled = !state.hasSession || state.busy;
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
   ui.skillsToggle.disabled = !state.hasSession || (state.skills.length === 0 && state.prompts.length === 0);
   ui.toolsPopover.querySelectorAll('input').forEach((input) => { input.disabled = state.busy; });
@@ -684,8 +697,9 @@ function attachImageFile(file) {
   return true;
 }
 
-function setBusy(busy, activityText) {
+function setBusy(busy, activityText, stopAllowed = true) {
   state.busy = Boolean(busy);
+  state.stopAllowed = state.busy && stopAllowed;
   if (activityText) ui.activityText.textContent = activityText;
   updateControls();
 }
@@ -751,6 +765,7 @@ function renderModelChoices(data) {
 
   state.skills = Array.isArray(data.skills) ? data.skills : [];
   state.prompts = Array.isArray(data.prompts) ? data.prompts : [];
+  state.resourceDiagnostics = Array.isArray(data.resourceDiagnostics) ? data.resourceDiagnostics.slice(0, 100) : [];
   state.tools = Array.isArray(data.tools) ? data.tools : [];
   state.activeTools = Array.isArray(data.activeTools) ? data.activeTools : [];
   state.defaultTools = Array.isArray(data.defaultTools) ? data.defaultTools : [];
@@ -760,6 +775,7 @@ function renderModelChoices(data) {
   renderPresets();
   renderTools();
   renderCommands();
+  renderResourceDiagnostics();
   updateControls();
 }
 
@@ -1010,6 +1026,176 @@ function addCommandOption(parent, command, description, kind, hint = '') {
   parent.append(button);
 }
 
+function argumentHintTokens(value) {
+  return String(value || '').match(/<[^>]+>|\[[^\]]+\]|[^\s,]+/g)?.map((token) => token.replace(/^[<\[]|[>\]]$/g, '').trim()).filter(Boolean) || [];
+}
+
+function promptTemplateFields(prompt) {
+  const positional = new Map();
+  const content = String(prompt.content || '');
+  const placeholder = /\$\{(\d+)(?::-([^}]*))?\}|\$(\d+)/g;
+  let match;
+  while ((match = placeholder.exec(content)) !== null) {
+    const index = Number(match[1] || match[3]);
+    if (index > 0 && index <= 20 && !positional.has(index)) positional.set(index, match[2] || '');
+  }
+  const hints = argumentHintTokens(prompt.argumentHint);
+  if (positional.size) {
+    const fields = [];
+    const max = Math.max(...positional.keys());
+    for (let index = 1; index <= max; index += 1) {
+      fields.push({ index, label: hints[index - 1] || `Argument ${index}`, defaultValue: positional.get(index) || '' });
+    }
+    return fields;
+  }
+  if (prompt.argumentHint || /\$(?:ARGUMENTS|@)|\$\{(?:ARGUMENTS|@):-|\$\{@:\d+(?::\d+)?\}/.test(content)) {
+    return [{ index: 1, label: prompt.argumentHint || 'Arguments', defaultValue: '', multiline: true }];
+  }
+  return [];
+}
+
+function expandPromptPreview(content, args) {
+  const allArgs = args.join(' ');
+  return String(content || '').replace(/\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)/g,
+    (_whole, defaultTarget, defaultValue, sliceStart, sliceLength, simple) => {
+      if (defaultTarget) {
+        const value = defaultTarget === '@' || defaultTarget === 'ARGUMENTS' ? allArgs : args[Number(defaultTarget) - 1];
+        return value || defaultValue;
+      }
+      if (sliceStart) {
+        const start = Math.max(0, Number(sliceStart) - 1);
+        return args.slice(start, sliceLength ? start + Number(sliceLength) : undefined).join(' ');
+      }
+      if (simple === 'ARGUMENTS' || simple === '@') return allArgs;
+      return args[Number(simple) - 1] ?? '';
+    });
+}
+
+function renderPromptTemplatePreview() {
+  const form = state.promptTemplateForm;
+  if (!form) return;
+  const args = form.fields.map((field) => field.input.value.replaceAll('\0', '').slice(0, 1000));
+  const content = typeof form.prompt.content === 'string' ? form.prompt.content : '';
+  if (!content) {
+    ui.promptTemplatePreview.textContent = 'Preview unavailable for this template.';
+    return;
+  }
+  const preview = expandPromptPreview(content, args);
+  const previewText = preview.length > 20_000 ? `${preview.slice(0, 20_000)}\n\n[Preview truncated]` : preview;
+  ui.promptTemplatePreview.textContent = form.prompt.contentTruncated
+    ? `${previewText}\n\n[The source template is longer than the preview limit]`
+    : previewText;
+}
+
+function openPromptTemplateForm(prompt) {
+  if (!/^[\w.-]{1,128}$/.test(String(prompt.name || ''))) {
+    showNotice('Pi cannot invoke this prompt template by slash command because its name contains unsupported characters.', true);
+    return;
+  }
+  const fields = promptTemplateFields(prompt);
+  if (!fields.length) {
+    insertCommand(`/${prompt.name}`);
+    return;
+  }
+  state.promptTemplateForm = { prompt, fields: [] };
+  ui.promptTemplateTitle.textContent = `/${prompt.name}`;
+  ui.promptTemplateDescription.textContent = prompt.description || prompt.argumentHint || 'Fill in the arguments, review the expansion, then insert it in the composer.';
+  ui.promptTemplateFields.replaceChildren();
+  for (const field of fields) {
+    const label = document.createElement('label');
+    label.className = 'prompt-template-field';
+    const name = document.createElement('strong');
+    name.textContent = field.label;
+    const input = document.createElement(field.multiline ? 'textarea' : 'input');
+    if (!field.multiline) input.type = 'text';
+    input.maxLength = 1000;
+    input.value = field.defaultValue.slice(0, 1000);
+    input.addEventListener('input', renderPromptTemplatePreview);
+    label.append(name, input);
+    ui.promptTemplateFields.append(label);
+    state.promptTemplateForm.fields.push({ ...field, input });
+  }
+  ui.promptTemplateLayer.hidden = false;
+  renderPromptTemplatePreview();
+  state.promptTemplateForm.fields[0]?.input.focus();
+}
+
+function closePromptTemplateForm() {
+  ui.promptTemplateLayer.hidden = true;
+  state.promptTemplateForm = undefined;
+  ui.promptTemplateFields.replaceChildren();
+}
+
+function quotePiCommandArgument(value) {
+  if (!value) return "''";
+  return [...value.replaceAll('\0', '')].map((character) => character === '"' ? `'"'` : `"${character}"`).join('');
+}
+
+function usePromptTemplate() {
+  const form = state.promptTemplateForm;
+  if (!form) return;
+  const args = form.fields.map((field) => quotePiCommandArgument(field.input.value.slice(0, 1000)));
+  const command = `/${form.prompt.name}${args.length ? ` ${args.join(' ')}` : ''}`;
+  closePromptTemplateForm();
+  insertCommand(command);
+}
+
+function renderResourceDiagnostics() {
+  ui.resourceDiagnostics.replaceChildren();
+  if (!state.resourceDiagnostics.length) return;
+  const details = document.createElement('details');
+  const summary = document.createElement('summary');
+  summary.textContent = `Resource diagnostics · ${state.resourceDiagnostics.length}`;
+  details.append(summary);
+  for (const diagnostic of state.resourceDiagnostics) {
+    const row = document.createElement('div');
+    row.className = 'resource-diagnostic';
+    const title = document.createElement('strong');
+    title.textContent = `${String(diagnostic.resource || 'Pi resource')} · ${String(diagnostic.type || 'warning')}`;
+    const message = document.createElement('p');
+    message.textContent = String(diagnostic.message || 'Resource diagnostic');
+    row.append(title, message);
+    if (typeof diagnostic.path === 'string' && diagnostic.path) {
+      const source = document.createElement('small');
+      source.textContent = diagnostic.path;
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'session-action';
+      open.textContent = 'Open source';
+      open.addEventListener('click', () => post('openResourceFile', { filePath: diagnostic.path }));
+      row.append(source, open);
+    }
+    details.append(row);
+  }
+  ui.resourceDiagnostics.append(details);
+}
+
+function addPromptOption(parent, prompt) {
+  const row = document.createElement('div');
+  row.className = 'prompt-option-row';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'command-option';
+  button.title = `${prompt.description || 'prompt template'}${prompt.argumentHint ? ` · Usage: /${prompt.name} ${prompt.argumentHint}` : ''}`;
+  const name = document.createElement('strong');
+  name.textContent = prompt.name;
+  const detail = document.createElement('small');
+  detail.textContent = `${prompt.description || 'prompt template'}${prompt.argumentHint ? ` · ${prompt.argumentHint}` : ''}`;
+  button.append(name, detail);
+  button.addEventListener('click', () => openPromptTemplateForm(prompt));
+  row.append(button);
+  if (typeof prompt.filePath === 'string' && prompt.filePath) {
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'session-action';
+    edit.textContent = 'Edit';
+    edit.title = 'Open this prompt template for editing';
+    edit.addEventListener('click', () => post('openPromptTemplate', { filePath: prompt.filePath }));
+    row.append(edit);
+  }
+  parent.append(row);
+}
+
 function renderCommands() {
   ui.skillList.replaceChildren();
   ui.promptList.replaceChildren();
@@ -1051,7 +1237,7 @@ function renderCommands() {
     ui.promptList.append(empty);
   }
   for (const prompt of state.prompts) {
-    addCommandOption(ui.promptList, prompt.name, prompt.description, 'prompt template', prompt.argumentHint || '');
+    addPromptOption(ui.promptList, prompt);
   }
 }
 
@@ -1371,7 +1557,7 @@ window.addEventListener('message', (event) => {
     }
     case 'run-started':
       state.showWorking = true;
-      setBusy(true, 'Pi is working');
+      setBusy(true, data.activity || 'Pi is working', data.canStop !== false);
       break;
     case 'run-finished':
       if (state.streamIndex >= 0 && state.messages[state.streamIndex]) state.messages[state.streamIndex].streaming = false;
@@ -1487,6 +1673,10 @@ el('attach-range').addEventListener('click', () => post('attachRange'));
 el('attach-folder').addEventListener('click', () => post('attachFolder'));
 el('attach-diagnostics').addEventListener('click', () => post('attachDiagnostics'));
 el('attach-git').addEventListener('click', () => post('attachGit'));
+ui.newPromptTemplate.addEventListener('click', () => post('createPromptTemplate'));
+ui.reloadResources.addEventListener('click', () => post('reloadResources'));
+el('prompt-template-cancel').addEventListener('click', closePromptTemplateForm);
+el('prompt-template-use').addEventListener('click', usePromptTemplate);
 el('send').addEventListener('click', () => sendPrompt());
 el('stop').addEventListener('click', () => post('stop'));
 ui.dialogSubmit.addEventListener('click', () => {
@@ -1505,6 +1695,7 @@ ui.dialogInput.addEventListener('keydown', (event) => {
   }
 });
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !ui.promptTemplateLayer.hidden) closePromptTemplateForm();
   if (event.key === 'Escape' && !ui.dialogLayer.hidden) finishExtensionDialog(undefined);
   if (event.key === 'Escape' && !ui.chatSearchBar.hidden) {
     ui.chatSearchBar.hidden = true;

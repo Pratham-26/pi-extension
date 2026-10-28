@@ -35,8 +35,10 @@ type SessionLike = {
     refresh: (options?: { allowNetwork?: boolean }) => Promise<unknown>;
   };
   resourceLoader?: {
-    getSkills: () => { skills: Array<{ name: string; description?: string; disableModelInvocation?: boolean }>; diagnostics?: unknown[] };
-    getPrompts: () => { prompts: Array<{ name: string; description?: string; argumentHint?: string }>; diagnostics?: unknown[] };
+    getExtensions?: () => { errors?: Array<{ path?: string; error?: string }>; warnings?: Array<{ path?: string; warning?: string }> };
+    getSkills: () => { skills: Array<{ name: string; description?: string; disableModelInvocation?: boolean }>; diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
+    getPrompts: () => { prompts: Array<{ name: string; description?: string; argumentHint?: string; content?: string; filePath?: string }>; diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
+    getThemes?: () => { diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
   };
   getAvailableThinkingLevels?: () => string[];
   supportsThinking?: () => boolean;
@@ -67,6 +69,7 @@ type SessionLike = {
   clearQueue?: () => { steering: string[]; followUp: string[] };
   compact?: (customInstructions?: string) => Promise<unknown>;
   abortCompaction?: () => void;
+  reload?: () => Promise<void>;
   messages?: Array<{ role?: string; content?: unknown }>;
   subscribe: (listener: (event: any) => void) => () => void;
   prompt: (text: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }> }) => Promise<void>;
@@ -79,6 +82,7 @@ let session: SessionLike | undefined;
 let unsubscribe: (() => void) | undefined;
 let busy = false;
 let compacting = false;
+let reloadingResources = false;
 let defaultTools: string[] = [];
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
@@ -237,17 +241,49 @@ function sendOptions(): void {
     contextWindow: model.contextWindow,
     supportsImages: Boolean(model.input?.includes('image')),
   })) ?? [];
-  const skills = session.resourceLoader?.getSkills().skills.map((skill) => ({
-    name: skill.name,
-    description: skill.description ?? '',
+  const loadedSkills = session.resourceLoader?.getSkills();
+  const loadedPrompts = session.resourceLoader?.getPrompts();
+  const loadedExtensions = session.resourceLoader?.getExtensions?.();
+  const skills = loadedSkills?.skills.slice(0, 200).map((skill) => ({
+    name: skill.name.slice(0, 128),
+    description: (skill.description ?? '').slice(0, 1000),
     disabledForAutoInvoke: Boolean(skill.disableModelInvocation),
     canEnableAutoInvoke: !skillsDisabledBySource.has(skill.name),
   })) ?? [];
-  const prompts = session.resourceLoader?.getPrompts().prompts.map((prompt) => ({
-    name: prompt.name,
-    description: prompt.description ?? '',
-    argumentHint: prompt.argumentHint ?? '',
-  })) ?? [];
+  let promptContentBudget = 300_000;
+  const prompts = loadedPrompts?.prompts.slice(0, 100).map((prompt) => {
+    const content = (prompt.content ?? '').slice(0, Math.min(20_000, promptContentBudget));
+    promptContentBudget -= content.length;
+    return {
+      name: prompt.name.slice(0, 128),
+      description: (prompt.description ?? '').slice(0, 1000),
+      argumentHint: (prompt.argumentHint ?? '').slice(0, 300),
+      content,
+      contentTruncated: content.length < (prompt.content ?? '').length,
+      filePath: (prompt.filePath ?? '').slice(0, 4096),
+    };
+  }) ?? [];
+  const resourceDiagnostics: Array<{ resource: string; type: string; message: string; path?: string }> = [];
+  for (const item of (loadedExtensions?.errors ?? []).slice(0, 100)) {
+    resourceDiagnostics.push({ resource: 'Extension', type: 'error', message: (item.error ?? 'Extension failed to load').slice(0, 1000), path: item.path?.slice(0, 4096) });
+  }
+  for (const item of (loadedExtensions?.warnings ?? []).slice(0, 100)) {
+    resourceDiagnostics.push({ resource: 'Extension', type: 'warning', message: (item.warning ?? 'Extension warning').slice(0, 1000), path: item.path?.slice(0, 4096) });
+  }
+  for (const [resource, items] of [
+    ['Skill', loadedSkills?.diagnostics ?? []],
+    ['Prompt', loadedPrompts?.diagnostics ?? []],
+    ['Theme', session.resourceLoader?.getThemes?.().diagnostics ?? []],
+  ] as const) {
+    for (const item of items.slice(0, 100)) {
+      resourceDiagnostics.push({
+        resource,
+        type: item.type === 'error' ? 'error' : item.type === 'collision' ? 'warning' : 'warning',
+        message: (item.message ?? 'Resource diagnostic').slice(0, 1000),
+        path: item.path?.slice(0, 4096),
+      });
+    }
+  }
   const tools = session.getAllTools?.().map((tool) => ({
     name: tool.name,
     description: tool.description ?? '',
@@ -269,6 +305,7 @@ function sendOptions(): void {
     supportsThinking: session.supportsThinking?.() ?? false,
     skills,
     prompts,
+    resourceDiagnostics: resourceDiagnostics.slice(0, 100),
     tools,
     activeTools: session.getActiveToolNames?.() ?? [],
     defaultTools,
@@ -284,6 +321,8 @@ function bindSession(next: SessionLike): void {
   session?.dispose();
   session = next;
   busy = false;
+  compacting = false;
+  reloadingResources = false;
   defaultTools = next.getActiveToolNames?.() ?? [];
   const skillData = next.sessionManager?.getEntries()
     .filter((entry) => entry.type === 'custom' && entry.customType === 'pi-chat.session-settings')
@@ -527,6 +566,25 @@ async function handle(input: WorkerInput): Promise<void> {
         }
         return;
       }
+      case 'reloadResources': {
+        if (!session?.reload || busy) return;
+        busy = true;
+        reloadingResources = true;
+        send('run-started', { canStop: false, activity: 'Reloading Pi resources' });
+        try {
+          await session.reload();
+          send('notice', { message: 'Pi resources reloaded.' });
+        } finally {
+          reloadingResources = false;
+          if (busy) {
+            busy = false;
+            send('run-finished', { aborted: false, resourceReload: true });
+          }
+          snapshot();
+          sendOptions();
+        }
+        return;
+      }
       case 'exportSession': {
         if (!session) return;
         if (input.name === 'html' && session.exportToHtml) {
@@ -578,6 +636,7 @@ async function handle(input: WorkerInput): Promise<void> {
           session?.abortCompaction?.();
           return;
         }
+        if (reloadingResources) return;
         if (session && busy) await session.abort();
         if (busy) {
           busy = false;

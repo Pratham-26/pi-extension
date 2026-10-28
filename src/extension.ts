@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { lstat, open as openFile, realpath } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 
@@ -55,6 +56,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private sessionQuery = '';
   private activeSessionPath = '';
   private knownSessionPaths = new Set<string>();
+  private knownPromptPaths = new Set<string>();
+  private knownResourcePaths = new Set<string>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -63,6 +66,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.webviewMessageSubscription = undefined;
     const worker = this.worker;
     this.worker = undefined;
+    this.knownPromptPaths.clear();
+    this.knownResourcePaths.clear();
     if (worker) void worker.terminate();
   }
 
@@ -96,6 +101,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = undefined;
     this.workerWorkspace = undefined;
     this.knownSessionPaths.clear();
+    this.knownPromptPaths.clear();
+    this.knownResourcePaths.clear();
     this.activeSessionPath = '';
     if (previous) void previous.terminate();
     void this.ensureRuntime();
@@ -119,6 +126,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = undefined;
     if (previous) void previous.terminate();
     this.knownSessionPaths.clear();
+    this.knownPromptPaths.clear();
+    this.knownResourcePaths.clear();
     this.activeSessionPath = '';
 
     this.workerWorkspace = cwd;
@@ -160,6 +169,18 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             || Number(b['modified'] ?? 0) - Number(a['modified'] ?? 0));
         this.post({ ...message, sessions });
       } else if (message.type === 'options') {
+        const promptPaths = Array.isArray(message.prompts)
+          ? (message.prompts as Array<Record<string, unknown>>).map((prompt) => prompt.filePath)
+          : [];
+        this.knownPromptPaths = new Set(promptPaths
+          .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096)
+          .map((value) => this.normalizeSessionPath(value)));
+        const diagnosticPaths = Array.isArray(message.resourceDiagnostics)
+          ? (message.resourceDiagnostics as Array<Record<string, unknown>>).map((diagnostic) => diagnostic.path)
+          : [];
+        this.knownResourcePaths = new Set([...promptPaths, ...diagnosticPaths]
+          .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096)
+          .map((value) => this.normalizeSessionPath(value)));
         this.post({ ...message, presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
       } else {
         this.post(message);
@@ -346,6 +367,24 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (answer === 'Compact session') this.worker?.postMessage({ type: 'compactSession' });
         return;
       }
+      case 'reloadResources': {
+        const answer = await vscode.window.showWarningMessage(
+          'Reload Pi extensions, skills, prompts, and themes from your Pi configuration? Enabled extensions can run code during reload.',
+          { modal: true },
+          'Reload Pi resources',
+        );
+        if (answer === 'Reload Pi resources') this.worker?.postMessage({ type: 'reloadResources' });
+        return;
+      }
+      case 'openPromptTemplate':
+        await this.openPromptTemplate(message.filePath);
+        return;
+      case 'openResourceFile':
+        await this.openResourceFile(message.filePath);
+        return;
+      case 'createPromptTemplate':
+        await this.createPromptTemplate();
+        return;
       case 'addPreset':
         await this.addPreset(message);
         return;
@@ -736,6 +775,121 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'presets', presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
   }
 
+  private async openPromptTemplate(value: unknown): Promise<void> {
+    if (typeof value !== 'string' || value.length > 4096) return;
+    let normalized: string;
+    try {
+      normalized = this.normalizeSessionPath(value);
+    } catch {
+      return;
+    }
+    if (!this.knownPromptPaths.has(normalized)) {
+      this.post({ type: 'notice', message: 'That prompt template is no longer in Pi’s loaded resource list. Reload resources and try again.', isError: true });
+      return;
+    }
+    await this.openResourceDocument(value, 'prompt template');
+  }
+
+  private async openResourceFile(value: unknown): Promise<void> {
+    if (typeof value !== 'string' || value.length > 4096) return;
+    let normalized: string;
+    try {
+      normalized = this.normalizeSessionPath(value);
+    } catch {
+      return;
+    }
+    if (!this.knownResourcePaths.has(normalized)) {
+      this.post({ type: 'notice', message: 'That resource file is no longer in Pi’s diagnostic list. Reload resources and try again.', isError: true });
+      return;
+    }
+    await this.openResourceDocument(value, 'Pi resource');
+  }
+
+  private async openResourceDocument(value: string, label: string): Promise<void> {
+    try {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(value));
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      this.post({ type: 'notice', message: `Could not open the ${label}. ${error instanceof Error ? error.message : ''}`, isError: true });
+    }
+  }
+
+  private async createPromptTemplate(): Promise<void> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      this.post({ type: 'notice', message: 'Open a workspace before creating a project prompt template.' });
+      return;
+    }
+    if (workspace.uri.scheme !== 'file') {
+      this.post({ type: 'notice', message: 'Creating project prompt files is supported in local file workspaces.' });
+      return;
+    }
+    const directory = vscode.Uri.joinPath(workspace.uri, '.pi', 'prompts');
+    try {
+      for (const part of ['.pi', path.join('.pi', 'prompts')]) {
+        try {
+          if ((await lstat(path.join(workspace.uri.fsPath, part))).isSymbolicLink()) {
+            this.post({ type: 'notice', message: `The workspace prompt directory contains a symbolic link (${part}); no file was created.`, isError: true });
+            return;
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+      await vscode.workspace.fs.createDirectory(directory);
+      const realWorkspaceRoot = await realpath(workspace.uri.fsPath);
+      const realPromptDirectory = await realpath(directory.fsPath);
+      const directoryRelative = path.relative(realWorkspaceRoot, realPromptDirectory);
+      if (path.isAbsolute(directoryRelative) || directoryRelative === '..' || directoryRelative.startsWith(`..${path.sep}`)) {
+        this.post({ type: 'notice', message: 'The workspace prompt directory resolves outside the workspace.', isError: true });
+        return;
+      }
+      const name = await vscode.window.showInputBox({
+        prompt: 'Name the project prompt template',
+        placeHolder: 'review-change',
+        validateInput: (value) => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(value.trim())
+          ? undefined
+          : 'Use 1–64 letters, numbers, dots, underscores, or hyphens; begin with a letter or number.',
+      });
+      if (!name?.trim()) return;
+      const filePath = path.join(directory.fsPath, `${name.trim()}.md`);
+      const content = [
+        '---',
+        'description: Describe what this prompt does',
+        'argument-hint: <arguments>',
+        '---',
+        '',
+        'Write the prompt here. Use $ARGUMENTS for all supplied arguments, or $1, $2, and so on for positional arguments.',
+        '',
+      ].join('\n');
+      let file;
+      try {
+        file = await openFile(filePath, 'wx');
+        const realParentAfterOpen = await realpath(path.dirname(filePath));
+        const normalizeForComparison = (value: string) => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
+        if (normalizeForComparison(realParentAfterOpen) !== normalizeForComparison(realPromptDirectory)) {
+          this.post({ type: 'notice', message: 'The prompt directory changed while creating the file; no template content was written.', isError: true });
+          return;
+        }
+        await file.writeFile(content, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          this.post({ type: 'notice', message: 'That file already exists; it was not overwritten.' });
+          return;
+        }
+        throw error;
+      } finally {
+        await file?.close();
+      }
+      this.knownPromptPaths.add(this.normalizeSessionPath(filePath));
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+      await vscode.window.showTextDocument(document, { preview: false });
+      this.post({ type: 'notice', message: 'Prompt template created. Use Reload resources after saving it to load the new template.' });
+    } catch (error) {
+      this.post({ type: 'notice', message: `Could not create the prompt template. ${error instanceof Error ? error.message : ''}`, isError: true });
+    }
+  }
+
   private async reorderPresets(message: RuntimeMessage): Promise<void> {
     if (!Array.isArray(message.ids)) return;
     const presets = this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []);
@@ -1012,6 +1166,18 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           </div>
         </div>
       </section>
+      <section id="prompt-template-layer" class="extension-dialog-layer prompt-template-layer" aria-label="Prompt template form" hidden>
+        <div class="extension-dialog prompt-template-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-template-title">
+          <h2 id="prompt-template-title">Prompt template</h2>
+          <p id="prompt-template-description"></p>
+          <div id="prompt-template-fields" class="prompt-template-fields"></div>
+          <details class="prompt-template-preview" open><summary>Preview</summary><pre id="prompt-template-preview"></pre></details>
+          <div class="extension-dialog-actions">
+            <button id="prompt-template-cancel" class="text-button" type="button">Cancel</button>
+            <button id="prompt-template-use" class="send-button" type="button">Use template</button>
+          </div>
+        </div>
+      </section>
       <main id="messages" class="messages" aria-live="polite" aria-relevant="additions text">
         <div id="empty-state" class="empty-state">
           <div class="empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M9 6v12M15 6v12M15 6h5"/></svg></div>
@@ -1059,8 +1225,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <section id="skills-popover" class="control-popover skills-popover" aria-label="Skills and prompt templates" hidden>
               <div class="popover-heading"><strong>Skills</strong><span>Insert a slash command into the message</span></div>
               <div id="skill-list" class="option-list"></div>
-              <div class="popover-heading prompt-heading"><strong>Prompt templates</strong><span>Pi expands templates when sent</span></div>
+              <div class="popover-heading prompt-heading"><strong>Prompt templates</strong><div class="prompt-heading-actions"><button id="new-prompt-template" class="text-button" type="button" title="Create a project prompt template">New</button><button id="reload-pi-resources" class="text-button" type="button" title="Reload extensions, skills, prompts, and themes">Reload</button></div></div>
               <div id="prompt-list" class="option-list"></div>
+              <div id="resource-diagnostics" class="resource-diagnostics"></div>
             </section>
           </div>
           <textarea id="prompt" rows="1" aria-label="Message Pi" placeholder="Ask Pi anything"></textarea>
