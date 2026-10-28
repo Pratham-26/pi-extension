@@ -47,6 +47,7 @@ type WorkerInput = {
   enabled?: boolean;
   expectedEnabled?: boolean;
   value?: unknown;
+  defaultPreset?: unknown;
   provider?: string;
   providerId?: string;
   authType?: 'api_key' | 'oauth';
@@ -3767,14 +3768,32 @@ function titleFromFirstPrompt(prompt: string): string {
   return shortened || normalized.slice(0, 64).trim();
 }
 
-async function createSession(path?: string, forceNew = false): Promise<boolean> {
+type DefaultModelPreset = { provider: string; modelId: string; thinkingLevel?: string };
+
+function parseDefaultModelPreset(value: unknown): DefaultModelPreset | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const preset = value as Record<string, unknown>;
+  if (typeof preset.provider !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(preset.provider)
+    || typeof preset.modelId !== 'string' || !preset.modelId || preset.modelId.length > 256
+    || /[\u0000-\u001f\u007f]/.test(preset.modelId)
+    || (preset.thinkingLevel !== undefined
+      && (typeof preset.thinkingLevel !== 'string'
+        || !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(preset.thinkingLevel)))) return undefined;
+  return {
+    provider: preset.provider,
+    modelId: preset.modelId,
+    ...(typeof preset.thinkingLevel === 'string' ? { thinkingLevel: preset.thinkingLevel } : {}),
+  };
+}
+
+async function createSession(path?: string, forceNew = false, defaultPreset?: DefaultModelPreset): Promise<boolean> {
   while (sessionCreationPromise) {
     const pending = sessionCreationPromise;
     const opened = await pending;
     if (!forceNew && (!path || session?.sessionFile === path)) return opened;
   }
   if (!forceNew && !path && session) return true;
-  const pending = createSessionInternal(path);
+  const pending = createSessionInternal(path, defaultPreset);
   sessionCreationPromise = pending;
   try {
     return await pending;
@@ -3783,7 +3802,7 @@ async function createSession(path?: string, forceNew = false): Promise<boolean> 
   }
 }
 
-async function createSessionInternal(path?: string): Promise<boolean> {
+async function createSessionInternal(path?: string, defaultPreset?: DefaultModelPreset): Promise<boolean> {
   let createdSession: SessionLike | undefined;
   let createdExtensionsBound = false;
   try {
@@ -3839,6 +3858,26 @@ async function createSessionInternal(path?: string): Promise<boolean> {
     await resourceLoader.reload({ resolveProjectTrust: () => resolveProjectTrust(settingsManager) });
     const result = await createAgentSession({ cwd, sessionManager: manager, settingsManager, resourceLoader });
     createdSession = result.session as unknown as SessionLike;
+    if (!path && defaultPreset) {
+      const model = createdSession.modelRuntime?.getModel(defaultPreset.provider, defaultPreset.modelId);
+      if (model && createdSession.setModel) {
+        try {
+          await createdSession.setModel(model);
+          if (defaultPreset.thinkingLevel) {
+            const availableLevels = createdSession.getAvailableThinkingLevels?.() ?? [];
+            if (availableLevels.includes(defaultPreset.thinkingLevel) && createdSession.setThinkingLevel) {
+              createdSession.setThinkingLevel(defaultPreset.thinkingLevel);
+            } else {
+              send('notice', { message: 'The default preset model is available, but its saved reasoning level is not; using the model default.' });
+            }
+          }
+        } catch {
+          send('notice', { message: 'Could not select the default preset model; using Pi’s configured model default.' });
+        }
+      } else {
+        send('notice', { message: 'The default preset model is no longer available; using Pi’s configured model default.' });
+      }
+    }
     syncModelScope(createdSession);
     packageManager = createdSession.settingsManager
       ? new DefaultPackageManager({ cwd, agentDir: getAgentDir(), settingsManager: createdSession.settingsManager })
@@ -4195,7 +4234,7 @@ async function handle(input: WorkerInput): Promise<void> {
           return;
         }
         send('session-opening');
-        await createSession(undefined, true);
+        await createSession(undefined, true, parseDefaultModelPreset(input.defaultPreset));
         return;
       case 'initializeSession':
         if (busy || reloadingResources || authenticatingProvider || session) return;

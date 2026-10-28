@@ -216,6 +216,8 @@ const MAX_GIT_REVIEW_FILES = 500;
 const MAX_GIT_DIFF_CHARS = 500_000;
 const MAX_GIT_DRAFT_CHARS = 30_000;
 const MAX_GIT_DRAFT_FILES = 24;
+const MAX_MODEL_PRESETS = 32;
+const VALID_PRESET_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const MAX_TURN_BASELINE_WAIT_MS = 4_000;
 const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
 const MAX_RUNNING_SESSION_RECORD_BYTES = 8_192;
@@ -727,6 +729,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker?.postMessage({
       type: 'newSession',
       autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
+      defaultPreset: this.getDefaultModelPreset(),
     });
   }
 
@@ -1854,7 +1857,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           notificationSound: vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('sound', false),
           autoRefreshModels: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
           expandSuccessfulToolCalls: vscode.workspace.getConfiguration('piChat.transcript').get<boolean>('expandSuccessfulToolCalls', false),
-          presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []),
+          presets: this.readModelPresets(),
+          defaultPresetId: this.getDefaultModelPresetId(),
         });
       } else {
         this.post(message);
@@ -2619,6 +2623,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'managePreset':
         await this.managePreset(message);
+        return;
+      case 'setDefaultPreset':
+        await this.setDefaultModelPreset(message);
         return;
       case 'reorderPresets':
         await this.reorderPresets(message);
@@ -3897,38 +3904,118 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private readModelPresets(): ModelPreset[] {
+    const stored = this.context.workspaceState.get<unknown>('piChat.modelPresets', []);
+    if (!Array.isArray(stored)) return [];
+    const presets: ModelPreset[] = [];
+    const ids = new Set<string>();
+    for (const value of stored) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const item = value as Record<string, unknown>;
+      if (typeof item.id !== 'string' || !/^[a-f0-9]{16}$/.test(item.id) || ids.has(item.id)
+        || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 128
+        || /[\u0000-\u001f\u007f]/.test(item.name)
+        || typeof item.provider !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(item.provider)
+        || typeof item.modelId !== 'string' || !item.modelId || item.modelId.length > 256
+        || /[\u0000-\u001f\u007f]/.test(item.modelId)
+        || (item.thinkingLevel !== undefined
+          && (typeof item.thinkingLevel !== 'string' || !VALID_PRESET_THINKING_LEVELS.has(item.thinkingLevel)))) continue;
+      ids.add(item.id);
+      presets.push({
+        id: item.id,
+        name: item.name.trim(),
+        provider: item.provider,
+        modelId: item.modelId,
+        ...(typeof item.thinkingLevel === 'string' ? { thinkingLevel: item.thinkingLevel } : {}),
+      });
+      if (presets.length >= MAX_MODEL_PRESETS) break;
+    }
+    return presets;
+  }
+
+  private getDefaultModelPresetId(presets = this.readModelPresets()): string {
+    const stored = this.context.workspaceState.get<unknown>('piChat.defaultModelPresetId', '');
+    return typeof stored === 'string' && presets.some((preset) => preset.id === stored) ? stored : '';
+  }
+
+  private getDefaultModelPreset(): Omit<ModelPreset, 'id' | 'name'> | undefined {
+    const presets = this.readModelPresets();
+    const id = this.getDefaultModelPresetId(presets);
+    const preset = presets.find((item) => item.id === id);
+    return preset ? {
+      provider: preset.provider,
+      modelId: preset.modelId,
+      ...(preset.thinkingLevel ? { thinkingLevel: preset.thinkingLevel } : {}),
+    } : undefined;
+  }
+
+  private postModelPresets(): void {
+    const presets = this.readModelPresets();
+    this.post({ type: 'presets', presets, defaultPresetId: this.getDefaultModelPresetId(presets) });
+  }
+
   private async addPreset(message: RuntimeMessage): Promise<void> {
-    if (typeof message.provider !== 'string' || typeof message.modelId !== 'string') return;
-    const name = await vscode.window.showInputBox({ prompt: 'Name this model preset', placeHolder: 'Quick, Deep, Review…' });
-    if (!name?.trim()) return;
-    const presets = this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []);
+    if (typeof message.provider !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(message.provider)
+      || typeof message.modelId !== 'string' || !message.modelId || message.modelId.length > 256
+      || /[\u0000-\u001f\u007f]/.test(message.modelId)
+      || (message.thinkingLevel !== undefined
+        && (typeof message.thinkingLevel !== 'string' || !VALID_PRESET_THINKING_LEVELS.has(message.thinkingLevel)))) return;
+    const presets = this.readModelPresets();
+    if (presets.length >= MAX_MODEL_PRESETS) {
+      void vscode.window.showInformationMessage(`Keep up to ${MAX_MODEL_PRESETS} model presets in this workspace.`);
+      return;
+    }
+    const input = await vscode.window.showInputBox({ prompt: 'Name this model preset', placeHolder: 'Quick, Deep, Review…' });
+    const name = input?.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 48);
+    if (!name) return;
     presets.push({
       id: randomBytes(8).toString('hex'),
-      name: name.trim(),
+      name,
       provider: message.provider,
       modelId: message.modelId,
-      thinkingLevel: typeof message.thinkingLevel === 'string' ? message.thinkingLevel : undefined,
+      ...(typeof message.thinkingLevel === 'string' ? { thinkingLevel: message.thinkingLevel } : {}),
     });
     await this.context.workspaceState.update('piChat.modelPresets', presets);
-    this.post({ type: 'presets', presets });
+    this.postModelPresets();
   }
 
   private async managePreset(message: RuntimeMessage): Promise<void> {
     if (typeof message.id !== 'string') return;
-    const presets = this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []);
+    const presets = this.readModelPresets();
     const preset = presets.find((item) => item.id === message.id);
     if (!preset) return;
-    const action = await vscode.window.showQuickPick(['Rename', 'Remove'], { placeHolder: `Manage “${preset.name}”` });
+    const defaultPresetId = this.getDefaultModelPresetId(presets);
+    const defaultAction = preset.id === defaultPresetId ? 'Clear as default' : 'Set as default';
+    const action = await vscode.window.showQuickPick([defaultAction, 'Rename', 'Remove'], { placeHolder: `Manage “${preset.name}”` });
     if (!action) return;
-    if (action === 'Remove') {
+    if (action === 'Set as default' || action === 'Clear as default') {
+      await this.context.workspaceState.update('piChat.defaultModelPresetId', action === 'Set as default' ? preset.id : '');
+    } else if (action === 'Remove') {
       await this.context.workspaceState.update('piChat.modelPresets', presets.filter((item) => item.id !== preset.id));
+      if (preset.id === defaultPresetId) await this.context.workspaceState.update('piChat.defaultModelPresetId', '');
     } else {
-      const name = await vscode.window.showInputBox({ prompt: 'Rename this model preset', value: preset.name });
-      if (!name?.trim()) return;
-      preset.name = name.trim();
+      const input = await vscode.window.showInputBox({ prompt: 'Rename this model preset', value: preset.name });
+      const name = input?.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 48);
+      if (!name) return;
+      preset.name = name;
       await this.context.workspaceState.update('piChat.modelPresets', presets);
     }
-    this.post({ type: 'presets', presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
+    this.postModelPresets();
+  }
+
+  private async setDefaultModelPreset(message: RuntimeMessage): Promise<void> {
+    const presets = this.readModelPresets();
+    if (typeof message.id !== 'string') {
+      this.postModelPresets();
+      return;
+    }
+    const id = message.id;
+    if (id && !presets.some((preset) => preset.id === id)) {
+      this.postModelPresets();
+      return;
+    }
+    await this.context.workspaceState.update('piChat.defaultModelPresetId', id);
+    this.postModelPresets();
   }
 
   private async openPromptTemplate(value: unknown): Promise<void> {
@@ -5571,7 +5658,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   private async reorderPresets(message: RuntimeMessage): Promise<void> {
     if (!Array.isArray(message.ids)) return;
-    const presets = this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []);
+    const presets = this.readModelPresets();
     const byId = new Map(presets.map((preset) => [preset.id, preset]));
     const reordered = message.ids
       .filter((id): id is string => typeof id === 'string')
@@ -5579,7 +5666,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       .filter((preset): preset is ModelPreset => Boolean(preset));
     for (const preset of presets) if (!reordered.includes(preset)) reordered.push(preset);
     await this.context.workspaceState.update('piChat.modelPresets', reordered);
-    this.post({ type: 'presets', presets: reordered });
+    this.postModelPresets();
   }
 
   private async handleSessionExport(message: RuntimeMessage): Promise<void> {

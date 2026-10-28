@@ -89,6 +89,7 @@ const state = {
   chatSearchHits: [],
   chatSearchIndex: -1,
   presets: [],
+  defaultPresetId: '',
   thinkingLevel: '',
   thinkingLevels: [],
   supportsThinking: false,
@@ -744,6 +745,8 @@ function updateControls() {
     : 'Use the current model as Pi’s default for new sessions';
   el('refresh-models').disabled = state.busy;
   ui.presets.querySelectorAll('.preset-choice').forEach((button) => { button.disabled = button.dataset.available !== 'true' || state.busy; });
+  const defaultPresetSelect = ui.presets.querySelector('.preset-default-select');
+  if (defaultPresetSelect) defaultPresetSelect.disabled = !state.hasWorkspace || state.busy || state.presets.length === 0;
   ui.thinkingChoice.disabled = !state.hasSession || state.busy || state.thinkingLevels.length === 0;
   ui.compactSession.disabled = !state.hasSession || state.busy;
   ui.bookmarkToggle.disabled = !state.hasSession;
@@ -3003,6 +3006,7 @@ function renderModelChoices(data) {
   state.mcpEnabled = data.mcpEnabled === true;
   if (!state.mcpSettingPending) ui.mcpEnabled.checked = state.mcpEnabled;
   state.presets = Array.isArray(data.presets) ? data.presets : state.presets;
+  state.defaultPresetId = typeof data.defaultPresetId === 'string' ? data.defaultPresetId : '';
   const selectedKey = data.currentModel ? `${data.currentModel.provider}/${data.currentModel.id}` : '';
   const selectedModel = state.models.find((model) => `${model.provider}/${model.id}` === selectedKey);
   ui.modelToggle.textContent = selectedModel ? shorten(selectedModel.name || selectedModel.id, 30) : state.models.length ? 'Choose model' : 'No models';
@@ -3369,6 +3373,24 @@ function renderBranchPoints() {
 
 function renderPresets() {
   ui.presets.replaceChildren();
+  const defaultPreset = document.createElement('select');
+  defaultPreset.className = 'preset-default-select';
+  defaultPreset.setAttribute('aria-label', 'Default model preset for new chats');
+  defaultPreset.title = 'Choose the model and reasoning level for new chats';
+  const piDefault = document.createElement('option');
+  piDefault.value = '';
+  piDefault.textContent = 'New chats: Pi default';
+  defaultPreset.append(piDefault);
+  for (const preset of state.presets) {
+    const defaultOption = document.createElement('option');
+    defaultOption.value = preset.id;
+    defaultOption.textContent = `New chats: ${preset.name}`;
+    defaultPreset.append(defaultOption);
+  }
+  defaultPreset.value = state.defaultPresetId;
+  defaultPreset.disabled = !state.hasWorkspace || state.busy || state.presets.length === 0;
+  defaultPreset.addEventListener('change', () => post('setDefaultPreset', { id: defaultPreset.value }));
+  ui.presets.append(defaultPreset);
   for (const preset of state.presets) {
     const available = state.models.some((model) => model.provider === preset.provider && model.id === preset.modelId);
     const button = document.createElement('button');
@@ -4997,6 +5019,7 @@ window.addEventListener('message', (event) => {
       break;
     case 'presets':
       state.presets = Array.isArray(data.presets) ? data.presets : [];
+      state.defaultPresetId = typeof data.defaultPresetId === 'string' ? data.defaultPresetId : '';
       renderPresets();
       break;
     case 'queue':
@@ -5656,9 +5679,13 @@ function dismissComposerPopoversWhenPointerLeavesWebview(event) {
   if (event.relatedTarget == null) closeComposerPopovers();
 }
 
-// Handle outside clicks at the document boundary so dismissal does not depend
-// on a backdrop's stacking context or prevent the clicked control from working.
-document.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
+// Dismiss at the window capture boundary before a nested control can intercept
+// the event. Keeping this on the window also covers clicks anywhere in the
+// webview without requiring a backdrop that would block the clicked control.
+window.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
+// Chromium supports pointer events, but retain the mouse path for embedded
+// controls that expose only legacy mouse events.
+window.addEventListener('mousedown', dismissComposerPopoversFromOutside, true);
 // A press can start inside a popover (for example, while dragging) and end
 // outside it. Dismiss on release as well so that interaction cannot strand it.
 window.addEventListener('pointerup', dismissComposerPopoversFromOutside, true);

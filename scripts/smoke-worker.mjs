@@ -104,7 +104,10 @@ export default function (pi) {
     baseUrl: 'https://smoke.invalid/v1',
     apiKey: 'pi-chat-local-smoke-key',
     api: 'openai-completions',
-    models: [{ id: 'smoke-model', name: 'Local Smoke Model', reasoning: false, input: ['text'], contextWindow: 4096, maxTokens: 64 }],
+    models: [
+      { id: 'smoke-model', name: 'Local Smoke Model', reasoning: false, input: ['text'], contextWindow: 4096, maxTokens: 64 },
+      { id: 'smoke-model-alt', name: 'Alternate Smoke Model', reasoning: true, input: ['text'], contextWindow: 4096, maxTokens: 64 },
+    ],
     streamSimple(model, context) {
       const systemText = [context.systemPrompt, ...context.messages.filter((message) => message.role === 'system').flatMap((message) => [
         textOf(message.content),
@@ -147,14 +150,24 @@ export default function (pi) {
         api: 'openai-completions',
         apiKey: 'pi-chat-local-smoke-key',
         authHeader: true,
-        models: [{
-          id: 'smoke-model',
-          name: 'Local Smoke Model',
-          reasoning: false,
-          input: ['text'],
-          contextWindow: 4096,
-          maxTokens: 64,
-        }],
+        models: [
+          {
+            id: 'smoke-model',
+            name: 'Local Smoke Model',
+            reasoning: false,
+            input: ['text'],
+            contextWindow: 4096,
+            maxTokens: 64,
+          },
+          {
+            id: 'smoke-model-alt',
+            name: 'Alternate Smoke Model',
+            reasoning: true,
+            input: ['text'],
+            contextWindow: 4096,
+            maxTokens: 64,
+          },
+        ],
       },
     },
   }, null, 2));
@@ -347,7 +360,31 @@ export default function (pi) {
   const freshSessionToolOptions = await freshSessionToolOptionsPromise;
   assert.deepEqual(freshSessionToolOptions.activeTools, ['read'], 'new chats should use the configured default tool set');
 
-  console.log('Worker smoke check passed: prompt overrides, explicit resources, and theme discovery controls worked; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
+  const defaultPresetOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
+    && message.currentModel?.id === 'smoke-model-alt' && message.thinkingLevel === 'high'
+    && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'new-chat model preset');
+  worker.postMessage({
+    type: 'newSession',
+    autoNameSessions: false,
+    defaultPreset: { provider: 'pi-chat-smoke', modelId: 'smoke-model-alt', thinkingLevel: 'high' },
+  });
+  const defaultPresetOptions = await defaultPresetOptionsPromise;
+  assert.equal(defaultPresetOptions.currentModel.id, 'smoke-model-alt', 'new chats should apply the saved preset model');
+  assert.equal(defaultPresetOptions.thinkingLevel, 'high', 'new chats should apply the preset reasoning level when supported');
+
+  const fallbackNoticePromise = waitForWorkerMessage((message) => message?.type === 'notice'
+    && String(message.message).includes('default preset model is no longer available'), 'unavailable default preset fallback');
+  const fallbackOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
+    && message.currentModel?.id === 'smoke-model', 'Pi model default after preset fallback');
+  worker.postMessage({
+    type: 'newSession',
+    autoNameSessions: false,
+    defaultPreset: { provider: 'pi-chat-smoke', modelId: 'removed-smoke-model', thinkingLevel: 'high' },
+  });
+  const [fallbackNotice, fallbackOptions] = await Promise.all([fallbackNoticePromise, fallbackOptionsPromise]);
+  assert.ok(fallbackNotice && fallbackOptions, 'an unavailable preset model should leave the new chat on Pi’s configured model default');
+
+  console.log('Worker smoke check passed: prompt overrides, explicit resources, and theme discovery controls worked; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool and model preset defaults applied only to new sessions.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   const resolvedTemporaryRoot = resolve(temporaryRoot);

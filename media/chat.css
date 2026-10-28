@@ -537,6 +537,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .draft-row-actions .text-button, .draft-undo .text-button { padding: 3px 5px; font-size: 9px; }
 .draft-undo { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 5px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .model-presets { display: flex; gap: 4px; min-width: 0; margin: 0 0 6px; overflow-x: auto; scrollbar-width: thin; }
+.preset-default-select { flex: 0 0 auto; width: min(175px, 45vw); min-width: 0; height: 25px; padding: 0 5px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface-input); font-size: 10px; }
+.preset-default-select:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
+.preset-default-select:disabled { opacity: .55; }
 .preset-choice, .preset-add { flex: 0 0 auto; max-width: 18ch; padding: 4px 7px; overflow: hidden; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: transparent; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-size: 10px; }
 .preset-choice:hover:not(:disabled), .preset-add:hover:not(:disabled) { color: var(--text); border-color: var(--focus); }
 .preset-choice:disabled, .preset-add:disabled { opacity: .55; cursor: default; }
