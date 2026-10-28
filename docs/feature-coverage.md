@@ -33,11 +33,11 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 ## Sessions
 
-- [x] Create, list, search, rename, pin, color, reorder, reopen, export, and delete workspace sessions.
+- [x] Create, list, search, rename, pin, color, reorder, reopen, clone, export, and delete workspace sessions.
 - [~] Fork from a user message, edit earlier text/context prompts into a new branch, and navigate the current branch history; original image attachments cannot be restored into the editor.
 - [~] Session search is limited to the current workspace and session name/message text; it does not index all workspaces, thinking, or tool calls.
 - [ ] Multiple independent chat editor tabs, persisted tab restore, new chat beside a file, and open-latest-session preference.
-- [ ] Clone a session or auto-name a session.
+- [ ] Auto-name a session.
 - [ ] Git worktree sessions, setup commands, ignored-file copying, and safe worktree removal.
 - [ ] Group running sessions and expose live progress in the session list.
 - [ ] Export a redacted bug report with optional diagnostics.

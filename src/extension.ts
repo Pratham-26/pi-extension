@@ -49,6 +49,7 @@ export function activate(context: vscode.ExtensionContext): void {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
+    vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piChat.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.pi-chat-vscode')),
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.restartRuntime()),
     provider,
@@ -126,6 +127,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   async newSession(): Promise<void> {
     if (!this.worker) await this.ensureRuntime();
     this.worker?.postMessage({ type: 'newSession' });
+  }
+
+  async cloneSession(): Promise<void> {
+    if (!this.worker) await this.ensureRuntime();
+    this.worker?.postMessage({ type: 'cloneSession' });
   }
 
   restartRuntime(): void {
@@ -297,6 +303,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'newSession':
         await this.newSession();
+        return;
+      case 'cloneSession':
+        if (this.worker) this.worker.postMessage({ type: 'cloneSession' });
         return;
       case 'openSettings':
         await vscode.commands.executeCommand('piChat.openSettings');

@@ -65,6 +65,7 @@ type SessionLike = {
   sessionManager?: {
     getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
     getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown } }>;
+    getLeafId: () => string | null;
     appendCustomEntry: (customType: string, data?: unknown) => string;
     createBranchedSession: (leafId: string) => string | undefined;
     appendSessionInfo: (name: string) => string;
@@ -536,6 +537,33 @@ async function handle(input: WorkerInput): Promise<void> {
         send('session-opening');
         await createSession();
         return;
+      case 'cloneSession': {
+        if (busy || authenticatingProvider || !session?.sessionManager) return;
+        const leafId = session.sessionManager.getLeafId();
+        if (!leafId) {
+          send('notice', { message: 'Send a message before cloning this session.' });
+          return;
+        }
+        const carriedBookmarks = getSessionBookmarks();
+        const clonedPath = session.sessionManager.createBranchedSession(leafId);
+        if (!clonedPath) {
+          send('notice', { message: 'Pi could not create a copy of this session.' });
+          return;
+        }
+        send('session-opening');
+        await createSession(clonedPath);
+        if (carriedBookmarks.length && session?.sessionFile === clonedPath && session.sessionManager) {
+          const branchIds = new Set(session.sessionManager.buildContextEntries()
+            .filter((entry) => entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant'))
+            .map((entry) => entry.id));
+          const inherited = carriedBookmarks.filter((entryId) => branchIds.has(entryId));
+          if (inherited.length) {
+            session.sessionManager.appendCustomEntry('pi-chat.bookmarks', { entryIds: inherited });
+            snapshot();
+          }
+        }
+        return;
+      }
       case 'openSession':
         if (authenticatingProvider) {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
