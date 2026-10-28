@@ -34,6 +34,8 @@ const state = {
   commandCompletionRequestId: '',
   commandCompletionContext: undefined,
   commandCompletionSequence: 0,
+  mcpEnabled: false,
+  mcpSettingPending: false,
   runtimeSettings: { autoCompaction: false, autoRetry: false, cacheWarming: 'off' },
   models: [],
   modelSearch: '',
@@ -126,6 +128,8 @@ const ui = {
   autoCompaction: el('auto-compaction'),
   autoRetry: el('auto-retry'),
   cacheWarming: el('cache-warming'),
+  mcpEnabled: el('mcp-enabled'),
+  editMcpConfig: el('edit-mcp-config'),
   contextMeter: el('context-meter'),
   contextMeterFill: el('context-meter-fill'),
   contextMeterLabel: el('context-meter-label'),
@@ -302,6 +306,8 @@ function updateControls() {
   ui.autoCompaction.disabled = !state.hasSession || state.busy;
   ui.autoRetry.disabled = !state.hasSession || state.busy;
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
+  ui.mcpEnabled.disabled = !state.hasSession || state.busy || state.mcpSettingPending;
+  ui.editMcpConfig.disabled = !state.hasWorkspace || state.busy;
   ui.pinActiveFile.disabled = !state.hasWorkspace;
   for (const button of ui.messageList.querySelectorAll('.context-action')) button.disabled = state.busy;
   ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
@@ -898,6 +904,8 @@ function renderModelChoices(data) {
   ui.autoCompaction.checked = state.runtimeSettings.autoCompaction;
   ui.autoRetry.checked = state.runtimeSettings.autoRetry;
   ui.cacheWarming.value = state.runtimeSettings.cacheWarming;
+  state.mcpEnabled = data.mcpEnabled === true;
+  if (!state.mcpSettingPending) ui.mcpEnabled.checked = state.mcpEnabled;
   state.presets = Array.isArray(data.presets) ? data.presets : state.presets;
   const selectedKey = data.currentModel ? `${data.currentModel.provider}/${data.currentModel.id}` : '';
   const selectedModel = state.models.find((model) => `${model.provider}/${model.id}` === selectedKey);
@@ -1734,6 +1742,21 @@ window.addEventListener('message', (event) => {
     case 'command-completions':
       renderExtensionCommandCompletions(data);
       break;
+    case 'mcp-setting-pending':
+      state.mcpSettingPending = true;
+      updateControls();
+      break;
+    case 'mcp-setting-result':
+      state.mcpSettingPending = false;
+      if (typeof data.enabled === 'boolean') {
+        state.mcpEnabled = data.enabled;
+        ui.mcpEnabled.checked = data.enabled;
+      }
+      if (typeof data.error === 'string' && data.error) showNotice(data.error, true);
+      else if (data.enabled === true) showNotice('Configured Pi MCP servers are enabled for the active session.', false);
+      else if (data.enabled === false) showNotice('Configured Pi MCP servers are disabled for the active session.', false);
+      updateControls();
+      break;
     case 'presets':
       state.presets = Array.isArray(data.presets) ? data.presets : [];
       renderPresets();
@@ -1836,7 +1859,7 @@ window.addEventListener('message', (event) => {
       summary.textContent = `Running ${data.name || 'tool'}`;
       const output = document.createElement('pre');
       output.className = 'tool-output';
-      output.textContent = JSON.stringify(data.args || {}, null, 2);
+      output.textContent = typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}';
       detail.append(summary, output);
       const toolMessage = { role: 'tool', node: detail };
       state.messages.push(toolMessage);
@@ -2059,6 +2082,12 @@ ui.cacheWarming.addEventListener('change', () => {
 });
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
 ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));
+ui.editMcpConfig.addEventListener('click', () => post('openMcpConfig'));
+ui.mcpEnabled.addEventListener('change', () => {
+  state.mcpSettingPending = true;
+  updateControls();
+  post('setMcpEnabled', { enabled: ui.mcpEnabled.checked });
+});
 ui.thinkingChoice.addEventListener('change', () => post('setThinkingLevel', { thinkingLevel: ui.thinkingChoice.value }));
 ui.toolsToggle.addEventListener('click', () => {
   const open = ui.toolsPopover.hidden;

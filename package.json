@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -86,6 +86,11 @@
           "type": "boolean",
           "default": false,
           "description": "Include the active workspace Git branch and changed file names with each message."
+        },
+        "piChat.mcp.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Connect enabled servers from Pi MCP configuration after an explicit confirmation."
         },
         "piChat.notifications.runFinished": {
           "type": "boolean",

@@ -4,7 +4,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 ## Pi runtime, models, and settings
 
-- [x] Use Pi's SDK and the user's existing Pi configuration, credentials, extensions, skills, prompt templates, and workspace session files.
+- [x] Use Pi's SDK and the user's existing Pi configuration, credentials, extensions, skills, prompt templates, and workspace session files; request trust before loading project-local Pi resources.
 - [x] Pick an available model; show provider, context-window size, and image support.
 - [x] Search models by provider, name, ID, or vision support; refresh manually and watch `models.json` for updates.
 - [x] Choose a thinking level supported by the selected model.
@@ -62,7 +62,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [~] Support extension select/confirm/input/editor dialogs, notices, status values, plain-text widgets, and composer text. Concurrent dialogs, timeouts/signals, custom components, renderers, terminal cards, checklist/plan presentation, and native subagent UI are missing.
 - [~] Show and open extension load-error sources and reload Pi resources; package-manager controls are missing.
 - [~] Browse registered Pi extension commands and request their argument suggestions; completion code runs only after a user click, suggestions only fill the composer, and package-management controls remain unavailable.
-- [ ] MCP server manager and supported web/MCP tool cards.
+- [~] Opt-in connections from Pi's MCP configuration, project trust gating, status/login/reconnect through `/mcp`, and generic tool cards; graphical server controls and per-server exposure edits remain in `mcp.json`.
 - [ ] Recognize supported subagent tools and show their runs, transcripts, and controls.
 
 ## Git review, notifications, and privacy

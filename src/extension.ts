@@ -73,6 +73,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private availableProviders: ProviderSetup[] = [];
   private modelsConfigPath = '';
   private settingsConfigPath = '';
+  private mcpConfigPath = '';
+  private pendingMcpSetting?: { worker: Worker; requestId: string; enabled: boolean; previous: boolean };
   private providerAuthPromptCancels = new Map<string, { worker: Worker; cancel: () => void }>();
   private activeEditorSubscription: vscode.Disposable;
   private selectionSubscription: vscode.Disposable;
@@ -101,7 +103,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.availableProviders = [];
     this.modelsConfigPath = '';
     this.settingsConfigPath = '';
-    if (worker) void worker.terminate();
+    this.mcpConfigPath = '';
+    this.failPendingMcpSetting(worker);
+    if (worker) this.stopWorker(worker);
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -145,8 +149,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.availableProviders = [];
     this.modelsConfigPath = '';
     this.settingsConfigPath = '';
+    this.mcpConfigPath = '';
     this.activeSessionPath = '';
-    if (previous) void previous.terminate();
+    this.failPendingMcpSetting(previous);
+    if (previous) this.stopWorker(previous);
     void this.ensureRuntime();
     this.publishPinnedActiveFile();
   }
@@ -169,18 +175,26 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const previous = this.worker;
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.worker = undefined;
-    if (previous) void previous.terminate();
+    this.failPendingMcpSetting(previous);
+    if (previous) this.stopWorker(previous);
     this.knownSessionPaths.clear();
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
     this.modelsConfigPath = '';
     this.settingsConfigPath = '';
+    this.mcpConfigPath = '';
+    this.pendingMcpSetting = undefined;
     this.activeSessionPath = '';
 
     this.workerWorkspace = cwd;
     const workerUri = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'pi-worker.mjs');
-    const worker = new Worker(workerUri.fsPath, { workerData: { cwd } });
+    const worker = new Worker(workerUri.fsPath, {
+      workerData: {
+        cwd,
+        mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
+      },
+    });
     this.worker = worker;
     worker.on('message', (message: RuntimeMessage) => {
       if (this.worker !== worker) return;
@@ -202,6 +216,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         }
       } else if (message.type === 'provider-auth-event') {
         void this.handleProviderAuthEvent(message, worker);
+      } else if (message.type === 'project-trust-request') {
+        void this.handleProjectTrustRequest(message, worker);
+      } else if (message.type === 'mcp-open-url') {
+        void this.handleMcpOpenUrl(message, worker);
+      } else if (message.type === 'mcp-setting-applied' || message.type === 'mcp-setting-failed') {
+        void this.handleMcpSettingResult(message, worker);
       } else if (message.type === 'session-exported') {
         void this.handleSessionExport(message);
       } else if (message.type === 'sessions' && Array.isArray(message.sessions)) {
@@ -251,6 +271,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           && path.isAbsolute(message.settingsConfigPath)
           ? path.resolve(message.settingsConfigPath)
           : '';
+        this.mcpConfigPath = typeof message.mcpConfigPath === 'string'
+          && message.mcpConfigPath.length <= 4096
+          && path.isAbsolute(message.mcpConfigPath)
+          ? path.resolve(message.mcpConfigPath)
+          : '';
         const promptPaths = Array.isArray(message.prompts)
           ? (message.prompts as Array<Record<string, unknown>>).map((prompt) => prompt.filePath)
           : [];
@@ -263,7 +288,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.knownResourcePaths = new Set([...promptPaths, ...diagnosticPaths]
           .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 4096)
           .map((value) => this.normalizeSessionPath(value)));
-        const { modelsConfigPath: _modelsConfigPath, settingsConfigPath: _settingsConfigPath, ...safeMessage } = message;
+        const { modelsConfigPath: _modelsConfigPath, settingsConfigPath: _settingsConfigPath, mcpConfigPath: _mcpConfigPath, ...safeMessage } = message;
         this.post({ ...safeMessage, presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []) });
       } else {
         this.post(message);
@@ -279,6 +304,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.worker = undefined;
         this.cancelProviderAuthPrompts(worker);
       }
+      this.failPendingMcpSetting(worker);
       if (this.workerWorkspace === cwd && code !== 0) {
         this.post({ type: 'runtime-error', message: `The Pi runtime exited with code ${code}.` });
       }
@@ -530,6 +556,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openPiSettings':
         await this.openPiSettings();
+        return;
+      case 'openMcpConfig':
+        await this.openMcpConfig();
+        return;
+      case 'setMcpEnabled':
+        await this.setMcpEnabled(message);
         return;
       case 'createPromptTemplate':
         await this.createPromptTemplate();
@@ -1194,6 +1226,113 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handleProjectTrustRequest(message: RuntimeMessage, worker: Worker): Promise<void> {
+    if (this.worker !== worker || typeof message.requestId !== 'string' || message.requestId.length > 128) return;
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder || typeof message.cwd !== 'string' || !this.workerWorkspace
+      || this.normalizeSessionPath(folder.uri.fsPath) !== this.normalizeSessionPath(this.workerWorkspace)
+      || this.normalizeSessionPath(message.cwd) !== this.normalizeSessionPath(this.workerWorkspace)) {
+      worker.postMessage({ type: 'extensionUiResponse', requestId: message.requestId, value: undefined });
+      return;
+    }
+    const parent = path.dirname(folder.uri.fsPath);
+    const options: Array<{ label: string; description: string; value: string }> = [
+      { label: 'Trust this workspace', description: 'Remember this choice. Pi can load project settings, extensions, MCP servers, skills, prompts, and themes.', value: 'trust' },
+      { label: 'Trust this workspace for this session only', description: 'Allow project resources for the current Pi session without saving a trust decision.', value: 'trust-session' },
+    ];
+    if (parent !== folder.uri.fsPath) {
+      options.push({ label: 'Trust the parent folder', description: `Remember trust for ${parent}`, value: 'trust-parent' });
+    }
+    options.push(
+      { label: 'Do not trust this workspace', description: 'Remember this choice and ignore project-local Pi resources.', value: 'deny' },
+      { label: 'Do not trust for this session', description: 'Ignore project-local Pi resources in this session.', value: 'deny-session' },
+    );
+    try {
+      const choice = await vscode.window.showQuickPick(options, {
+        title: 'Trust Pi resources in this workspace?',
+        placeHolder: folder.uri.fsPath,
+        ignoreFocusOut: true,
+      });
+      if (this.worker === worker) {
+        worker.postMessage({ type: 'extensionUiResponse', requestId: message.requestId, value: choice?.value });
+      }
+    } catch {
+      if (this.worker === worker) worker.postMessage({ type: 'extensionUiResponse', requestId: message.requestId, value: undefined });
+    }
+  }
+
+  private async handleMcpOpenUrl(message: RuntimeMessage, worker: Worker): Promise<void> {
+    if (this.worker !== worker) return;
+    const uri = this.safeProviderUri(message.url);
+    if (!uri) {
+      this.post({ type: 'notice', message: 'Pi MCP sign-in returned a URL that cannot be opened safely.', isError: true });
+      return;
+    }
+    try {
+      await vscode.env.openExternal(uri);
+    } catch {
+      this.post({ type: 'notice', message: 'Could not open the Pi MCP sign-in page.', isError: true });
+    }
+  }
+
+  private async setMcpEnabled(message: RuntimeMessage): Promise<void> {
+    if (typeof message.enabled !== 'boolean') return;
+    const worker = this.worker;
+    const current = vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false);
+    if (!worker) {
+      this.post({ type: 'mcp-setting-result', enabled: current, error: 'Open a Pi session before changing MCP settings.' });
+      return;
+    }
+    if (this.pendingMcpSetting) return;
+    if (message.enabled === current) {
+      this.post({ type: 'mcp-setting-result', enabled: current });
+      return;
+    }
+    if (message.enabled) {
+      const answer = await vscode.window.showWarningMessage(
+        'Connect enabled servers from the Pi MCP configuration? Stdio servers can launch local commands, and HTTP servers contact remote services. Project MCP configuration remains subject to Pi project trust.',
+        { modal: true },
+        'Connect MCP servers',
+      );
+      if (answer !== 'Connect MCP servers') {
+        this.post({ type: 'mcp-setting-result', enabled: current });
+        return;
+      }
+    }
+    if (this.worker !== worker) {
+      this.post({ type: 'mcp-setting-result', enabled: current, error: 'The Pi runtime changed. Try again.' });
+      return;
+    }
+    const requestId = randomBytes(12).toString('hex');
+    this.pendingMcpSetting = { worker, requestId, enabled: message.enabled, previous: current };
+    this.post({ type: 'mcp-setting-pending' });
+    worker.postMessage({ type: 'setMcpEnabled', enabled: message.enabled, requestId });
+  }
+
+  private async handleMcpSettingResult(message: RuntimeMessage, worker: Worker): Promise<void> {
+    const pending = this.pendingMcpSetting;
+    if (!pending || pending.worker !== worker || pending.requestId !== message.requestId || this.worker !== worker) return;
+    this.pendingMcpSetting = undefined;
+    if (message.type === 'mcp-setting-failed') {
+      this.post({
+        type: 'mcp-setting-result',
+        enabled: pending.previous,
+        error: typeof message.message === 'string' ? message.message.slice(0, 300) : 'Pi could not apply the MCP setting.',
+      });
+      return;
+    }
+    try {
+      await vscode.workspace.getConfiguration('piChat').update('mcp.enabled', pending.enabled, vscode.ConfigurationTarget.Global);
+      this.post({ type: 'mcp-setting-result', enabled: pending.enabled });
+    } catch {
+      this.post({
+        type: 'mcp-setting-result',
+        enabled: pending.enabled,
+        error: 'Could not save this choice in VS Code settings. The active session keeps the selected value until it closes.',
+      });
+    }
+  }
+
   private safeProviderUri(value: unknown): vscode.Uri | undefined {
     if (typeof value !== 'string' || value.length > 2048) return undefined;
     try {
@@ -1230,6 +1369,19 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       'settings file',
       '{}\n',
       'Create Pi’s settings file? This file changes Pi behavior for all sessions that use this configuration.',
+    );
+  }
+
+  private async openMcpConfig(): Promise<void> {
+    if (!this.mcpConfigPath || !path.isAbsolute(this.mcpConfigPath)) {
+      this.post({ type: 'notice', message: 'Pi did not provide an MCP configuration path. Open a chat, then try again.', isError: true });
+      return;
+    }
+    await this.openPiConfigFile(
+      this.mcpConfigPath,
+      'MCP configuration file',
+      `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`,
+      'Create Pi’s MCP configuration file? Enabled stdio entries can launch local programs and HTTP entries can contact remote services when MCP is enabled in Pi Chat.',
     );
   }
 
@@ -1511,6 +1663,26 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     if (webview) void webview.postMessage(message);
   }
 
+  private stopWorker(worker: Worker): void {
+    if (worker.threadId === -1) return;
+    try {
+      worker.postMessage({ type: 'dispose' });
+    } catch {
+      void worker.terminate();
+      return;
+    }
+    const timeout = setTimeout(() => { void worker.terminate(); }, 5000);
+    timeout.unref?.();
+    worker.once('exit', () => clearTimeout(timeout));
+  }
+
+  private failPendingMcpSetting(worker?: Worker): void {
+    const pending = this.pendingMcpSetting;
+    if (!pending || (worker && pending.worker !== worker)) return;
+    this.pendingMcpSetting = undefined;
+    this.post({ type: 'mcp-setting-result', enabled: pending.previous, error: 'The Pi runtime stopped before the MCP setting was applied.' });
+  }
+
   private getHtml(webview: vscode.Webview): string {
     const nonce = randomBytes(16).toString('base64');
     const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'));
@@ -1668,6 +1840,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
                 <label class="runtime-setting cache-warming-setting" for="cache-warming"><span>Cache warming</span><select id="cache-warming"><option value="off">Off</option><option value="streaming">While streaming</option><option value="idle">Between runs</option></select></label>
                 <p class="runtime-settings-note">These choices affect Pi sessions using your global settings. Cache warming sends extra provider requests and may cost money.</p>
+                <div class="popover-heading extension-command-heading"><strong>MCP servers</strong><span>Configured connections are off until you enable them here</span></div>
+                <label class="runtime-setting"><input id="mcp-enabled" type="checkbox"><span>Connect configured MCP servers</span></label>
+                <button id="edit-mcp-config" class="text-button" type="button">Open global mcp.json</button>
+                <p class="runtime-settings-note">Enabled stdio entries can launch local programs; HTTP entries contact remote services. Pi’s project trust rules still apply. Use <code>/mcp</code> to inspect connections and sign in; edit the file and reload resources to change server settings.</p>
               </section>
               <div id="model-list" class="option-list" role="listbox" aria-label="Available models"></div>
             </section>

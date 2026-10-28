@@ -1,7 +1,18 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
-import { createAgentSession, getAgentDir, SessionManager } from '@earendil-works/pi-coding-agent';
+import {
+  createAgentSession,
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
+  DefaultResourceLoader,
+  getAgentDir,
+  hasTrustRequiringProjectResources,
+  ProjectTrustStore,
+  SessionManager,
+  SettingsManager,
+} from '@earendil-works/pi-coding-agent';
 
 type WorkerInput = {
   type: string;
@@ -16,6 +27,7 @@ type WorkerInput = {
   commandName?: string;
   argumentPrefix?: string;
   requestId?: string;
+  enabled?: boolean;
   value?: unknown;
   provider?: string;
   providerId?: string;
@@ -89,12 +101,14 @@ type SessionLike = {
   exportToJsonl?: () => string;
   extensionRunner?: {
     setUIContext: (ui: any, mode?: 'tui' | 'rpc' | 'json' | 'print') => void;
+    emit?: (event: { type: 'session_shutdown'; reason: 'quit' | 'reload' }) => Promise<unknown>;
     getRegisteredCommands?: () => Array<{
       invocationName: string;
       description?: string;
       getArgumentCompletions?: (prefix: string) => unknown;
     }>;
   };
+  bindExtensions?: (bindings: Record<string, unknown>) => Promise<void>;
   setModel?: (model: unknown) => Promise<void>;
   setThinkingLevel?: (level: any) => void;
   steer?: (text: string, images?: Array<{ type: 'image'; data: string; mimeType: string }>) => Promise<unknown>;
@@ -111,7 +125,10 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const cwd = String((workerData as { cwd?: string } | undefined)?.cwd ?? process.cwd());
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean } | undefined;
+const cwd = String(workerOptions?.cwd ?? process.cwd());
+let mcpEnabled = workerOptions?.mcpEnabled === true;
+const MAX_TOOL_UI_CHARS = 100_000;
 let session: SessionLike | undefined;
 let unsubscribe: (() => void) | undefined;
 let busy = false;
@@ -120,12 +137,14 @@ let reloadingResources = false;
 let authenticatingProvider = false;
 let providerAuthController: AbortController | undefined;
 let defaultTools: string[] = [];
+let sessionExtensionsBound = false;
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
 let sessionQuery = '';
 let uiRequestSequence = 0;
 let modelWatcher: FSWatcher | undefined;
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let disposing = false;
 const pendingUiRequests = new Map<string, (value: unknown) => void>();
 const pendingProviderAuthRequests = new Set<string>();
 
@@ -142,18 +161,74 @@ function contentText(content: unknown): string {
     .join('');
 }
 
+function boundedToolValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return value.length <= 8000 ? value : `${value.slice(0, 8000)}\n[value truncated]`;
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (depth >= 5) return '[nested value omitted]';
+  if (Array.isArray(value)) {
+    const result = value.slice(0, 50).map((item) => boundedToolValue(item, depth + 1));
+    if (value.length > result.length) result.push(`[${value.length - result.length} more items omitted]`);
+    return result;
+  }
+  if (typeof value === 'object') {
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    let count = 0;
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      if (count >= 50) {
+        result['[remaining properties]'] = 'omitted';
+        break;
+      }
+      result[key.slice(0, 128)] = boundedToolValue((value as Record<string, unknown>)[key], depth + 1);
+      count += 1;
+    }
+    return result;
+  }
+  return String(value).slice(0, 8000);
+}
+
 function toolOutput(result: unknown): string {
-  if (typeof result === 'string') return result;
+  if (typeof result === 'string') return limitToolUiText(result);
   if (result && typeof result === 'object' && Array.isArray((result as { content?: unknown[] }).content)) {
-    return (result as { content: Array<{ type?: string; text?: string }> }).content
-      .map((part) => part.type === 'text' ? part.text ?? '' : part.type === 'image' ? '[image output]' : '')
-      .filter(Boolean)
-      .join('\n');
+    const output: string[] = [];
+    let remaining = MAX_TOOL_UI_CHARS;
+    const content = (result as { content: unknown[] }).content;
+    const parts = content.slice(0, 1000);
+    for (const item of parts) {
+      if (!item || typeof item !== 'object') continue;
+      const part = item as { type?: string; text?: string };
+      const text = part.type === 'text' && typeof part.text === 'string' ? part.text : part.type === 'image' ? '[image output]' : '';
+      if (!text) continue;
+      if (text.length > remaining) {
+        output.push(`${text.slice(0, remaining)}\n[tool output truncated]`);
+        break;
+      }
+      output.push(text);
+      remaining -= text.length + 1;
+      if (remaining <= 0) {
+        output.push('[tool output truncated]');
+        break;
+      }
+    }
+    if (content.length > parts.length && remaining > 0) output.push(`[${content.length - parts.length} more output parts omitted]`);
+    return output.join('\n');
   }
   try {
-    return JSON.stringify(result ?? '', null, 2);
+    return limitToolUiText(JSON.stringify(boundedToolValue(result ?? ''), null, 2));
   } catch {
-    return String(result);
+    return '[tool output unavailable]';
+  }
+}
+
+function limitToolUiText(value: string): string {
+  return value.length <= MAX_TOOL_UI_CHARS ? value : `${value.slice(0, MAX_TOOL_UI_CHARS)}\n[tool output truncated]`;
+}
+
+function toolArgsPreview(args: unknown): string {
+  try {
+    return limitToolUiText(JSON.stringify(boundedToolValue(args ?? {}), null, 2));
+  } catch {
+    return '[tool arguments unavailable]';
   }
 }
 
@@ -163,6 +238,40 @@ function requestExtensionUi(kind: string, title: string, payload: Record<string,
     pendingUiRequests.set(requestId, resolve);
     send('extension-ui-request', { requestId, kind, title, ...payload });
   });
+}
+
+async function resolveProjectTrust(settingsManager: SettingsManager): Promise<boolean> {
+  if (!hasTrustRequiringProjectResources(cwd)) return true;
+  const trustStore = new ProjectTrustStore(getAgentDir());
+  const storedDecision = trustStore.get(cwd);
+  if (storedDecision !== null) return storedDecision;
+  const defaultDecision = settingsManager.getDefaultProjectTrust();
+  if (defaultDecision === 'always') return true;
+  if (defaultDecision === 'never') return false;
+
+  const requestId = `pi-project-trust-${++uiRequestSequence}`;
+  const choice = await new Promise<string | undefined>((resolve) => {
+    pendingUiRequests.set(requestId, (value) => resolve(typeof value === 'string' ? value : undefined));
+    send('project-trust-request', { requestId, cwd });
+  });
+  if (choice === 'trust') {
+    trustStore.set(cwd, true);
+    return true;
+  }
+  if (choice === 'trust-parent') {
+    const parent = join(cwd, '..');
+    trustStore.setMany([
+      { path: parent, decision: true },
+      { path: cwd, decision: null },
+    ]);
+    return true;
+  }
+  if (choice === 'trust-session') return true;
+  if (choice === 'deny') {
+    trustStore.set(cwd, false);
+    return false;
+  }
+  return false;
 }
 
 function requestProviderAuthPrompt(prompt: any): Promise<unknown> {
@@ -394,11 +503,14 @@ function sendOptions(): void {
       });
     }
   }
-  const tools = session.getAllTools?.().map((tool) => ({
-    name: tool.name,
-    description: tool.description ?? '',
-    namespace: tool.namespace?.name ?? '',
-  })) ?? [];
+  const tools = session.getAllTools?.().slice(0, 1000).flatMap((tool) => {
+    if (typeof tool.name !== 'string' || !tool.name || tool.name.length > 128) return [];
+    return [{
+      name: tool.name,
+      description: (tool.description ?? '').slice(0, 1000),
+      namespace: (tool.namespace?.name ?? '').slice(0, 128),
+    }];
+  }) ?? [];
   const currentBranchIds = new Set(session.sessionManager?.getBranch().map((entry) => entry.id) ?? []);
   const branchPoints = session.sessionManager?.getEntries()
     .filter((entry) => entry.type === 'message' && entry.message?.role === 'user')
@@ -416,8 +528,10 @@ function sendOptions(): void {
     },
     providers: providers.filter((provider) => provider.supportsApiKey || provider.supportsOAuth),
     extensionCommands,
+    mcpEnabled,
     modelsConfigPath: join(getAgentDir(), 'models.json'),
     settingsConfigPath: join(getAgentDir(), 'settings.json'),
+    mcpConfigPath: join(getAgentDir(), 'mcp.json'),
     currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
     thinkingLevel: session.thinkingLevel,
     thinkingLevels: session.getAvailableThinkingLevels?.() ?? [],
@@ -433,15 +547,23 @@ function sendOptions(): void {
   });
 }
 
-function bindSession(next: SessionLike): void {
+async function bindSession(next: SessionLike, extensionsBound = false): Promise<void> {
   providerAuthController?.abort();
   providerAuthController = undefined;
   for (const resolve of pendingUiRequests.values()) resolve(undefined);
   pendingUiRequests.clear();
   pendingProviderAuthRequests.clear();
+  if (session && sessionExtensionsBound) {
+    try {
+      await session.extensionRunner?.emit?.({ type: 'session_shutdown', reason: 'reload' });
+    } catch {
+      // Dispose the old session even if an extension shutdown hook fails.
+    }
+  }
   unsubscribe?.();
   session?.dispose();
   session = next;
+  sessionExtensionsBound = extensionsBound;
   busy = false;
   compacting = false;
   reloadingResources = false;
@@ -469,22 +591,23 @@ function bindSession(next: SessionLike): void {
         send('activity', { message: 'Pi is thinking' });
       }
     } else if (event.type === 'tool_execution_start') {
+      const toolName = String(event.toolName ?? 'tool').slice(0, 128);
       send('tool-start', {
-        id: String(event.toolCallId ?? `${Date.now()}`),
-        name: String(event.toolName ?? 'tool'),
-        args: event.args ?? {},
+        id: String(event.toolCallId ?? `${Date.now()}`).slice(0, 256),
+        name: toolName,
+        argsPreview: toolArgsPreview(event.args),
       });
-      send('activity', { message: `Running ${String(event.toolName ?? 'tool')}` });
+      send('activity', { message: `Running ${toolName}` });
     } else if (event.type === 'tool_execution_update') {
       send('tool-update', {
-        id: String(event.toolCallId ?? ''),
-        name: String(event.toolName ?? 'tool'),
+        id: String(event.toolCallId ?? '').slice(0, 256),
+        name: String(event.toolName ?? 'tool').slice(0, 128),
         result: toolOutput(event.partialResult),
       });
     } else if (event.type === 'tool_execution_end') {
       send('tool-end', {
-        id: String(event.toolCallId ?? ''),
-        name: String(event.toolName ?? 'tool'),
+        id: String(event.toolCallId ?? '').slice(0, 256),
+        name: String(event.toolName ?? 'tool').slice(0, 128),
         result: toolOutput(event.result),
         isError: Boolean(event.isError),
       });
@@ -525,17 +648,55 @@ async function listSessions(query = sessionQuery): Promise<void> {
   }
 }
 
-async function createSession(path?: string): Promise<void> {
+async function createSession(path?: string): Promise<boolean> {
+  let createdSession: SessionLike | undefined;
+  let createdExtensionsBound = false;
   try {
     const manager = path ? SessionManager.open(path) : SessionManager.create(cwd);
-    const result = await createAgentSession({ cwd, sessionManager: manager });
-    bindSession(result.session as unknown as SessionLike);
+    const settingsManager = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
+    const extensionFactories = mcpEnabled
+      ? [createCodemodeExtension(), createToolSearchExtension(), createMcpExtension({
+        openUrl: (url) => send('mcp-open-url', { url: String(url).slice(0, 2048) }),
+      })]
+      : [];
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir: getAgentDir(),
+      settingsManager,
+      extensionFactories,
+      disabledBuiltinExtensions: ['mcp'],
+    });
+    await resourceLoader.reload({ resolveProjectTrust: () => resolveProjectTrust(settingsManager) });
+    const result = await createAgentSession({ cwd, sessionManager: manager, settingsManager, resourceLoader });
+    createdSession = result.session as unknown as SessionLike;
+    if (mcpEnabled) {
+      installExtensionUi(createdSession);
+      createdExtensionsBound = true;
+      await createdSession.bindExtensions?.({});
+    }
+    await bindSession(createdSession, createdExtensionsBound);
+    if (mcpEnabled) {
+      defaultTools = createdSession.getActiveToolNames?.() ?? defaultTools;
+      snapshot();
+    }
     watchModelConfig();
     if (result.modelFallbackMessage) send('notice', { message: result.modelFallbackMessage });
     await listSessions();
+    return true;
   } catch (error) {
+    if (createdSession && createdSession !== session) {
+      if (createdExtensionsBound) {
+        try {
+          await createdSession.extensionRunner?.emit?.({ type: 'session_shutdown', reason: 'quit' });
+        } catch {
+          // Dispose a partially opened session even if shutdown fails.
+        }
+      }
+      createdSession.dispose();
+    }
     send('runtime-error', { message: error instanceof Error ? error.message : 'Could not open a Pi session.' });
     snapshot();
+    return false;
   }
 }
 
@@ -559,14 +720,66 @@ function watchModelConfig(): void {
 }
 
 async function handle(input: WorkerInput): Promise<void> {
+  if (disposing && input.type !== 'dispose') return;
   try {
     switch (input.type) {
+      case 'dispose': {
+        if (disposing) return;
+        disposing = true;
+        providerAuthController?.abort();
+        for (const resolve of pendingUiRequests.values()) resolve(undefined);
+        pendingUiRequests.clear();
+        pendingProviderAuthRequests.clear();
+        clearTimeout(modelRefreshTimer);
+        modelWatcher?.close();
+        modelWatcher = undefined;
+        if (busy) await session?.abort();
+        if (session && sessionExtensionsBound) {
+          try {
+            await session.extensionRunner?.emit?.({ type: 'session_shutdown', reason: 'quit' });
+          } catch {
+            // Still dispose the session and close the worker.
+          }
+        }
+        unsubscribe?.();
+        unsubscribe = undefined;
+        session?.dispose();
+        session = undefined;
+        parentPort?.close();
+        return;
+      }
       case 'listSessions':
         await listSessions(typeof input.query === 'string' ? input.query : sessionQuery);
         return;
       case 'getOptions':
         sendOptions();
         return;
+      case 'setMcpEnabled': {
+        const requestId = input.requestId;
+        if (typeof requestId !== 'string' || requestId.length > 128 || typeof input.enabled !== 'boolean') return;
+        if (busy || authenticatingProvider) {
+          send('mcp-setting-failed', { requestId, enabled: input.enabled, message: 'Finish the current Pi operation before changing MCP connections.' });
+          return;
+        }
+        if (mcpEnabled === input.enabled) {
+          send('mcp-setting-applied', { requestId, enabled: mcpEnabled });
+          return;
+        }
+        const previous = mcpEnabled;
+        const activePath = session?.sessionFile;
+        mcpEnabled = input.enabled;
+        if (activePath) {
+          send('session-opening');
+          const reopened = await createSession(activePath);
+          if (!reopened) {
+            mcpEnabled = previous;
+            send('mcp-setting-failed', { requestId, enabled: input.enabled, message: 'The active Pi session could not be reopened with the selected MCP setting.' });
+            return;
+          }
+        }
+        send('mcp-setting-applied', { requestId, enabled: mcpEnabled });
+        return;
+      }
       case 'completeExtensionCommand': {
         const requestId = input.requestId;
         const commandName = input.commandName;
