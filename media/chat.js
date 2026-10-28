@@ -105,6 +105,7 @@ const state = {
   disabledSkills: [],
   branchPoints: [],
   gitChanges: [],
+  turnFileSummaries: [],
   gitSummary: undefined,
   gitReviewAvailable: false,
   gitChangesTruncated: false,
@@ -1538,6 +1539,74 @@ function renderToolImages(card, message) {
   if (output.childNodes.length) card.append(output);
 }
 
+function renderTurnFileSummaries() {
+  for (const summary of state.turnFileSummaries.slice(-20)) {
+    const section = document.createElement('section');
+    section.className = 'turn-file-summary';
+    const heading = document.createElement('div');
+    heading.className = 'turn-file-summary-heading';
+    const title = document.createElement('strong');
+    title.textContent = 'Workspace changes since this run started';
+    const count = document.createElement('span');
+    count.textContent = `${summary.totalFiles} ${summary.totalFiles === 1 ? 'file' : 'files'}`;
+    heading.append(title, count);
+    section.append(heading);
+
+    for (const file of summary.files) {
+      const row = document.createElement('div');
+      row.className = 'turn-file-summary-row';
+      const fileHeading = document.createElement('div');
+      fileHeading.className = 'turn-file-summary-file-heading';
+      const filePath = document.createElement('code');
+      filePath.className = 'turn-file-summary-path';
+      filePath.textContent = file.path;
+      filePath.title = file.path;
+      const changeType = document.createElement('span');
+      changeType.className = 'turn-file-summary-type';
+      changeType.textContent = file.changeType;
+      fileHeading.append(filePath, changeType);
+      row.append(fileHeading);
+
+      if (file.diff) {
+        const disclosure = document.createElement('details');
+        disclosure.className = 'turn-file-summary-diff';
+        const summaryLabel = document.createElement('summary');
+        summaryLabel.textContent = file.diffTruncated ? 'Show bounded diff preview' : 'Show diff preview';
+        const pre = document.createElement('pre');
+        pre.textContent = file.diff;
+        disclosure.append(summaryLabel, pre);
+        row.append(disclosure);
+      } else if (file.previewUnavailable) {
+        const note = document.createElement('p');
+        note.className = 'turn-file-summary-note';
+        note.textContent = file.previewUnavailable;
+        row.append(note);
+      }
+
+      if (file.canOpen) {
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'branch-button turn-file-summary-open';
+        open.textContent = file.untracked ? 'Open file' : 'Open current Git diff';
+        open.title = file.untracked ? 'Open this workspace file' : 'Open the current Git diff for this file';
+        open.addEventListener('click', () => post('openGitDiff', { path: file.path }));
+        row.append(open);
+      }
+      section.append(row);
+    }
+
+    if (summary.omittedFiles > 0 || summary.truncated) {
+      const note = document.createElement('p');
+      note.className = 'turn-file-summary-note';
+      note.textContent = summary.omittedFiles > 0
+        ? `${summary.omittedFiles} additional ${summary.omittedFiles === 1 ? 'file was' : 'files were'} omitted by the preview limits.`
+        : 'Some changed paths or diff previews were omitted by the display limits.';
+      section.append(note);
+    }
+    ui.messageList.append(section);
+  }
+}
+
 function renderMessages(shouldFollow = true) {
   const nearBottom = ui.messageArea.scrollHeight - ui.messageArea.scrollTop - ui.messageArea.clientHeight < 80;
   ui.messageList.replaceChildren();
@@ -1851,6 +1920,7 @@ function renderMessages(shouldFollow = true) {
     ui.messageList.append(row);
   }
 
+  renderTurnFileSummaries();
   renderBookmarks();
   updateChatSearch();
   ui.empty.hidden = state.messages.some(isTranscriptMessageVisible);
@@ -4567,6 +4637,7 @@ function applySnapshot(data) {
       delete state.savedDrafts.__new;
     }
     state.sessionPath = nextSessionPath;
+    state.turnFileSummaries = [];
     ui.prompt.value = state.drafts[nextSessionPath] || state.drafts.__new || '';
     state.extensionEditorText = ui.prompt.value;
     syncPromptToWorker();
@@ -4655,6 +4726,41 @@ window.addEventListener('message', (event) => {
       state.gitChangesTruncated = data.truncated === true;
       renderGitChanges();
       break;
+    case 'turn-file-summary': {
+      if (typeof data.sessionPath !== 'string' || data.sessionPath !== state.sessionPath) break;
+      const files = Array.isArray(data.files) ? data.files.slice(0, 24).flatMap((item) => {
+        if (!item || typeof item !== 'object' || typeof item.path !== 'string' || item.path.length > 4096
+          || /[\u0000-\u001f\u007f]/.test(item.path)
+          || !['Added', 'Modified', 'Deleted'].includes(item.changeType)) return [];
+        return [{
+          path: item.path,
+          changeType: item.changeType,
+          diff: typeof item.diff === 'string' ? item.diff.slice(0, 12_000) : '',
+          diffTruncated: item.diffTruncated === true,
+          previewUnavailable: typeof item.previewUnavailable === 'string' ? item.previewUnavailable.slice(0, 240) : '',
+          canOpen: item.canOpen === true,
+          untracked: item.untracked === true,
+        }];
+      }) : [];
+      const totalFiles = Number.isFinite(Number(data.totalFiles)) ? Math.min(1000, Math.max(0, Math.trunc(Number(data.totalFiles)))) : files.length;
+      const omittedFiles = Number.isFinite(Number(data.omittedFiles)) ? Math.min(1000, Math.max(0, Math.trunc(Number(data.omittedFiles)))) : 0;
+      if (!files.length && !omittedFiles) break;
+      let diffCharacters = 0;
+      const boundedFiles = files.map((file) => {
+        const available = Math.max(0, 64_000 - diffCharacters);
+        const diff = file.diff.slice(0, Math.min(12_000, available));
+        diffCharacters += diff.length;
+        return { ...file, diff };
+      });
+      state.turnFileSummaries = [...state.turnFileSummaries, {
+        files: boundedFiles,
+        totalFiles,
+        omittedFiles,
+        truncated: data.truncated === true,
+      }].slice(-20);
+      renderMessages();
+      break;
+    }
     case 'git-review-open':
       ui.gitReviewPanel.hidden = false;
       ui.gitReviewToggle.setAttribute('aria-expanded', 'true');
@@ -5196,6 +5302,7 @@ el('new-session').addEventListener('click', () => {
   }
   state.switchingSession = true;
   state.messages = [];
+  state.turnFileSummaries = [];
   state.bookmarks = [];
   state.model = '';
   setBusy(true, 'Starting a new chat');

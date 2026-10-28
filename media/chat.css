@@ -172,6 +172,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .git-change-status { grid-column: 1; min-width: 0; padding-left: 3px; color: var(--muted); overflow-wrap: anywhere; font-size: 9px; }
 .git-change-discard { grid-column: 2; grid-row: 1 / span 2; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 9px; }
 .git-change-discard:hover { color: var(--danger); border-color: var(--danger); }
+.turn-file-summary { width: min(100%, 68ch); margin: 12px auto 4px; padding-top: 9px; border-top: 1px solid var(--line); color: var(--text); }
+.turn-file-summary-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; margin-bottom: 3px; }
+.turn-file-summary-heading strong { font-size: 11px; font-weight: 600; }
+.turn-file-summary-heading span, .turn-file-summary-type { color: var(--muted); font-size: 9px; }
+.turn-file-summary-row { display: grid; gap: 3px; min-width: 0; padding: 6px 0; border-top: 1px solid var(--line); }
+.turn-file-summary-file-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; min-width: 0; }
+.turn-file-summary-path { min-width: 0; overflow-wrap: anywhere; color: var(--text); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; }
+.turn-file-summary-type { flex: 0 0 auto; }
+.turn-file-summary-diff { min-width: 0; }
+.turn-file-summary-diff summary { width: fit-content; color: var(--muted); cursor: pointer; font-size: 9px; }
+.turn-file-summary-diff summary:hover { color: var(--text); }
+.turn-file-summary-diff pre { max-height: min(280px, 38vh); margin: 5px 0 2px; padding: 7px 8px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; color: var(--vscode-editor-foreground, var(--text)); background: var(--vscode-textCodeBlock-background, var(--surface-raised)); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; white-space: pre; }
+.turn-file-summary-open { justify-self: start; }
+.turn-file-summary-note { margin: 2px 0; color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
 .history-heading { min-height: 42px; padding: 0 10px 0 13px; display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
 .session-search-row { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 7px 5px; }
 .session-search-row .session-search { flex: 1 1 auto; margin: 0; }

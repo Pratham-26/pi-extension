@@ -7,6 +7,19 @@ import { Worker } from 'node:worker_threads';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { isPiPackageSource } from './package-source';
 import * as draftStore from './draft-store';
+import {
+  boundTurnFileDiff,
+  createTurnFileDiff,
+  isSafeTurnFilePath,
+  isSensitiveTurnFilePath,
+  MAX_TURN_DIFF_FILE_CHARS,
+  MAX_TURN_DIFF_TOTAL_CHARS,
+  MAX_TURN_FILE_BYTES,
+  MAX_TURN_FILE_COUNT,
+  MAX_TURN_SNAPSHOT_BYTES,
+  MAX_TURN_SUMMARY_FILES,
+  redactTurnFileDiff,
+} from './turn-file-summary';
 import { appendDiagnosticLog, DIAGNOSTIC_LOG_FILENAME, type DiagnosticCategory } from './diagnostic-log';
 import {
   copyIgnoredFileSafely,
@@ -76,7 +89,7 @@ type GitChangeRecord = {
 type GitRepositoryLike = {
   rootUri: vscode.Uri;
   state: {
-    HEAD?: { name?: string; upstream?: { remote?: string; name?: string }; ahead?: number; behind?: number };
+    HEAD?: { name?: string; commit?: string; upstream?: { remote?: string; name?: string }; ahead?: number; behind?: number };
     indexChanges?: GitChangeRecord[];
     workingTreeChanges?: GitChangeRecord[];
     untrackedChanges?: GitChangeRecord[];
@@ -86,6 +99,55 @@ type GitRepositoryLike = {
   diffWithHEAD?: (path?: string) => Promise<string | GitChangeRecord[]>;
   diffWithHEADShortStats?: () => Promise<{ files: number; insertions: number; deletions: number }>;
   restore?: (paths: string[], options?: { staged?: boolean; ref?: string }) => Promise<void>;
+};
+
+type TurnFileSnapshot = {
+  exists: boolean;
+  content?: string;
+  omittedReason?: string;
+  size?: number;
+  mtimeMs?: number;
+  ctimeMs?: number;
+  dev?: number;
+  ino?: number;
+  bytesRead: number;
+};
+
+type TurnGitFile = {
+  path: string;
+  repositoryPath: string;
+  uri: vscode.Uri;
+  status: string[];
+  untracked: boolean;
+  snapshot?: TurnFileSnapshot;
+};
+
+type TurnFileBaseline = {
+  files: Map<string, TurnGitFile>;
+  repositoryPath: string;
+  headCommit?: string;
+  truncated: boolean;
+  fileCount: number;
+};
+
+type TurnFileReadRoots = { repository: string; workspace: string };
+
+type TurnFileCapture = {
+  worker: Worker;
+  workspace: vscode.WorkspaceFolder;
+  workspacePath: string;
+  sessionPath: string;
+  baseline: Promise<TurnFileBaseline | undefined>;
+};
+
+type TurnFileSummaryEntry = {
+  path: string;
+  changeType: 'Added' | 'Modified' | 'Deleted';
+  diff?: string;
+  previewUnavailable?: string;
+  diffTruncated?: boolean;
+  canOpen?: boolean;
+  untracked?: boolean;
 };
 
 type GitApiLike = {
@@ -134,6 +196,7 @@ const MAX_GIT_REVIEW_FILES = 500;
 const MAX_GIT_DIFF_CHARS = 500_000;
 const MAX_GIT_DRAFT_CHARS = 30_000;
 const MAX_GIT_DRAFT_FILES = 24;
+const MAX_TURN_BASELINE_WAIT_MS = 4_000;
 const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
 const MAX_RUNNING_SESSION_RECORD_BYTES = 8_192;
 const MAX_RUNNING_SESSION_RECORDS = 200;
@@ -368,6 +431,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerOfflineModeSetting: PiOfflineMode = 'inherit';
   private workerExtensionUiModeSetting: PiExtensionUiMode = 'rpc';
   private runtimeBusy = false;
+  private turnFileCapture?: TurnFileCapture;
   private queuedWorkCount = 0;
   private runtimeActivity = 'Working in Pi';
   private sessionListForRunningStatus: Array<Record<string, unknown>> = [];
@@ -530,6 +594,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   async newSession(): Promise<void> {
     this.sessionInteractionStarted = true;
+    this.clearTurnFileCapture();
     if (!this.worker) await this.ensureRuntime();
     this.worker?.postMessage({
       type: 'newSession',
@@ -539,6 +604,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   async cloneSession(): Promise<void> {
     this.sessionInteractionStarted = true;
+    this.clearTurnFileCapture();
     if (!this.worker) await this.ensureRuntime();
     this.worker?.postMessage({ type: 'cloneSession' });
   }
@@ -1004,6 +1070,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   restartRuntime(): void {
     this.runtimeStartGeneration += 1;
     const previous = this.worker;
+    this.clearTurnFileCapture();
     this.workerAgentDirSetting = '';
     this.workerOfflineModeSetting = 'inherit';
     this.workerExtensionUiModeSetting = 'rpc';
@@ -1124,6 +1191,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const previous = this.worker;
+    this.clearTurnFileCapture(previous);
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
@@ -1263,10 +1331,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'run-finished') void this.refreshGitChanges();
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
+        const capture = this.turnFileCapture;
+        if (capture?.worker === worker) {
+          if (!capture.sessionPath) capture.sessionPath = message.sessionFile;
+          else if (message.sessionFile && capture.sessionPath !== message.sessionFile) this.clearTurnFileCapture(worker);
+        }
         this.activeSessionPath = message.sessionFile;
         this.refreshRunningSessionLease();
         this.post(message);
       } else if (message.type === 'run-finished') {
+        this.finishTurnFileCapture(worker);
         const notifications = vscode.workspace.getConfiguration('piChat.notifications');
         const hidden = !this.view?.visible;
         if (!message.providerLogin && hidden && notifications.get<boolean>('runFinished', true)) {
@@ -1496,6 +1570,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
     worker.on('exit', (code: number) => {
+      this.clearTurnFileCapture(worker);
       if (this.worker === worker) {
         this.worker = undefined;
         this.runtimeBusy = false;
@@ -1594,10 +1669,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'newSession':
         this.sessionInteractionStarted = true;
+        this.clearTurnFileCapture();
         await this.newSession();
         return;
       case 'cloneSession':
         this.sessionInteractionStarted = true;
+        this.clearTurnFileCapture();
         if (this.worker) this.worker.postMessage({ type: 'cloneSession' });
         return;
       case 'openSettings':
@@ -1746,6 +1823,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'openSession':
         this.sessionInteractionStarted = true;
+        this.clearTurnFileCapture();
         if (!this.isKnownSessionPath(message.path)) {
           this.post({ type: 'notice', message: 'That session is no longer in the session list. Refresh history and try again.', isError: true });
           return;
@@ -1811,12 +1889,23 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           ? 'Please inspect the attached image.'
           : attachments.some((item) => item.context) ? 'Please inspect the attached context.' : '');
         if (!promptText) return;
+        const promptWorker = this.worker;
+        const fileCapture = promptWorker ? this.reserveTurnFileCapture(promptWorker) : undefined;
         const attachedPaths = new Set(attachments.map((item) => {
           const relative = item.path.replaceAll('\\', '/');
           return process.platform === 'win32' ? relative.toLocaleLowerCase() : relative;
         }));
-        const automaticContext = await this.collectAutomaticContext(attachedPaths);
+        let automaticContext: Attachment[];
+        try {
+          automaticContext = await this.collectAutomaticContext(attachedPaths);
+        } catch {
+          this.clearTurnFileCapture(promptWorker);
+          this.post({ type: 'notice', message: 'Could not prepare workspace context for this prompt.', isError: true });
+          return;
+        }
         const prompt = this.composePrompt(promptText, [...attachments, ...automaticContext]);
+        if (promptWorker && promptWorker !== this.worker) return;
+        if (fileCapture && !(await this.waitForTurnFileBaseline(fileCapture))) this.clearTurnFileCapture(promptWorker);
         this.worker?.postMessage({
           type: 'prompt',
           text: prompt,
@@ -2645,6 +2734,391 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       .sort((a, b) => a.rootUri.fsPath.length - b.rootUri.fsPath.length);
     const repository = containing[0] ?? nested[0];
     return repository ? { api, repository } : undefined;
+  }
+
+  private reserveTurnFileCapture(worker: Worker): TurnFileCapture | undefined {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace || worker !== this.worker || this.workerWorkspace !== workspace.uri.fsPath) return undefined;
+    const workspacePath = this.normalizeSessionPath(workspace.uri.fsPath);
+    const existing = this.turnFileCapture;
+    if (existing?.worker === worker && existing.workspacePath === workspacePath
+      && (!existing.sessionPath || !this.activeSessionPath || existing.sessionPath === this.activeSessionPath)) return existing;
+    if (this.runtimeBusy || this.queuedWorkCount > 0) return undefined;
+    const capture: TurnFileCapture = {
+      worker,
+      workspace,
+      workspacePath,
+      sessionPath: this.activeSessionPath,
+      baseline: Promise.resolve(undefined),
+    };
+    this.turnFileCapture = capture;
+    capture.baseline = this.captureTurnFileBaseline(workspace).catch(() => undefined);
+    return capture;
+  }
+
+  private async waitForTurnFileBaseline(capture: TurnFileCapture): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (ready: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ready);
+      };
+      const timer = setTimeout(() => finish(false), MAX_TURN_BASELINE_WAIT_MS);
+      capture.baseline.then((baseline) => finish(Boolean(baseline)), () => finish(false));
+    });
+  }
+
+  private clearTurnFileCapture(worker?: Worker): void {
+    if (!worker || this.turnFileCapture?.worker === worker) this.turnFileCapture = undefined;
+  }
+
+  private finishTurnFileCapture(worker: Worker): void {
+    const capture = this.turnFileCapture;
+    if (!capture || capture.worker !== worker) return;
+    this.turnFileCapture = undefined;
+    void this.createTurnFileSummary(capture).then((summary) => {
+      if (!summary || this.worker !== worker) return;
+      const sessionPath = capture.sessionPath || this.activeSessionPath;
+      if (!sessionPath || (capture.sessionPath && this.activeSessionPath && capture.sessionPath !== this.activeSessionPath)) return;
+      this.post({ type: 'turn-file-summary', sessionPath, ...summary });
+    }).catch(() => undefined);
+  }
+
+  private collectTurnGitFiles(repository: GitRepositoryLike, workspace: vscode.WorkspaceFolder): {
+    files: Map<string, TurnGitFile>;
+    truncated: boolean;
+    fileCount: number;
+  } {
+    const files = new Map<string, TurnGitFile>();
+    let truncated = false;
+    let fileCount = 0;
+    const add = (records: GitChangeRecord[] | undefined, label: string, untracked = false) => {
+      const changes = records ?? [];
+      if (changes.length > MAX_GIT_REVIEW_FILES) truncated = true;
+      for (const change of changes.slice(0, MAX_GIT_REVIEW_FILES)) {
+        const uri = change.uri ?? change.resourceUri;
+        if (!uri) continue;
+        const relativePath = this.workspaceRelativePath(uri, workspace);
+        const repositoryPath = this.relativePathFrom(repository.rootUri, uri);
+        if (!relativePath || !repositoryPath || !isSafeTurnFilePath(relativePath)
+          || !isSafeRepositoryRelativePath(repositoryPath)) continue;
+        const key = process.platform === 'win32' ? repositoryPath.toLocaleLowerCase() : repositoryPath;
+        let item = files.get(key);
+        if (!item) {
+          fileCount += 1;
+          if (files.size >= MAX_TURN_FILE_COUNT) {
+            truncated = true;
+            continue;
+          }
+          item = { path: relativePath, repositoryPath, uri, status: [], untracked: false };
+          files.set(key, item);
+        }
+        item.uri = uri;
+        if (!item.status.includes(label)) item.status.push(label);
+        item.untracked ||= untracked;
+      }
+    };
+    const state = repository.state;
+    add(state.indexChanges, 'Staged');
+    add(state.workingTreeChanges, 'Modified');
+    add(state.untrackedChanges, 'Untracked', true);
+    add(state.mergeChanges, 'Conflict');
+    return { files, truncated, fileCount };
+  }
+
+  private async captureTurnFileBaseline(workspace: vscode.WorkspaceFolder): Promise<TurnFileBaseline | undefined> {
+    try {
+      const handle = await this.getGitRepository(workspace);
+      if (!handle) return undefined;
+      const { repository } = handle;
+      await repository.status?.();
+      const roots: TurnFileReadRoots = {
+        repository: await realpath(repository.rootUri.fsPath),
+        workspace: await realpath(workspace.uri.fsPath),
+      };
+      const listing = this.collectTurnGitFiles(repository, workspace);
+      let snapshotBytes = 0;
+      for (const item of listing.files.values()) {
+        item.snapshot = await this.readTurnFileSnapshot(
+          item.uri,
+          item.path,
+          item.repositoryPath,
+          roots,
+          MAX_TURN_SNAPSHOT_BYTES - snapshotBytes,
+        );
+        snapshotBytes += item.snapshot.bytesRead;
+        if (item.snapshot.omittedReason === 'The workspace snapshot limit was reached.') listing.truncated = true;
+      }
+      return {
+        files: listing.files,
+        repositoryPath: roots.repository,
+        headCommit: repository.state.HEAD?.commit,
+        truncated: listing.truncated,
+        fileCount: listing.fileCount,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readTurnFileSnapshot(
+    uri: vscode.Uri,
+    relativePath: string,
+    repositoryPath: string,
+    roots: TurnFileReadRoots,
+    remainingBytes: number,
+  ): Promise<TurnFileSnapshot> {
+    const numeric = (value: number | bigint | undefined): number | undefined => value === undefined ? undefined : Number(value);
+    const unavailable = (reason: string, exists = true, stats?: Awaited<ReturnType<typeof lstat>>): TurnFileSnapshot => ({
+      exists,
+      omittedReason: reason,
+      size: numeric(stats?.size),
+      mtimeMs: numeric(stats?.mtimeMs),
+      ctimeMs: numeric(stats?.ctimeMs),
+      dev: numeric(stats?.dev),
+      ino: numeric(stats?.ino),
+      bytesRead: 0,
+    });
+    if (uri.scheme !== 'file' || !isSafeTurnFilePath(relativePath) || !isSafeRepositoryRelativePath(repositoryPath)) {
+      return unavailable('Preview unavailable for this workspace file.');
+    }
+    let beforeStats: Awaited<ReturnType<typeof lstat>>;
+    try {
+      beforeStats = await lstat(uri.fsPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false, bytesRead: 0 };
+      return unavailable('The file could not be read safely.');
+    }
+    if (!beforeStats.isFile() || beforeStats.isSymbolicLink() || beforeStats.nlink > 1) {
+      return unavailable('Preview omitted for a non-regular or linked file.', true, beforeStats);
+    }
+    let realFilePath: string;
+    try {
+      realFilePath = await realpath(uri.fsPath);
+      if (!isPathInside(roots.repository, realFilePath) || !isPathInside(roots.workspace, realFilePath)) {
+        return unavailable('Preview omitted for a file outside the workspace.', true, beforeStats);
+      }
+    } catch {
+      return unavailable('The file could not be read safely.', true, beforeStats);
+    }
+    let safeStats: Awaited<ReturnType<typeof lstat>>;
+    try {
+      safeStats = await lstat(realFilePath);
+    } catch {
+      return unavailable('The file changed while its preview was prepared.', true, beforeStats);
+    }
+    if (!safeStats.isFile() || safeStats.isSymbolicLink() || safeStats.nlink > 1
+      || safeStats.dev !== beforeStats.dev || safeStats.ino !== beforeStats.ino) {
+      return unavailable('Preview omitted for a file that changed while being inspected.', true, safeStats);
+    }
+    const details = (snapshot: TurnFileSnapshot): TurnFileSnapshot => ({
+      ...snapshot,
+      size: numeric(safeStats.size),
+      mtimeMs: numeric(safeStats.mtimeMs),
+      ctimeMs: numeric(safeStats.ctimeMs),
+      dev: numeric(safeStats.dev),
+      ino: numeric(safeStats.ino),
+    });
+    if (isSensitiveTurnFilePath(relativePath)) return details(unavailable('Preview omitted for a sensitive file path.'));
+    if (safeStats.size > MAX_TURN_FILE_BYTES) return details(unavailable('The file exceeds the 256 KB preview limit.'));
+    if (safeStats.size > remainingBytes) return details(unavailable('The workspace snapshot limit was reached.'));
+    let fileHandle: Awaited<ReturnType<typeof openFile>> | undefined;
+    try {
+      fileHandle = await openFile(realFilePath, 'r');
+      const openedStats = await fileHandle.stat();
+      if (!openedStats.isFile() || openedStats.isSymbolicLink() || openedStats.nlink > 1
+        || openedStats.dev !== safeStats.dev || openedStats.ino !== safeStats.ino
+        || openedStats.size !== safeStats.size || openedStats.mtimeMs !== safeStats.mtimeMs
+        || openedStats.ctimeMs !== safeStats.ctimeMs) {
+        return details(unavailable('The file changed while its preview was prepared.'));
+      }
+      const confirmedRealPath = await realpath(realFilePath);
+      if (this.normalizeSessionPath(confirmedRealPath) !== this.normalizeSessionPath(realFilePath)
+        || !isPathInside(roots.repository, confirmedRealPath) || !isPathInside(roots.workspace, confirmedRealPath)) {
+        return details(unavailable('Preview omitted for a file outside the workspace.'));
+      }
+      const bytes = await fileHandle.readFile();
+      const finalStats = await fileHandle.stat();
+      if (!finalStats.isFile() || finalStats.isSymbolicLink() || finalStats.nlink > 1
+        || finalStats.dev !== safeStats.dev || finalStats.ino !== safeStats.ino
+        || finalStats.size !== safeStats.size || finalStats.mtimeMs !== safeStats.mtimeMs
+        || finalStats.ctimeMs !== safeStats.ctimeMs) {
+        return details(unavailable('The file changed while its preview was prepared.'));
+      }
+      if (bytes.length > MAX_TURN_FILE_BYTES || bytes.length > remainingBytes) {
+        return details(unavailable(bytes.length > MAX_TURN_FILE_BYTES
+          ? 'The file exceeds the 256 KB preview limit.'
+          : 'The workspace snapshot limit was reached.'));
+      }
+      if (bytes.includes(0)) return details(unavailable('Preview omitted for binary content.'));
+      let content: string;
+      try {
+        content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      } catch {
+        return details(unavailable('Preview omitted for non-UTF-8 content.'));
+      }
+      return details({ exists: true, content, bytesRead: bytes.length });
+    } catch {
+      return details(unavailable('The file could not be read safely.'));
+    } finally {
+      if (fileHandle) {
+        try {
+          await fileHandle.close();
+        } catch {
+          // Preserve the original preview result when file cleanup fails.
+        }
+      }
+    }
+  }
+
+  private turnFileSnapshotsEqual(before: TurnFileSnapshot | undefined, after: TurnFileSnapshot): boolean {
+    if (!before || before.exists !== after.exists) return false;
+    if (!before.exists) return true;
+    if (before.content !== undefined && after.content !== undefined) return before.content === after.content;
+    const statFields: Array<keyof TurnFileSnapshot> = ['size', 'mtimeMs', 'ctimeMs', 'dev', 'ino'];
+    const hasStats = statFields.some((field) => before[field] !== undefined || after[field] !== undefined);
+    return hasStats
+      ? statFields.every((field) => before[field] === after[field])
+      : before.omittedReason === after.omittedReason;
+  }
+
+  private async createTurnFileSummary(capture: TurnFileCapture): Promise<{
+    files: TurnFileSummaryEntry[];
+    totalFiles: number;
+    omittedFiles: number;
+    truncated: boolean;
+  } | undefined> {
+    const baseline = await capture.baseline;
+    if (!baseline || this.worker !== capture.worker
+      || this.workerWorkspace !== capture.workspace.uri.fsPath
+      || this.normalizeSessionPath(capture.workspace.uri.fsPath) !== capture.workspacePath) return undefined;
+    const handle = await this.getGitRepository(capture.workspace);
+    if (!handle) return undefined;
+    const { repository } = handle;
+    const roots: TurnFileReadRoots = {
+      repository: await realpath(repository.rootUri.fsPath),
+      workspace: await realpath(capture.workspace.uri.fsPath),
+    };
+    if (this.normalizeSessionPath(roots.repository) !== this.normalizeSessionPath(baseline.repositoryPath)) return undefined;
+    await repository.status?.();
+    const listing = this.collectTurnGitFiles(repository, capture.workspace);
+    const keys = new Set([...baseline.files.keys(), ...listing.files.keys()]);
+    const candidates = [...keys].slice(0, MAX_TURN_FILE_COUNT);
+    let truncated = baseline.truncated || listing.truncated || keys.size > candidates.length;
+    let omittedFiles = Math.max(0, keys.size - candidates.length);
+    let totalFiles = 0;
+    let totalDiffChars = 0;
+    let snapshotBytes = 0;
+    const files: TurnFileSummaryEntry[] = [];
+    const headChanged = Boolean(baseline.headCommit && repository.state.HEAD?.commit
+      && baseline.headCommit !== repository.state.HEAD.commit);
+
+    for (const key of candidates) {
+      const before = baseline.files.get(key);
+      const after = listing.files.get(key);
+      if (!before && baseline.truncated) {
+        omittedFiles += 1;
+        truncated = true;
+        continue;
+      }
+      const current = after ?? before;
+      if (!current) continue;
+      const afterSnapshot = await this.readTurnFileSnapshot(
+        current.uri,
+        current.path,
+        current.repositoryPath,
+        roots,
+        MAX_TURN_SNAPSHOT_BYTES - snapshotBytes,
+      );
+      snapshotBytes += afterSnapshot.bytesRead;
+      if (afterSnapshot.omittedReason === 'The workspace snapshot limit was reached.') truncated = true;
+      if (before && this.turnFileSnapshotsEqual(before.snapshot, afterSnapshot)) continue;
+      if (!before && !after) continue;
+      totalFiles += 1;
+      const beforeSnapshot = before?.snapshot;
+      const changeType: TurnFileSummaryEntry['changeType'] = !beforeSnapshot?.exists && afterSnapshot.exists
+        ? 'Added'
+        : beforeSnapshot?.exists && !afterSnapshot.exists ? 'Deleted' : 'Modified';
+      const item: TurnFileSummaryEntry = {
+        path: current.path.slice(0, 4096),
+        changeType,
+        canOpen: Boolean(after),
+        untracked: after?.untracked === true,
+      };
+
+      if (isSensitiveTurnFilePath(current.path)) {
+        item.previewUnavailable = 'Preview omitted for a sensitive file path.';
+      } else if (beforeSnapshot?.omittedReason) {
+        item.previewUnavailable = beforeSnapshot.omittedReason;
+      } else if (afterSnapshot.omittedReason) {
+        item.previewUnavailable = afterSnapshot.omittedReason;
+      } else if (before && beforeSnapshot?.content !== undefined) {
+        const diff = createTurnFileDiff(current.path, beforeSnapshot.content, afterSnapshot.content ?? '');
+        const allowance = Math.min(MAX_TURN_DIFF_FILE_CHARS, MAX_TURN_DIFF_TOTAL_CHARS - totalDiffChars);
+        if (!allowance) {
+          item.previewUnavailable = 'The combined diff preview limit was reached.';
+          truncated = true;
+        } else {
+          const bounded = boundTurnFileDiff(diff, allowance);
+          item.diff = bounded.diff;
+          item.diffTruncated = bounded.truncated;
+          truncated ||= bounded.truncated;
+          totalDiffChars += item.diff.length;
+        }
+      } else if (!before && after?.untracked) {
+        const diff = createTurnFileDiff(current.path, '', afterSnapshot.content ?? '');
+        const allowance = Math.min(MAX_TURN_DIFF_FILE_CHARS, MAX_TURN_DIFF_TOTAL_CHARS - totalDiffChars);
+        if (!allowance) {
+          item.previewUnavailable = 'The combined diff preview limit was reached.';
+          truncated = true;
+        } else {
+          const bounded = boundTurnFileDiff(diff, allowance);
+          item.diff = bounded.diff;
+          item.diffTruncated = bounded.truncated;
+          truncated ||= bounded.truncated;
+          totalDiffChars += item.diff.length;
+        }
+      } else if (!before && after && headChanged) {
+        item.previewUnavailable = 'Git HEAD changed during this run, so a safe preview is unavailable.';
+      } else if (!before && after && baseline.truncated) {
+        item.previewUnavailable = 'The starting Git change list was truncated, so the baseline is unknown.';
+      } else if (!before && after) {
+        let diff: string | GitChangeRecord[] | undefined;
+        try {
+          diff = await repository.diffWithHEAD?.(current.repositoryPath);
+        } catch {
+          diff = undefined;
+        }
+        if (typeof diff === 'string' && diff.trim()) {
+          const redacted = redactTurnFileDiff(diff);
+          const allowance = Math.min(MAX_TURN_DIFF_FILE_CHARS, MAX_TURN_DIFF_TOTAL_CHARS - totalDiffChars);
+          if (!allowance) {
+            item.previewUnavailable = 'The combined diff preview limit was reached.';
+            truncated = true;
+          } else {
+            const bounded = boundTurnFileDiff(redacted, allowance);
+            item.diff = bounded.diff;
+            item.diffTruncated = bounded.truncated;
+            truncated ||= bounded.truncated;
+            totalDiffChars += item.diff.length;
+          }
+        } else {
+          item.previewUnavailable = 'Git did not provide a text diff for this file.';
+        }
+      } else {
+        item.previewUnavailable = 'A safe text diff is unavailable for this file.';
+      }
+
+      if (files.length < MAX_TURN_SUMMARY_FILES) files.push(item);
+      else {
+        omittedFiles += 1;
+        truncated = true;
+      }
+    }
+    if (!totalFiles && !omittedFiles) return undefined;
+    return { files, totalFiles, omittedFiles, truncated };
   }
 
   private async refreshGitChanges(): Promise<void> {
