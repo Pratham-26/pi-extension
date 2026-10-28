@@ -282,6 +282,8 @@ export default function (pi) {
   worker.postMessage({ type: 'prompt', text: 'LOCAL_SMOKE_REQUEST: reply using the local test model.' });
   const [finished, savedTranscript] = await Promise.all([runFinished, savedTranscriptPromise]);
   assert.equal(finished.aborted, false, 'the local test turn should finish without cancellation');
+  assert.equal(finished.agentRun, true, 'a Pi agent-settled event should be distinguishable from other worker operations');
+  assert.equal(typeof finished.sessionTitle, 'string', 'the finished event should carry only the session title needed by notification hooks');
   assert.ok(savedTranscript, 'the streamed assistant reply should be persisted in the session snapshot');
   assert.ok(assistantUpdateCount >= 2, 'the reply should reach the worker as multiple streaming updates');
   assert.ok(streamedAssistantText.includes('LOCAL_SMOKE_OK'), 'the streamed worker output should contain the local reply');

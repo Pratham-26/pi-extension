@@ -353,6 +353,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .runtime-settings { padding: 7px 8px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
 .runtime-setting { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; color: var(--text); font-size: 10px; }
 .runtime-setting input[type="checkbox"] { accent-color: var(--focus); }
+.runtime-setting input[type="text"] { flex: 0 1 58%; min-width: 0; max-width: 58%; padding: 4px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--vscode-input-foreground, var(--text)); background: var(--vscode-input-background, var(--surface-input)); font: inherit; }
+.runtime-setting input[type="text"]:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
 .runtime-setting select { flex: 0 1 52%; min-width: 0; max-width: 52%; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--vscode-dropdown-foreground); background: var(--vscode-dropdown-background); font: inherit; }
 .runtime-settings-note { margin: 5px 0 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
 

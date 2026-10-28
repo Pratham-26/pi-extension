@@ -8,6 +8,9 @@ const state = {
   workspaceName: '',
   notificationSoundEnabled: false,
   autoRefreshModelsEnabled: false,
+  notificationHookCommand: '',
+  notificationHookEvents: ['input_request'],
+  notificationHookSaving: false,
   appearance: { smoothScrolling: true },
   sessionPath: typeof persistedWebviewState.sessionPath === 'string'
     && persistedWebviewState.sessionPath.length <= 4096
@@ -273,6 +276,10 @@ const ui = {
   autoRefreshModels: el('auto-refresh-models'),
   notificationSound: el('notification-sound'),
   testNotificationSound: el('test-notification-sound'),
+  notificationHookCommand: el('notification-hook-command'),
+  notificationHookInputRequest: el('notification-hook-input-request'),
+  notificationHookAgentFinished: el('notification-hook-agent-finished'),
+  saveNotificationHook: el('save-notification-hook'),
   manageContextFiles: el('manage-context-files'),
   mcpEnabled: el('mcp-enabled'),
   editMcpConfig: el('edit-mcp-config'),
@@ -782,6 +789,11 @@ function updateControls() {
   ui.autoRefreshModels.checked = state.autoRefreshModelsEnabled;
   ui.notificationSound.checked = state.notificationSoundEnabled;
   ui.testNotificationSound.disabled = !state.notificationSoundEnabled;
+  ui.notificationHookCommand.disabled = state.notificationHookSaving;
+  ui.notificationHookInputRequest.disabled = state.notificationHookSaving;
+  ui.notificationHookAgentFinished.disabled = state.notificationHookSaving;
+  ui.saveNotificationHook.disabled = state.notificationHookSaving;
+  ui.saveNotificationHook.textContent = state.notificationHookSaving ? 'Saving…' : 'Save hook';
   ui.manageContextFiles.disabled = !state.hasSession || state.busy || hasQueuedWork;
   ui.mcpEnabled.disabled = !state.hasSession || state.busy || state.mcpSettingPending;
   ui.editMcpConfig.disabled = !state.hasWorkspace || state.busy;
@@ -5022,6 +5034,21 @@ window.addEventListener('message', (event) => {
       ui.notificationSound.checked = state.notificationSoundEnabled;
       updateControls();
       break;
+    case 'notification-hook-settings':
+      state.notificationHookSaving = false;
+      state.notificationHookCommand = typeof data.command === 'string' ? data.command.slice(0, 4096) : '';
+      state.notificationHookEvents = Array.isArray(data.events)
+        ? [...new Set(data.events.filter((event) => event === 'input_request' || event === 'agent_finished'))]
+        : ['input_request'];
+      ui.notificationHookCommand.value = state.notificationHookCommand;
+      ui.notificationHookInputRequest.checked = state.notificationHookEvents.includes('input_request');
+      ui.notificationHookAgentFinished.checked = state.notificationHookEvents.includes('agent_finished');
+      updateControls();
+      break;
+    case 'notification-hook-saving':
+      state.notificationHookSaving = true;
+      updateControls();
+      break;
     case 'model-refresh-setting':
       state.autoRefreshModelsEnabled = data.enabled === true;
       ui.autoRefreshModels.checked = state.autoRefreshModelsEnabled;
@@ -5894,6 +5921,17 @@ ui.blockImages.addEventListener('change', () => post('updatePiSetting', {
 ui.testNotificationSound.addEventListener('click', () => {
   resumeNotificationAudio();
   playNotificationSound();
+});
+ui.saveNotificationHook.addEventListener('click', () => {
+  state.notificationHookSaving = true;
+  updateControls();
+  post('saveNotificationHookSettings', {
+    command: ui.notificationHookCommand.value,
+    events: [
+      ...(ui.notificationHookInputRequest.checked ? ['input_request'] : []),
+      ...(ui.notificationHookAgentFinished.checked ? ['agent_finished'] : []),
+    ],
+  });
 });
 ui.manageContextFiles.addEventListener('click', () => post('manageContextFiles'));
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));

@@ -7,6 +7,12 @@ import { Worker } from 'node:worker_threads';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { isPiPackageSource } from './package-source';
 import { loadRecommendedPiPackages } from './package-recommendations';
+import {
+  normalizeNotificationHookCommand,
+  normalizeNotificationHookEvents,
+  runNotificationHook,
+  type NotificationHookEvent,
+} from './notification-hook';
 import * as draftStore from './draft-store';
 import {
   boundTurnFileDiff,
@@ -228,6 +234,7 @@ const MAX_GIT_BRANCHES_FOR_PICKER = 500;
 const GIT_WORKTREE_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 const RUNTIME_ENV_SECRET_PREFIX = 'piChat.runtimeEnv:';
 const PINNED_EXTENSION_WIDGETS_KEY = 'piChat.pinnedExtensionWidgets';
+const NOTIFICATION_HOOK_APPROVED_HASH_KEY = 'piChat.notifications.hookApprovedHash';
 const MAX_PINNED_EXTENSION_WIDGETS = 32;
 const MAX_RUNTIME_ENV_VARIABLES = 32;
 const MAX_RUNTIME_ENV_VALUE_CHARS = 4096;
@@ -479,6 +486,8 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.extensionUiMode')) activeProvider.onExtensionUiModeConfigurationChanged();
         if (event.affectsConfiguration('piChat.extensionStatus')) activeProvider.onExtensionStatusConfigurationChanged();
         if (event.affectsConfiguration('piChat.notifications.sound')) activeProvider.onNotificationSoundConfigurationChanged();
+        if (event.affectsConfiguration('piChat.notifications.hookCommand')
+          || event.affectsConfiguration('piChat.notifications.hookEvents')) activeProvider.onNotificationHookConfigurationChanged();
         if (event.affectsConfiguration('piChat.models.autoRefresh')) activeProvider.onModelRefreshConfigurationChanged();
         if (event.affectsConfiguration('piChat.queue.defaultAction')) activeProvider.onQueueDefaultActionConfigurationChanged();
         if (event.affectsConfiguration('piChat.context.disableFiles')) activeProvider.onContextFilesConfigurationChanged();
@@ -562,6 +571,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private diagnosticEvents: Array<{ at: string; category: string }> = [];
   private readonly outputChannel: vscode.OutputChannel;
   private readonly extensionStatuses = new Map<string, string>();
+  private notificationHookApproval?: { hash: string; promise: Promise<boolean> };
+  private notificationHookSavePending = false;
   private logWriteQueue: Promise<void> = Promise.resolve();
   private savedDraftsWrite: Promise<void> = Promise.resolve();
 
@@ -1581,8 +1592,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         this.pendingExtensionUiRequestIds.add(requestId);
+        void this.runConfiguredNotificationHook('input_request', 'A Pi extension is waiting for your answer.');
         const notifications = vscode.workspace.getConfiguration('piChat.notifications');
-        const hidden = !this.view.visible;
+        const hidden = !this.view.visible || !vscode.window.state.focused;
         if (hidden && notifications.get<boolean>('inputRequired', true)) {
           void this.showChatNotification('A Pi extension is waiting for your answer.');
         }
@@ -1630,7 +1642,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       } else if (message.type === 'run-finished') {
         this.finishTurnFileCapture(worker);
         const notifications = vscode.workspace.getConfiguration('piChat.notifications');
-        const hidden = !this.view?.visible;
+        const hidden = !this.view?.visible || !vscode.window.state.focused;
+        if (message.agentRun === true && !vscode.window.state.focused) {
+          const title = typeof message.sessionTitle === 'string' ? message.sessionTitle : '';
+          void this.runConfiguredNotificationHook('agent_finished', title
+            ? `Pi finished working in “${title}”.`
+            : 'Pi finished its run.');
+        }
         if (!message.providerLogin && hidden && notifications.get<boolean>('runFinished', true)) {
           void this.showChatNotification('Pi finished its run.');
         }
@@ -1920,6 +1938,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'saved-drafts', drafts: draftStore.normalizeStore(this.context.globalState.get<unknown>('piChat.savedDrafts')) });
         this.post({ type: 'extension-widget-pins', keys: this.getPinnedExtensionWidgetKeys() });
         this.postExtensionStatusPreferences();
+        this.postNotificationHookSettings();
         this.onAppearanceConfigurationChanged();
         await this.ensureRuntime();
         this.refreshSessions();
@@ -2586,6 +2605,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (typeof message.enabled === 'boolean') {
           await vscode.workspace.getConfiguration('piChat.notifications').update('sound', message.enabled, vscode.ConfigurationTarget.Global);
         }
+        return;
+      case 'saveNotificationHookSettings':
+        await this.saveNotificationHookSettings(message);
         return;
       case 'setAutoRefreshModels':
         await this.setAutoRefreshModels(message);
@@ -5175,6 +5197,111 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  onNotificationHookConfigurationChanged(): void {
+    this.postNotificationHookSettings();
+  }
+
+  private getNotificationHookSettings(): { command: string; events: NotificationHookEvent[] } {
+    const configuration = vscode.workspace.getConfiguration('piChat.notifications');
+    const commandSetting = configuration.inspect<unknown>('hookCommand');
+    const eventsSetting = configuration.inspect<unknown>('hookEvents');
+    const commandHasWorkspaceValue = commandSetting?.workspaceValue !== undefined
+      || commandSetting?.workspaceFolderValue !== undefined;
+    const eventsHaveWorkspaceValue = eventsSetting?.workspaceValue !== undefined
+      || eventsSetting?.workspaceFolderValue !== undefined;
+    return {
+      command: commandHasWorkspaceValue ? '' : normalizeNotificationHookCommand(commandSetting?.globalValue),
+      events: eventsHaveWorkspaceValue ? ['input_request'] : normalizeNotificationHookEvents(eventsSetting?.globalValue),
+    };
+  }
+
+  private postNotificationHookSettings(): void {
+    this.post({ type: 'notification-hook-settings', ...this.getNotificationHookSettings() });
+  }
+
+  private async saveNotificationHookSettings(message: RuntimeMessage): Promise<void> {
+    if (this.notificationHookSavePending) return;
+    const rawCommand = message.command;
+    if (typeof rawCommand !== 'string' || rawCommand.length > 4096 || /[\u0000-\u001f\u007f]/.test(rawCommand)) {
+      this.post({ type: 'notice', message: 'The notification command is invalid or exceeds 4,096 characters.', isError: true });
+      this.postNotificationHookSettings();
+      return;
+    }
+    const command = normalizeNotificationHookCommand(rawCommand);
+    const events = normalizeNotificationHookEvents(message.events);
+    this.notificationHookSavePending = true;
+    this.post({ type: 'notification-hook-saving' });
+    try {
+      if (command) {
+        const answer = await vscode.window.showWarningMessage(
+          'Save this machine-wide notification command? It can run programs with your OS account permissions whenever a selected event occurs. Use only a command or script you trust. Workspace settings are ignored and Pi credentials are not passed.',
+          { modal: true },
+          'Save notification hook',
+        );
+        if (answer !== 'Save notification hook') {
+          this.post({ type: 'notice', message: 'Notification hook was not changed.' });
+          this.postNotificationHookSettings();
+          return;
+        }
+      }
+      const configuration = vscode.workspace.getConfiguration('piChat.notifications');
+      await configuration.update('hookEvents', events, vscode.ConfigurationTarget.Global);
+      await configuration.update('hookCommand', command, vscode.ConfigurationTarget.Global);
+      const commandHash = command ? createHash('sha256').update(command).digest('hex') : undefined;
+      await this.context.globalState.update(NOTIFICATION_HOOK_APPROVED_HASH_KEY, commandHash);
+      this.post({ type: 'notice', message: command
+        ? 'Notification hook saved. It runs only for the selected events after confirmation.'
+        : 'Notification hook cleared.' });
+    } catch {
+      this.post({ type: 'notice', message: 'Could not save notification hook settings.', isError: true });
+    } finally {
+      this.notificationHookSavePending = false;
+      this.postNotificationHookSettings();
+    }
+  }
+
+  private async approveNotificationHook(command: string): Promise<boolean> {
+    const hash = createHash('sha256').update(command).digest('hex');
+    if (this.context.globalState.get<string>(NOTIFICATION_HOOK_APPROVED_HASH_KEY) === hash) return true;
+    if (this.notificationHookApproval?.hash === hash) return this.notificationHookApproval.promise;
+    const prompt = vscode.window.showWarningMessage(
+      'A configured Pi Chat notification command is about to run with your OS account permissions. Allow it only if you trust this exact command.',
+      { modal: true },
+      'Allow and remember',
+    );
+    const promise = Promise.resolve(prompt).then(async (answer) => {
+      if (answer !== 'Allow and remember') return false;
+      try {
+        await this.context.globalState.update(NOTIFICATION_HOOK_APPROVED_HASH_KEY, hash);
+        return true;
+      } catch {
+        return false;
+      }
+    }).catch(() => false);
+    this.notificationHookApproval = { hash, promise };
+    try {
+      return await promise;
+    } finally {
+      if (this.notificationHookApproval?.promise === promise) this.notificationHookApproval = undefined;
+    }
+  }
+
+  private async runConfiguredNotificationHook(event: NotificationHookEvent, message: string): Promise<void> {
+    const settings = this.getNotificationHookSettings();
+    if (!settings.command || !settings.events.includes(event)) return;
+    if (!await this.approveNotificationHook(settings.command)) return;
+    const result = await runNotificationHook(settings.command, {
+      event,
+      title: 'Pi Chat',
+      message,
+      sessionPath: this.activeSessionPath,
+    });
+    this.outputChannel.appendLine(`[notification hook] ${event}: ${result.reason}${result.exitCode === undefined ? '' : ` (exit ${result.exitCode ?? 'unknown'})`} after ${result.durationMs} ms.`);
+    if (!result.success && result.reason !== 'concurrency-limit') {
+      void vscode.window.showWarningMessage('A Pi Chat notification hook failed. Open Pi Chat output for details.');
+    }
+  }
+
   onModelRefreshConfigurationChanged(): void {
     this.post({
       type: 'model-refresh-setting',
@@ -6421,6 +6548,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
                 <label class="runtime-setting"><input id="notification-sound" type="checkbox"><span>Local sound when Pi finishes or needs input while hidden</span></label>
                 <button id="test-notification-sound" class="text-button" type="button" disabled>Test sound</button>
+                <div class="popover-heading extension-command-heading"><strong>Notification hook</strong><span>Optional machine-wide script</span></div>
+                <label class="runtime-setting" for="notification-hook-command"><span>Command</span><input id="notification-hook-command" type="text" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="Absolute path to a script"></label>
+                <label class="runtime-setting"><input id="notification-hook-input-request" type="checkbox"><span>Run when an extension asks for input</span></label>
+                <label class="runtime-setting"><input id="notification-hook-agent-finished" type="checkbox"><span>Run when Pi finishes while this window is unfocused</span></label>
+                <button id="save-notification-hook" class="text-button" type="button">Save hook</button>
+                <p class="runtime-settings-note">Commands run automatically with your OS account permissions after you confirm. Use only scripts you trust. Workspace settings are ignored; Pi credentials are not passed. Event data includes the session title and path.</p>
                 <label class="runtime-setting cache-warming-setting" for="cache-warming"><span>Cache warming</span><select id="cache-warming"><option value="off">Off</option><option value="streaming">While streaming</option><option value="idle">Between runs</option></select></label>
                 <label class="runtime-setting cache-warming-setting" for="offline-mode"><span>Startup network mode</span><select id="offline-mode"><option value="inherit">Use Pi environment</option><option value="offline">Offline startup</option><option value="online">Allow startup checks</option></select></label>
                 <p class="runtime-settings-note">Offline mode disables automatic startup network operations. Model requests still need a connection. Restart Pi to apply changes.</p>

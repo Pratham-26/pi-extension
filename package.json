@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.117",
+  "version": "0.1.118",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -470,6 +470,21 @@
           "default": false,
           "scope": "window",
           "description": "Play a brief local tone when Pi finishes a run or asks for input while the chat view is hidden."
+        },
+        "piChat.notifications.hookCommand": {
+          "type": "string",
+          "maxLength": 4096,
+          "default": "",
+          "scope": "machine",
+          "description": "Optional machine-scoped command to run for selected Pi Chat notification events. It runs with your OS account permissions after confirmation; use only a command or script you trust. Workspace values are ignored and Pi credentials are not forwarded."
+        },
+        "piChat.notifications.hookEvents": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["input_request", "agent_finished"] },
+          "maxItems": 2,
+          "default": ["input_request"],
+          "scope": "machine",
+          "description": "Choose which events run piChat.notifications.hookCommand. Events are ignored while the command is empty."
         }
       }
     },
@@ -506,6 +521,7 @@
     "smoke:sessions": "node scripts/smoke-session-order.mjs",
     "smoke:prompts": "node scripts/smoke-prompt-suggestions.mjs",
     "smoke:package-recommendations": "esbuild src/package-recommendations.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/package-recommendations.cjs && node scripts/smoke-package-recommendations.mjs",
+    "smoke:notification-hooks": "esbuild src/notification-hook.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/notification-hook.cjs && node scripts/smoke-notification-hooks.mjs",
     "smoke:turn-summary": "esbuild src/turn-file-summary.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/turn-file-summary.cjs && node scripts/smoke-turn-file-summary.cjs",
     "package": "npm run compile && vsce package"
   },

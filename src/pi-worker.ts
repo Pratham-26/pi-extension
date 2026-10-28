@@ -3021,7 +3021,11 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
       });
     } else if (event.type === 'agent_settled') {
       busy = false;
-      send('run-finished', { aborted: Boolean(event.aborted) });
+      send('run-finished', {
+        aborted: Boolean(event.aborted),
+        agentRun: true,
+        sessionTitle: typeof next.sessionName === 'string' ? next.sessionName : '',
+      });
       snapshot();
       void listSessions();
     }

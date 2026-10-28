@@ -18,7 +18,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - A bounded local diagnostic log with timestamps and generic error categories (**Pi Chat: Open Local Diagnostic Log**), plus a redacted report with software versions and generic error categories only
 - Transcript search across messages, visible thinking, and tool output; quote-to-prompt with jump-back references; persistent bookmarks; branch-safe omit/edit/restore controls and bounded inline revision history for model context; locally stored prompt history with an opt-out, session-scoped saved drafts with attachment restore and delete undo; and a context-usage meter with confirmed Pi compaction
 - Copy controls for assistant code blocks, workspace definition links on inline symbols in finished replies, and on-demand model-generated follow-up prompts that fill the composer without sending automatically
-- Queued Pi extension dialogs with request-matched responses, abort signals, optional deadlines with countdowns, bounded static widgets and interactive text-only widget cards with keyboard/pointer input, selectable Pi extension UI mode, header/footer components, text-only interactive extension components with keyboard/pointer input and cancellation, custom editor components rendered through a bounded text bridge with routed input and composer synchronization, safe structured tool details, checklist results, supported subagent transcripts and usage, and hidden-view VS Code notifications
+- Queued Pi extension dialogs with request-matched responses, abort signals, optional deadlines with countdowns, bounded static widgets and interactive text-only widget cards with keyboard/pointer input, selectable Pi extension UI mode, header/footer components, text-only interactive extension components with keyboard/pointer input and cancellation, custom editor components rendered through a bounded text bridge with routed input and composer synchronization, safe structured tool details, checklist results, supported subagent transcripts and usage, hidden-window VS Code notifications, and optional machine-scoped script hooks for selected events after explicit confirmation
 
 See [the feature coverage checklist](docs/feature-coverage.md) for implemented and planned capabilities. Voice dictation is out of scope. Direct shell execution from the composer is unavailable because the automatic security review rejected that execution path.
 
@@ -28,6 +28,8 @@ Run `npm run smoke:worker` to open a real Pi SDK worker with a temporary configu
 
 Run `npm run smoke:sessions` to verify pinned priority, saved manual order, recent/title sorting, and the recent-order fallback without modifying Pi session files. Run `npm run smoke:drafts` to exercise saved-draft session isolation, text/image context, swap restore, delete undo, retention limits, persisted-data validation, and storage bounds.
 
+Run `npm run smoke:notification-hooks` for event filtering, environment isolation and bounded command execution. Run `npm run smoke:package-recommendations` for npm manifest validation.
+
 Set `piChat.sessions.openLatestOnStart` in VS Code Settings to reopen the latest session for the active workspace when the chat view starts. It defaults to `false`.
 
 The extension instantiates the bundled Pi SDK directly in a worker thread; it does not launch the Pi CLI and speak the CLI's RPC protocol. The `piChat.extensionUiMode` setting controls the UI mode exposed to loaded Pi extensions. The webview uses a restrictive Content Security Policy and renders Pi output as text or a safe Markdown subset; external links are limited to HTTPS and loopback HTTP. It does not add telemetry or route requests through a hosted service. Saved draft contents stay in local VS Code extension storage and are only sent to Pi when you submit them. Live session indicators are shared between local VS Code windows using short-lived records with hashed session identifiers and generic activity labels; prompts, titles, and file paths are not stored in those records.
@@ -35,6 +37,8 @@ The extension instantiates the bundled Pi SDK directly in a worker thread; it do
 Use **Pi Chat: Choose Pi Configuration Folder** to select another machine-local Pi configuration directory. The picker restarts Pi after confirmation when there is no running or queued work. If you change `piChat.agentDir` or `piChat.offlineMode` directly in VS Code Settings, use **Pi Chat: Restart Pi Runtime** to apply the change; the command refuses while Pi work is active. Offline mode disables automatic startup network operations, but it does not block model API requests.
 
 Use **Pi Chat: Manage Pi Runtime Environment Variables** to add or remove custom runtime values. Values are stored in VS Code SecretStorage and are not shown in diagnostics. After a manual runtime restart, Pi, its tools, and loaded extensions can read them, so only add values you intend to expose to those local processes.
+
+Optional notification hooks are configured in Runtime settings or through `piChat.notifications.hookCommand` and `piChat.notifications.hookEvents`. The command is machine-scoped, ignored in workspace settings, and requires confirmation before it can run. It runs as your OS account with a 10-second limit; the process receives event data through JSON on stdin and `PI_CHAT_*` variables. Only basic OS variables and explicitly named `PI_CHAT_HOOK_*` variables are forwarded, not Pi provider credentials.
 
 Use `piChat.prompts.systemPromptText` or `piChat.prompts.systemPromptFile` to replace Pi's system prompt; text takes precedence over the file. `piChat.prompts.appendSystemPromptText` and `piChat.prompts.appendSystemPromptFiles` add instructions after Pi's configured prompt files. Files must be UTF-8 and are limited to 1 MiB each. `piChat.resources.additionalExtensionPaths`, `additionalSkillPaths`, `additionalPromptTemplatePaths`, and `additionalThemePaths` add local resources, while the `disable*Discovery` settings turn off automatic discovery for each resource type. These settings apply after **Pi Chat: Restart Pi Runtime**. Workspace-level prompt and resource settings are ignored until the workspace is trusted. Only add extension paths you trust, because Pi loads extension code into its runtime. `piChat.appearance.spacing` controls transcript spacing; `piChat.appearance.showSeparators` adds dividers before the next message after a finished assistant turn.
 
@@ -54,10 +58,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.117.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.118.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.117.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.118.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.
