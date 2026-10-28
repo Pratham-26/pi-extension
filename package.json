@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.72",
+  "version": "0.1.73",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -149,6 +149,27 @@
           "default": "rpc",
           "scope": "machine",
           "description": "Choose which Pi extension UI mode extensions see. Changes apply after restarting the Pi runtime."
+        },
+        "piChat.extensionStatus.display": {
+          "type": "string",
+          "enum": ["footer", "statusBar", "both", "hidden"],
+          "enumDescriptions": [
+            "Show extension status values in the chat footer.",
+            "Show extension status values in the VS Code status bar.",
+            "Show extension status values in both places.",
+            "Do not display extension status values."
+          ],
+          "default": "footer",
+          "scope": "window",
+          "description": "Choose where Pi extensions can display their status values."
+        },
+        "piChat.extensionStatus.keys": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 128 },
+          "maxItems": 32,
+          "default": [],
+          "scope": "window",
+          "description": "Limit displayed Pi extension status values to these exact keys. An empty list displays every key."
         },
         "piChat.context.followSelection": {
           "type": "boolean",

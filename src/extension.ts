@@ -110,6 +110,8 @@ type PiResourceChoice = vscode.QuickPickItem & {
 
 type PiOfflineMode = 'inherit' | 'offline' | 'online';
 type PiExtensionUiMode = 'rpc' | 'tui';
+type PiExtensionStatusDisplay = 'footer' | 'statusBar' | 'both' | 'hidden';
+type PiExtensionStatusPreferences = { display: PiExtensionStatusDisplay; keys: string[] };
 type ContextFileChoice = { path: string; enabled: boolean };
 
 type RunningSessionRecord = {
@@ -168,6 +170,19 @@ function readPiExtensionUiMode(): PiExtensionUiMode {
   return vscode.workspace.getConfiguration('piChat').get<string>('extensionUiMode', 'rpc') === 'tui' ? 'tui' : 'rpc';
 }
 
+function readPiExtensionStatusPreferences(): PiExtensionStatusPreferences {
+  const configuration = vscode.workspace.getConfiguration('piChat.extensionStatus');
+  const display = configuration.get<string>('display', 'footer');
+  const keys = configuration.get<unknown[]>('keys', []);
+  return {
+    display: display === 'statusBar' || display === 'both' || display === 'hidden' ? display : 'footer',
+    keys: Array.isArray(keys)
+      ? [...new Set(keys.filter((key): key is string => typeof key === 'string' && key.length <= 128
+        && !/[\u0000-\u001f\u007f]/.test(key)))].slice(0, 32)
+      : [],
+  };
+}
+
 type PendingSessionHandoff = {
   sessionPath: string;
   cwd: string;
@@ -203,7 +218,9 @@ function isValidBase64ImageData(data: string): boolean {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  const provider = new PiChatViewProvider(context);
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
+  statusBarItem.name = 'Pi extension status';
+  const provider = new PiChatViewProvider(context, statusBarItem);
   const editorProviders = new Set<PiChatViewProvider>();
   const attachEditorPanel = (panel: vscode.WebviewPanel, state?: unknown): void => {
     const panelProvider = new PiChatViewProvider(context);
@@ -256,6 +273,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.agentDir')) activeProvider.onAgentDirConfigurationChanged();
         if (event.affectsConfiguration('piChat.offlineMode')) activeProvider.onOfflineModeConfigurationChanged();
         if (event.affectsConfiguration('piChat.extensionUiMode')) activeProvider.onExtensionUiModeConfigurationChanged();
+        if (event.affectsConfiguration('piChat.extensionStatus')) activeProvider.onExtensionStatusConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -322,9 +340,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private pinnedActiveFileEnabled: boolean;
   private diagnosticEvents: Array<{ at: string; category: string }> = [];
   private readonly outputChannel: vscode.OutputChannel;
+  private readonly extensionStatuses = new Map<string, string>();
   private logWriteQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly context: vscode.ExtensionContext) {
+  constructor(private readonly context: vscode.ExtensionContext, private readonly extensionStatusBarItem?: vscode.StatusBarItem) {
     this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
     this.openLatestSessionOnStart = vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('openLatestOnStart', false);
     this.outputChannel = vscode.window.createOutputChannel('Pi Chat');
@@ -341,6 +360,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.selectionSubscription = vscode.window.onDidChangeTextEditorSelection((event) => {
       if (this.pinnedActiveFileEnabled && event.textEditor === vscode.window.activeTextEditor) this.publishPinnedActiveFile(event.textEditor);
     });
+    this.updateExtensionStatusBar();
   }
 
   dispose(): void {
@@ -348,6 +368,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.clearRunningSessionLease();
     this.cancelProviderAuthPrompts();
     this.outputChannel.dispose();
+    this.extensionStatusBarItem?.dispose();
     this.activeEditorSubscription.dispose();
     this.selectionSubscription.dispose();
     this.webviewMessageSubscription?.dispose();
@@ -411,6 +432,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
 
+    this.postExtensionStatusPreferences();
     void this.ensureRuntime();
   }
 
@@ -1266,6 +1288,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             this.worker?.postMessage({ type: 'initializeSession' });
           }
         }
+      } else if (message.type === 'extension-status') {
+        this.updateExtensionStatus(message);
+        this.post(message);
+      } else if (message.type === 'extension-chrome-reset') {
+        this.extensionStatuses.clear();
+        this.updateExtensionStatusBar();
+        this.post(message);
       } else if (message.type === 'pi-resources') {
         const pending = this.pendingPiResourcePicker;
         if (!pending || pending.worker !== worker || pending.requestId !== message.requestId) return;
@@ -1355,6 +1384,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingExtensionUiRequestIds.clear();
         this.pendingPiResourcePicker = undefined;
         this.cancelProviderAuthPrompts(worker);
+        this.extensionStatuses.clear();
+        this.updateExtensionStatusBar();
+        this.post({ type: 'extension-chrome-reset' });
       }
       this.failPendingMcpSetting(worker);
       this.failPendingMcpServerRequests(worker);
@@ -1386,6 +1418,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'ready':
         this.sessionSearchAllWorkspaces = message.allWorkspaces === true;
         this.post({ type: 'extension-widget-pins', keys: this.getPinnedExtensionWidgetKeys() });
+        this.postExtensionStatusPreferences();
         await this.ensureRuntime();
         this.refreshSessions();
         this.worker?.postMessage({ type: 'listPackages' });
@@ -3980,6 +4013,55 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
       ? 'Pi extension UI mode changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
       : 'Pi extension UI mode changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
+  }
+
+  onExtensionStatusConfigurationChanged(): void {
+    this.postExtensionStatusPreferences();
+    this.updateExtensionStatusBar();
+  }
+
+  private postExtensionStatusPreferences(): void {
+    const preferences = readPiExtensionStatusPreferences();
+    this.post({
+      type: 'extension-status-display',
+      ...preferences,
+      statuses: [...this.extensionStatuses].map(([key, text]) => ({ key, text })),
+    });
+  }
+
+  private updateExtensionStatus(message: RuntimeMessage): void {
+    const key = typeof message.key === 'string' && message.key.length > 0 && message.key.length <= 128
+      && !/[\u0000-\u001f\u007f]/.test(message.key) ? message.key : 'extension';
+    const text = typeof message.text === 'string'
+      ? message.text.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 512).trim()
+      : '';
+    if (text) this.extensionStatuses.set(key, text);
+    else this.extensionStatuses.delete(key);
+    this.updateExtensionStatusBar();
+  }
+
+  private updateExtensionStatusBar(): void {
+    const item = this.extensionStatusBarItem;
+    if (!item) return;
+    const preferences = readPiExtensionStatusPreferences();
+    if (preferences.display !== 'statusBar' && preferences.display !== 'both') {
+      item.text = '';
+      item.tooltip = undefined;
+      item.hide();
+      return;
+    }
+    const filter = new Set(preferences.keys);
+    const entries = [...this.extensionStatuses].filter(([key]) => filter.size === 0 || filter.has(key));
+    if (entries.length === 0) {
+      item.text = '';
+      item.tooltip = undefined;
+      item.hide();
+      return;
+    }
+    const safeText = entries.map(([, text]) => text.replace(/\$\(/g, '\\$(').replace(/[\r\n]+/g, ' '));
+    item.text = safeText.join(' · ').slice(0, 120);
+    item.tooltip = entries.map(([key, text]) => `${key}: ${text}`).join('\n').slice(0, 2_000);
+    item.show();
   }
 
   private async setPiOfflineMode(message: RuntimeMessage): Promise<void> {

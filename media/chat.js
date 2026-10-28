@@ -85,6 +85,8 @@ const state = {
   extensionWidgetLastPointerAt: 0,
   extensionChrome: { header: [], footer: [] },
   extensionStatuses: new Map(),
+  extensionStatusDisplay: 'footer',
+  extensionStatusKeys: [],
   extensionRequest: undefined,
   extensionRequestQueue: [],
   extensionCustomRequest: undefined,
@@ -3277,8 +3279,11 @@ function renderExtensionChrome() {
 }
 
 function renderExtensionStatuses() {
-  ui.extensionStatus.textContent = [...state.extensionStatuses.values()].join(' · ');
-  ui.extensionStatus.title = [...state.extensionStatuses.entries()].map(([key, value]) => `${key}: ${value}`).join('\n');
+  const showInFooter = state.extensionStatusDisplay === 'footer' || state.extensionStatusDisplay === 'both';
+  const filter = new Set(state.extensionStatusKeys);
+  const entries = [...state.extensionStatuses].filter(([key]) => filter.size === 0 || filter.has(key));
+  ui.extensionStatus.textContent = showInFooter ? entries.map(([, value]) => value).join(' · ') : '';
+  ui.extensionStatus.title = showInFooter ? entries.map(([key, value]) => `${key}: ${value}`).join('\n') : '';
 }
 
 function finishExtensionDialog(value) {
@@ -4081,6 +4086,17 @@ window.addEventListener('message', (event) => {
     case 'extension-status':
       if (typeof data.text === 'string' && data.text) state.extensionStatuses.set(String(data.key || 'extension'), data.text);
       else state.extensionStatuses.delete(String(data.key || 'extension'));
+      renderExtensionStatuses();
+      break;
+    case 'extension-status-display':
+      state.extensionStatusDisplay = ['footer', 'statusBar', 'both', 'hidden'].includes(data.display) ? data.display : 'footer';
+      state.extensionStatusKeys = Array.isArray(data.keys)
+        ? [...new Set(data.keys.filter((key) => typeof key === 'string' && key.length <= 128))].slice(0, 32)
+        : [];
+      state.extensionStatuses = new Map(Array.isArray(data.statuses)
+        ? data.statuses.slice(0, 32).flatMap((entry) => typeof entry?.key === 'string' && entry.key.length <= 128
+          && typeof entry?.text === 'string' ? [[entry.key, entry.text.slice(0, 512)]] : [])
+        : []);
       renderExtensionStatuses();
       break;
     case 'extension-title':
