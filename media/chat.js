@@ -225,6 +225,12 @@ function isTranscriptMessageVisible(message) {
   return !state.focusedTranscript || message.role !== 'tool';
 }
 
+const EXPLORATION_TOOL_NAMES = new Set(['read', 'grep', 'find', 'ls']);
+
+function isExplorationToolMessage(message) {
+  return message?.role === 'tool' && EXPLORATION_TOOL_NAMES.has(String(message.toolName || '').toLowerCase());
+}
+
 function toolExpansionPreference(toolName, isError = false) {
   const name = String(toolName || 'tool').slice(0, 128);
   return Object.prototype.hasOwnProperty.call(state.toolExpansion, name) ? state.toolExpansion[name] : isError;
@@ -1173,10 +1179,38 @@ function renderMessages(shouldFollow = true) {
     const message = state.messages[messageIndex];
     if (!isTranscriptMessageVisible(message)) continue;
     if (message.role === 'tool') {
-      const node = message.node instanceof HTMLElement ? message.node : createHistoricalToolCard(message);
-      message.node = node;
-      node.dataset.messageIndex = String(messageIndex);
-      ui.messageList.append(node);
+      const groupMessages = [];
+      let groupEnd = messageIndex;
+      while (groupEnd < state.messages.length
+        && isTranscriptMessageVisible(state.messages[groupEnd])
+        && isExplorationToolMessage(state.messages[groupEnd])) {
+        groupMessages.push({ message: state.messages[groupEnd], index: groupEnd });
+        groupEnd += 1;
+      }
+      if (groupMessages.length > 1) {
+        const hasError = groupMessages.some(({ message: item }) => item.isError === true);
+        const group = document.createElement('details');
+        group.className = 'tool-exploration-group';
+        group.open = toolExpansionPreference('exploration', hasError);
+        const summary = document.createElement('summary');
+        summary.textContent = `Explored ${groupMessages.length} items`;
+        const toolNames = [...new Set(groupMessages.map(({ message: item }) => String(item.toolName || 'tool')))];
+        summary.title = `Show ${groupMessages.length} file exploration calls: ${toolNames.join(', ')}`;
+        group.append(summary);
+        for (const item of groupMessages) {
+          const node = item.message.node instanceof HTMLElement ? item.message.node : createHistoricalToolCard(item.message);
+          item.message.node = node;
+          node.dataset.messageIndex = String(item.index);
+          group.append(node);
+        }
+        ui.messageList.append(group);
+        messageIndex = groupEnd - 1;
+      } else {
+        const node = message.node instanceof HTMLElement ? message.node : createHistoricalToolCard(message);
+        message.node = node;
+        node.dataset.messageIndex = String(messageIndex);
+        ui.messageList.append(node);
+      }
       continue;
     }
     if (message.role !== 'user' && message.role !== 'assistant') continue;
@@ -1683,6 +1717,17 @@ function appendStructuredToolDetails(card, details, partial = false) {
 
 ui.messageList.addEventListener('click', (event) => {
   if (!(event.target instanceof Element)) return;
+  const groupSummary = event.target.closest('.tool-exploration-group > summary');
+  const group = groupSummary?.parentElement;
+  if (group instanceof HTMLDetailsElement) {
+    const open = !group.open;
+    state.toolExpansion.exploration = open;
+    persistWebviewState();
+    for (const peer of ui.messageList.querySelectorAll('.tool-exploration-group')) {
+      if (peer !== group) peer.open = open;
+    }
+    return;
+  }
   const summary = event.target.closest('.tool-card > summary');
   const card = summary?.parentElement;
   if (!(card instanceof HTMLDetailsElement)) return;
@@ -1722,6 +1767,10 @@ function updateChatSearch(moveToCurrent = false) {
   ui.chatSearchCount.textContent = state.chatSearchIndex < 0 ? (query ? '0 of 0' : '') : `${state.chatSearchIndex + 1} of ${state.chatSearchHits.length}`;
   if (moveToCurrent && state.chatSearchIndex >= 0) {
     const row = ui.messageList.querySelector(`[data-message-index="${state.chatSearchHits[state.chatSearchIndex]}"]`);
+    const explorationGroup = row?.closest('.tool-exploration-group');
+    if (explorationGroup instanceof HTMLDetailsElement) explorationGroup.open = true;
+    const toolCard = row?.closest('.tool-card');
+    if (toolCard instanceof HTMLDetailsElement) toolCard.open = true;
     row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }
 }

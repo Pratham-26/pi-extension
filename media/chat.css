@@ -527,6 +527,10 @@ button:focus-visible, textarea:focus-visible {
 .tool-card summary { padding: 6px 8px; color: var(--muted); font-size: 10px; cursor: pointer; }
 .tool-card[open] summary { color: var(--text); border-bottom: 1px solid var(--line); }
 .tool-card.tool-error summary { color: var(--danger); }
+.tool-exploration-group { width: min(100%, 68ch); margin: 7px auto; }
+.tool-exploration-group > summary { padding: 5px 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; cursor: pointer; }
+.tool-exploration-group[open] > summary { color: var(--text); }
+.tool-exploration-group > .tool-card { width: 100%; margin: 5px 0; }
 .tool-output { max-height: 220px; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; }
 .tool-structured-result { border-top: 1px solid var(--line); padding: 8px; color: var(--text); font-size: 11px; }
 .tool-checklist-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
