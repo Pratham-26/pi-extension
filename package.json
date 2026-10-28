@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.93",
+  "version": "0.1.94",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -210,6 +210,13 @@
           "scope": "machine",
           "description": "Show running Pi sessions in a separate group at the top of session history."
         },
+        "piChat.sessions.sortOrder": {
+          "type": "string",
+          "enum": ["manual", "updated", "name"],
+          "default": "manual",
+          "scope": "machine",
+          "description": "Sort Pi session history manually, by recent activity, or by title. Pinned sessions stay at the top."
+        },
         "piChat.mcp.enabled": {
           "type": "boolean",
           "default": false,
@@ -295,6 +302,7 @@
     "compile:webview": "esbuild src/webview-renderers.js --bundle --platform=browser --target=es2022 --format=iife --minify --legal-comments=linked --outfile=dist/webview-renderers.js",
     "typecheck": "tsc --noEmit",
     "smoke:worker": "node scripts/smoke-worker.mjs",
+    "smoke:sessions": "node scripts/smoke-session-order.mjs",
     "package": "npm run compile && vsce package"
   },
   "dependencies": {

@@ -15,6 +15,7 @@ const state = {
   sessionQuery: '',
   sessionSearchAllWorkspaces: persistedWebviewState.sessionSearchAllWorkspaces === true,
   groupRunningSessions: false,
+  sessionSortOrder: 'manual',
   drafts: persistedWebviewState.drafts && typeof persistedWebviewState.drafts === 'object' ? persistedWebviewState.drafts : {},
   promptHistory: persistedWebviewState.promptHistory && typeof persistedWebviewState.promptHistory === 'object' ? persistedWebviewState.promptHistory : {},
   toolExpansion: Object.fromEntries(Object.entries(persistedWebviewState.toolExpansion || {})
@@ -188,6 +189,7 @@ const ui = {
   sessionSearch: el('session-search'),
   sessionSearchAll: el('session-search-all'),
   sessionGroupRunning: el('session-group-running'),
+  sessionSortOrder: el('session-sort-order'),
   renameSession: el('rename-session'),
   railSessions: el('rail-sessions'),
   attachments: el('attachments'),
@@ -569,21 +571,32 @@ function shorten(value, max = 70) {
 function renderSessions() {
   ui.sessions.replaceChildren();
   ui.railSessions.replaceChildren();
-  const runningSessions = state.groupRunningSessions ? state.sessions.filter((session) => session.running === true) : [];
-  const recentSessions = state.groupRunningSessions ? state.sessions.filter((session) => session.running !== true) : state.sessions;
-  const sessions = state.groupRunningSessions ? [...runningSessions, ...recentSessions] : state.sessions;
+  const pinnedSessions = state.groupRunningSessions ? state.sessions.filter((session) => session.pinned === true) : [];
+  const runningSessions = state.groupRunningSessions
+    ? state.sessions.filter((session) => session.running === true && session.pinned !== true)
+    : [];
+  const recentSessions = state.groupRunningSessions
+    ? state.sessions.filter((session) => session.running !== true && session.pinned !== true)
+    : state.sessions;
+  const sessions = state.groupRunningSessions ? [...pinnedSessions, ...runningSessions, ...recentSessions] : state.sessions;
   ui.sessionsEmpty.hidden = sessions.length > 0;
   ui.sessionsEmpty.textContent = state.sessionSearchAllWorkspaces
     ? (state.sessionQuery ? 'No sessions match across Pi workspaces.' : 'No saved Pi sessions were found across workspaces.')
     : (state.sessionQuery ? 'No sessions match this search.' : 'No saved sessions yet.');
 
+  if (pinnedSessions.length) {
+    const heading = document.createElement('div');
+    heading.className = 'session-group-heading';
+    heading.textContent = 'Pinned';
+    ui.sessions.append(heading);
+  }
   if (runningSessions.length) {
     const heading = document.createElement('div');
     heading.className = 'session-group-heading';
     heading.textContent = `Running sessions · ${runningSessions.length}`;
     ui.sessions.append(heading);
   }
-  if (runningSessions.length && recentSessions.length) {
+  if (recentSessions.length && (runningSessions.length || pinnedSessions.length)) {
     const heading = document.createElement('div');
     heading.className = 'session-group-heading';
     heading.textContent = 'Recent sessions';
@@ -670,14 +683,16 @@ function renderSessions() {
     remove.addEventListener('click', () => post('deleteSession', { path: session.path, title: session.title }));
     actions.append(pin, changeColor, rename, remove);
     entry.append(actions);
-    entry.draggable = session.running !== true && !state.groupRunningSessions;
+    entry.draggable = session.running !== true && !state.groupRunningSessions && state.sessionSortOrder === 'manual';
     entry.addEventListener('dragstart', (event) => {
-      if (session.running === true || state.groupRunningSessions) { event.preventDefault(); return; }
+      if (session.running === true || state.groupRunningSessions || state.sessionSortOrder !== 'manual') { event.preventDefault(); return; }
       event.dataTransfer?.setData('text/pi-session', session.path);
     });
-    entry.addEventListener('dragover', (event) => { if (session.running !== true && !state.groupRunningSessions) event.preventDefault(); });
+    entry.addEventListener('dragover', (event) => {
+      if (session.running !== true && !state.groupRunningSessions && state.sessionSortOrder === 'manual') event.preventDefault();
+    });
     entry.addEventListener('drop', (event) => {
-      if (session.running === true || state.groupRunningSessions) return;
+      if (session.running === true || state.groupRunningSessions || state.sessionSortOrder !== 'manual') return;
       event.preventDefault();
       const fromPath = event.dataTransfer?.getData('text/pi-session');
       if (!fromPath || fromPath === session.path) return;
@@ -4360,6 +4375,10 @@ window.addEventListener('message', (event) => {
         state.groupRunningSessions = data.groupRunningSessions;
         ui.sessionGroupRunning.checked = state.groupRunningSessions;
       }
+      if (data.sessionSortOrder === 'manual' || data.sessionSortOrder === 'updated' || data.sessionSortOrder === 'name') {
+        state.sessionSortOrder = data.sessionSortOrder;
+        ui.sessionSortOrder.value = state.sessionSortOrder;
+      }
       {
         const total = Number.isSafeInteger(data.total) && data.total >= 0 ? data.total : state.sessions.length;
         const allWorkspaces = data.allWorkspaces === true;
@@ -4960,6 +4979,11 @@ ui.sessionGroupRunning.addEventListener('change', () => {
   const requested = ui.sessionGroupRunning.checked;
   ui.sessionGroupRunning.checked = state.groupRunningSessions;
   post('setGroupRunningSessions', { enabled: requested });
+});
+ui.sessionSortOrder.addEventListener('change', () => {
+  const requested = ui.sessionSortOrder.value;
+  ui.sessionSortOrder.value = state.sessionSortOrder;
+  post('setSessionSortOrder', { sortOrder: requested });
 });
 ui.renameSession.addEventListener('click', () => {
   if (state.sessionPath) post('renameSession', { path: state.sessionPath, currentName: ui.title.title });

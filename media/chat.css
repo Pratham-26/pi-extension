@@ -177,8 +177,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .session-search-row .session-search { flex: 1 1 auto; margin: 0; }
 .session-search-scope { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; color: var(--muted); cursor: pointer; font-size: 10px; white-space: nowrap; }
 .session-search-scope input { margin: 0; accent-color: var(--focus); }
-.session-running-group { display: flex; align-items: center; gap: 5px; padding: 0 10px 6px; color: var(--muted); cursor: pointer; font-size: 10px; }
+.session-list-options { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 0 10px 6px; }
+.session-running-group { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); cursor: pointer; font-size: 10px; white-space: nowrap; }
 .session-running-group input { margin: 0; accent-color: var(--focus); }
+.session-sort-order { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.session-sort-order select { max-width: 120px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--surface-input); font: inherit; }
 .session-results-note { padding: 0 12px 4px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 .session-search { flex: 0 0 auto; min-width: 0; margin: 0 7px 5px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 11px; }
 .session-search::placeholder { color: var(--muted); }

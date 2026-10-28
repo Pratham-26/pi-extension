@@ -4,7 +4,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 
 ## Current build
 
-- Persistent Pi sessions with search across messages, thinking, and tool activity; opt-in search across all Pi workspaces; pinning, colors, ordering, optional grouping of running sessions, cloning, branching, edit-and-continue prompts with text/context/image restoration, deletion, export, configurable local auto-naming, and optional latest-session restore
+- Persistent Pi sessions with search across messages, thinking, and tool activity; opt-in search across all Pi workspaces; pinning, colors, manual/recent/title ordering, optional grouping of running sessions, cloning, branching, edit-and-continue prompts with text/context/image restoration, deletion, export, configurable local auto-naming, and optional latest-session restore
 - Dedicated Pi chat editors beside the active file, each with an independent worker and session; editor tabs restore their prior session after VS Code restarts when it is still available in the same workspace. Open one with **Pi Chat: Open New Chat Beside Active Editor**
 - Streamed assistant text, bounded previews for user, assistant, and tool-result images, KaTeX math and Mermaid diagrams, collapsible thinking blocks, a focused transcript toggle, live and persisted tool-call/result cards with Pi's call/result renderers shown through a bounded safe text bridge, consecutive tool runs grouped into collapsible activity sections and file exploration shown in its own group, configurable successful-card expansion with errors kept open, saved per-tool and per-group expansion preferences, line-level Pi-context edit diffs, editable follow-up/steering queues, and stop controls
 - Searchable model catalog with provider sign-in, guided custom endpoint setup for six Pi API formats and API identifiers registered by loaded Pi extensions, API keys in VS Code SecretStorage, custom `models.json` editing, Pi runtime controls, per-workspace selection of discovered `AGENTS.md` context files, confirmed manual refresh, optional confirmed refresh at runtime startup (skipped offline), thinking levels, and presets
@@ -23,6 +23,8 @@ See [the feature coverage checklist](docs/feature-coverage.md) for implemented a
 ## Local verification
 
 Run `npm run smoke:worker` to open a real Pi SDK worker with a temporary configuration and a loopback-only mock model. The check selects a model, streams one response, verifies the persisted session transcript, and removes its temporary data. It uses Pi offline mode, an empty tool set, and a temporary config; it does not read the user's Pi credentials or call an external provider.
+
+Run `npm run smoke:sessions` to verify pinned priority, saved manual order, recent/title sorting, and the recent-order fallback without modifying Pi session files.
 
 Set `piChat.sessions.openLatestOnStart` in VS Code Settings to reopen the latest session for the active workspace when the chat view starts. It defaults to `false`.
 

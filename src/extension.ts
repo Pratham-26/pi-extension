@@ -21,6 +21,7 @@ import {
   type IgnoredFileChoice,
   type IgnoredFileListing,
 } from './git-worktree-files';
+import { sortSessionItems } from './session-order';
 
 type Attachment = {
   id: string;
@@ -1299,7 +1300,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const pins = this.context.globalState.get<Record<string, boolean>>('piChat.pinnedSessions', {});
         const colors = this.context.globalState.get<Record<string, string>>('piChat.sessionColors', {});
         const order = this.context.globalState.get<string[]>('piChat.sessionOrder', []);
-        const orderIndex = new Map(order.map((path, index) => [path, index]));
+        const configuredSortOrder = vscode.workspace.getConfiguration('piChat.sessions').get<unknown>('sortOrder', 'manual');
+        const sortOrder = configuredSortOrder === 'updated' || configuredSortOrder === 'name' ? configuredSortOrder : 'manual';
         const currentWorkspace = this.workerWorkspace ?? '';
         const allWorkspaces = message.allWorkspaces === true;
         const sessions: Array<Record<string, unknown>> = sessionItems
@@ -1322,17 +1324,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               pinned: Boolean(pins[String(item.path ?? '')]),
               color: colors[String(item.path ?? '')] ?? 'default',
             };
-          })
-          .sort((a, b) => Number(b['pinned']) - Number(a['pinned'])
-            || (orderIndex.get(String(a['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(String(b['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER)
-            || Number(b['modified'] ?? 0) - Number(a['modified'] ?? 0));
-        this.sessionListForRunningStatus = sessions;
+          });
+        const sortedSessions = sortSessionItems(sessions, order, sortOrder);
+        this.sessionListForRunningStatus = sortedSessions;
         void this.refreshRunningSessionStatuses();
         this.consumePendingSessionHandoff(worker);
         this.post({
           ...message,
-          sessions,
+          sessions: sortedSessions,
           groupRunningSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('groupRunning', false),
+          sessionSortOrder: sortOrder,
         });
         let openingInitialSession = this.sessionInteractionStarted || Boolean(this.activeSessionPath);
         if (!openingInitialSession && this.restoredEditorSessionPath) {
@@ -1609,6 +1610,19 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const order = [...proposed, ...prior.filter((item) => this.isKnownSessionPath(item) && !visible.has(item))];
         await this.context.globalState.update('piChat.sessionOrder', order);
         this.refreshSessions();
+        return;
+      }
+      case 'setSessionSortOrder': {
+        const sortOrder = message.sortOrder;
+        if (sortOrder !== 'manual' && sortOrder !== 'updated' && sortOrder !== 'name') return;
+        try {
+          await vscode.workspace.getConfiguration('piChat.sessions').update(
+            'sortOrder', sortOrder, vscode.ConfigurationTarget.Global,
+          );
+          this.refreshSessions();
+        } catch (error) {
+          this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the session order preference.', isError: true });
+        }
         return;
       }
       case 'setGroupRunningSessions': {
@@ -5337,7 +5351,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           <input id="session-search" class="session-search" type="search" aria-label="Search sessions" placeholder="Search chats, thinking, and tool activity">
           <label class="session-search-scope" title="Search Pi session history from every workspace on this machine"><input id="session-search-all" type="checkbox"><span>All workspaces</span></label>
         </div>
-        <label class="session-running-group"><input id="session-group-running" type="checkbox"><span>Group running sessions</span></label>
+        <div class="session-list-options">
+          <label class="session-running-group"><input id="session-group-running" type="checkbox"><span>Group running sessions</span></label>
+          <label class="session-sort-order"><span>Order</span><select id="session-sort-order" aria-label="Session order"><option value="manual">Manual</option><option value="updated">Recently updated</option><option value="name">Title</option></select></label>
+        </div>
         <div id="session-results-note" class="session-results-note" aria-live="polite" hidden></div>
         <div id="session-list" class="session-list"></div>
         <div id="session-empty" class="session-empty" hidden>No matching sessions.</div>
