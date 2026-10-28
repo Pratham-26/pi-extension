@@ -336,6 +336,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.offlineMode')) activeProvider.onOfflineModeConfigurationChanged();
         if (event.affectsConfiguration('piChat.extensionUiMode')) activeProvider.onExtensionUiModeConfigurationChanged();
         if (event.affectsConfiguration('piChat.extensionStatus')) activeProvider.onExtensionStatusConfigurationChanged();
+        if (event.affectsConfiguration('piChat.notifications.sound')) activeProvider.onNotificationSoundConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -1199,10 +1200,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         this.pendingExtensionUiRequestIds.add(requestId);
-        if (!this.view.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('inputRequired', true)) {
+        const notifications = vscode.workspace.getConfiguration('piChat.notifications');
+        const hidden = !this.view.visible;
+        if (hidden && notifications.get<boolean>('inputRequired', true)) {
           void this.showChatNotification('A Pi extension is waiting for your answer.');
         }
-        this.post(message);
+        this.post({
+          ...message,
+          notificationSound: hidden && notifications.get<boolean>('sound', false),
+        });
         return;
       }
       if (message.type === 'extension-ui-reset') this.pendingExtensionUiRequestIds.clear();
@@ -1232,9 +1238,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.activeSessionPath = message.sessionFile;
         this.refreshRunningSessionLease();
         this.post(message);
-      } else if (message.type === 'run-finished' && !message.providerLogin && !this.view?.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('runFinished', true)) {
-        void this.showChatNotification('Pi finished its run.');
-        this.post(message);
+      } else if (message.type === 'run-finished') {
+        const notifications = vscode.workspace.getConfiguration('piChat.notifications');
+        const hidden = !this.view?.visible;
+        if (!message.providerLogin && hidden && notifications.get<boolean>('runFinished', true)) {
+          void this.showChatNotification('Pi finished its run.');
+        }
+        this.post({
+          ...message,
+          notificationSound: !message.providerLogin && hidden && notifications.get<boolean>('sound', false),
+        });
       } else if (message.type === 'provider-auth-prompt') {
         void this.handleProviderAuthPrompt(message, worker);
       } else if (message.type === 'provider-auth-prompt-cancel') {
@@ -1428,6 +1441,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.post({
           ...safeMessage,
           runtimeSettings: { ...runtimeSettings, offlineMode: readPiOfflineMode() },
+          notificationSound: vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('sound', false),
           presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []),
         });
       } else {
@@ -2004,6 +2018,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'setPiOfflineMode':
         await this.setPiOfflineMode(message);
+        return;
+      case 'setNotificationSound':
+        if (typeof message.enabled === 'boolean') {
+          await vscode.workspace.getConfiguration('piChat.notifications').update('sound', message.enabled, vscode.ConfigurationTarget.Global);
+        }
         return;
       case 'openMcpConfig':
         await this.openMcpConfig();
@@ -4092,6 +4111,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.updateExtensionStatusBar();
   }
 
+  onNotificationSoundConfigurationChanged(): void {
+    this.post({
+      type: 'notification-sound-setting',
+      enabled: vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('sound', false),
+    });
+  }
+
   private cancelPackageSearch(notify: boolean): void {
     const pending = this.pendingPackageSearch;
     if (!pending) return;
@@ -5244,6 +5270,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <button id="restart-pi-runtime" class="text-button" type="button" title="Apply runtime setting changes after running and queued work is finished">Restart Pi runtime</button>
                 <label class="runtime-setting"><input id="auto-compaction" type="checkbox"><span>Automatic context compaction</span></label>
                 <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
+                <label class="runtime-setting"><input id="notification-sound" type="checkbox"><span>Local sound when Pi finishes or needs input while hidden</span></label>
+                <button id="test-notification-sound" class="text-button" type="button" disabled>Test sound</button>
                 <label class="runtime-setting cache-warming-setting" for="cache-warming"><span>Cache warming</span><select id="cache-warming"><option value="off">Off</option><option value="streaming">While streaming</option><option value="idle">Between runs</option></select></label>
                 <label class="runtime-setting cache-warming-setting" for="offline-mode"><span>Startup network mode</span><select id="offline-mode"><option value="inherit">Use Pi environment</option><option value="offline">Offline startup</option><option value="online">Allow startup checks</option></select></label>
                 <p class="runtime-settings-note">Offline mode disables automatic startup network operations. Model requests still need a connection. Restart Pi to apply changes.</p>

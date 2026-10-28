@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.75",
+  "version": "0.1.76",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -215,6 +215,12 @@
           "type": "boolean",
           "default": true,
           "description": "Show a VS Code notification when a Pi extension asks for input while the chat view is hidden."
+        },
+        "piChat.notifications.sound": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Play a brief local tone when Pi finishes a run or asks for input while the chat view is hidden."
         }
       }
     },

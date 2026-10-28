@@ -4,6 +4,7 @@ const persistedWebviewState = vscode.getState() || {};
 const state = {
   hasWorkspace: false,
   workspaceName: '',
+  notificationSoundEnabled: false,
   sessionPath: typeof persistedWebviewState.sessionPath === 'string'
     && persistedWebviewState.sessionPath.length <= 4096
     && !/[\u0000-\u001f\u007f]/.test(persistedWebviewState.sessionPath)
@@ -196,6 +197,8 @@ const ui = {
   autoRetry: el('auto-retry'),
   cacheWarming: el('cache-warming'),
   offlineMode: el('offline-mode'),
+  notificationSound: el('notification-sound'),
+  testNotificationSound: el('test-notification-sound'),
   manageContextFiles: el('manage-context-files'),
   mcpEnabled: el('mcp-enabled'),
   editMcpConfig: el('edit-mcp-config'),
@@ -250,6 +253,41 @@ ui.sessionSearchAll.checked = state.sessionSearchAllWorkspaces;
 
 function post(type, payload = {}) {
   vscode.postMessage({ type, ...payload });
+}
+
+let notificationAudioContext;
+
+function resumeNotificationAudio() {
+  if (!state.notificationSoundEnabled || typeof window.AudioContext !== 'function') return;
+  try {
+    notificationAudioContext ||= new window.AudioContext();
+    if (notificationAudioContext.state !== 'running') void notificationAudioContext.resume().catch(() => {});
+  } catch {}
+}
+
+function playNotificationSound() {
+  if (!state.notificationSoundEnabled) return;
+  resumeNotificationAudio();
+  const context = notificationAudioContext;
+  if (!context) return;
+  const play = () => {
+    if (context.state !== 'running') return;
+    const startAt = context.currentTime;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(660, startAt);
+    oscillator.frequency.setValueAtTime(880, startAt + 0.09);
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.12, startAt + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.22);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(startAt);
+    oscillator.stop(startAt + 0.23);
+  };
+  if (context.state === 'running') play();
+  else void context.resume().then(play).catch(() => {});
 }
 
 function createRequestId() {
@@ -424,6 +462,8 @@ function updateControls() {
   ui.autoRetry.disabled = !state.hasSession || state.busy;
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
   ui.offlineMode.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
+  ui.notificationSound.checked = state.notificationSoundEnabled;
+  ui.testNotificationSound.disabled = !state.notificationSoundEnabled;
   ui.manageContextFiles.disabled = !state.hasSession || state.busy || hasQueuedWork;
   ui.mcpEnabled.disabled = !state.hasSession || state.busy || state.mcpSettingPending;
   ui.editMcpConfig.disabled = !state.hasWorkspace || state.busy;
@@ -2255,6 +2295,7 @@ function sendPrompt(value = ui.prompt.value) {
   const text = String(value || '').trim();
   const attachments = [...state.attachments, ...(state.pinnedFile ? [{ ...state.pinnedFile }] : [])];
   if ((!text && !attachments.length) || !state.hasWorkspace) return;
+  resumeNotificationAudio();
   const promptText = text || (attachments.some((item) => item.image)
     ? 'Please inspect the attached image.'
     : attachments.some((item) => item.context) ? 'Please inspect the attached context.' : '');
@@ -2287,6 +2328,8 @@ function sendPrompt(value = ui.prompt.value) {
 }
 
 function renderModelChoices(data) {
+  state.notificationSoundEnabled = data.notificationSound === true;
+  ui.notificationSound.checked = state.notificationSoundEnabled;
   state.models = Array.isArray(data.models) ? data.models : [];
   state.providers = Array.isArray(data.providers) ? data.providers.slice(0, 200).filter((provider) => provider
     && typeof provider.id === 'string' && typeof provider.name === 'string'
@@ -3988,6 +4031,11 @@ window.addEventListener('message', (event) => {
     case 'options':
       renderModelChoices(data);
       break;
+    case 'notification-sound-setting':
+      state.notificationSoundEnabled = data.enabled === true;
+      ui.notificationSound.checked = state.notificationSoundEnabled;
+      updateControls();
+      break;
     case 'offline-mode-setting':
       if (['inherit', 'offline', 'online'].includes(data.mode)) {
         state.runtimeSettings.offlineMode = data.mode;
@@ -4044,6 +4092,7 @@ window.addEventListener('message', (event) => {
       renderQueue();
       break;
     case 'extension-ui-request':
+      if (data.notificationSound === true) playNotificationSound();
       showExtensionDialog(data);
       break;
     case 'extension-ui-cancel':
@@ -4363,6 +4412,7 @@ window.addEventListener('message', (event) => {
       setBusy(true, data.activity || 'Pi is working', data.canStop !== false);
       break;
     case 'run-finished':
+      if (data.notificationSound === true) playNotificationSound();
       if (state.streamIndex >= 0 && state.messages[state.streamIndex]) state.messages[state.streamIndex].streaming = false;
       state.streamIndex = -1;
       setBusy(false);
@@ -4644,6 +4694,18 @@ ui.cacheWarming.addEventListener('change', () => {
 ui.offlineMode.addEventListener('change', () => {
   ui.offlineMode.disabled = true;
   post('setPiOfflineMode', { mode: ui.offlineMode.value });
+});
+ui.notificationSound.addEventListener('change', () => {
+  state.notificationSoundEnabled = ui.notificationSound.checked;
+  if (state.notificationSoundEnabled) {
+    resumeNotificationAudio();
+  }
+  updateControls();
+  post('setNotificationSound', { enabled: state.notificationSoundEnabled });
+});
+ui.testNotificationSound.addEventListener('click', () => {
+  resumeNotificationAudio();
+  playNotificationSound();
 });
 ui.manageContextFiles.addEventListener('click', () => post('manageContextFiles'));
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
