@@ -1604,6 +1604,41 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (typeof message.requestId !== 'string' || !this.pendingExtensionUiRequestIds.delete(message.requestId)) return;
         this.worker?.postMessage(message);
         return;
+      case 'extensionCustomInput': {
+        const requestId = typeof message.requestId === 'string' && /^pi-custom-\d{1,12}$/.test(message.requestId)
+          ? message.requestId
+          : '';
+        if (!requestId) return;
+        if (typeof message.data === 'string' && message.data.length <= 32) {
+          this.worker?.postMessage({ type: 'extensionCustomInput', requestId, data: message.data });
+          return;
+        }
+        if (!message.mouse || typeof message.mouse !== 'object' || Array.isArray(message.mouse)) return;
+        const mouse = message.mouse as Record<string, unknown>;
+        this.worker?.postMessage({
+          type: 'extensionCustomInput',
+          requestId,
+          mouse: {
+            type: typeof mouse.type === 'string' ? mouse.type.slice(0, 16) : '',
+            button: typeof mouse.button === 'string' ? mouse.button.slice(0, 16) : '',
+            x: mouse.x,
+            y: mouse.y,
+            width: mouse.width,
+            height: mouse.height,
+            shift: mouse.shift === true,
+            alt: mouse.alt === true,
+            ctrl: mouse.ctrl === true,
+            wheelDelta: mouse.wheelDelta,
+            clickCount: mouse.clickCount,
+          },
+        });
+        return;
+      }
+      case 'extensionCustomCancel':
+        if (typeof message.requestId === 'string' && /^pi-custom-\d{1,12}$/.test(message.requestId)) {
+          this.worker?.postMessage({ type: 'extensionCustomCancel', requestId: message.requestId });
+        }
+        return;
       case 'navigateTree':
       case 'editUserMessage':
       case 'setMessageContext':
@@ -4778,6 +4813,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           <div class="extension-dialog-actions">
             <button id="extension-dialog-cancel" class="text-button" type="button">Cancel</button>
             <button id="extension-dialog-submit" class="send-button" type="button">Continue</button>
+          </div>
+        </div>
+      </section>
+      <section id="extension-custom-layer" class="extension-custom-layer" aria-label="Interactive Pi extension" hidden>
+        <div class="extension-custom-dialog" role="dialog" aria-modal="true" aria-labelledby="extension-custom-title">
+          <h2 id="extension-custom-title">Pi extension</h2>
+          <p id="extension-custom-hint">Use the component controls, or cancel to close it.</p>
+          <div id="extension-custom-content" class="extension-custom-content"></div>
+          <div class="extension-dialog-actions">
+            <button id="extension-custom-cancel" class="text-button" type="button">Cancel</button>
           </div>
         </div>
       </section>

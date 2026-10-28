@@ -35,6 +35,8 @@ type WorkerInput = {
   toolCallId?: string;
   sessionPath?: string;
   gitBranch?: string | null;
+  data?: unknown;
+  mouse?: unknown;
   enabled?: boolean;
   expectedEnabled?: boolean;
   value?: unknown;
@@ -209,6 +211,33 @@ let lastStreamingMarkdownTransformAt = 0;
 type SafeTuiSegment = { text: string; styles: string[] };
 type SafeTuiLine = SafeTuiSegment[];
 type RenderedToolResult = { collapsed: SafeTuiLine[]; expanded: SafeTuiLine[] };
+type ExtensionCustomComponent = {
+  render: (width: number) => unknown;
+  handleInput?: (data: string) => void;
+  handleMouse?: (event: Record<string, unknown>) => unknown;
+  invalidate?: () => void;
+  dispose?: () => void;
+  wantsKeyRelease?: boolean;
+};
+type PendingExtensionCustom = {
+  requestId: string;
+  session: SessionLike;
+  resolve: (value: unknown) => void;
+  component?: ExtensionCustomComponent;
+  focusedComponent?: ExtensionCustomComponent;
+  overlayComponent?: ExtensionCustomComponent;
+  tui: any;
+  inputListeners: Set<(data: string) => { consume?: boolean; data?: string } | undefined>;
+  layout: { width?: string; maxHeight?: string };
+  settled: boolean;
+  rendering: boolean;
+  hidden: boolean;
+  renderTimer?: ReturnType<typeof setTimeout>;
+  lastRenderAt: number;
+  inputWindowStartedAt: number;
+  inputCount: number;
+  requestSent: boolean;
+};
 type ToolRendererState = {
   args: unknown;
   uiState: Record<string, unknown>;
@@ -224,12 +253,16 @@ type PiThemeModule = {
   theme?: unknown;
   getThemeByName?: (name: string) => unknown;
 };
+type PiKeybindingsModule = {
+  KeybindingsManager?: { create?: (agentDir?: string) => unknown };
+};
 type PiToolRenderers = {
   renderCall?: (args: unknown, theme: unknown, context: unknown) => unknown;
   renderResult?: (result: unknown, options: { expanded: boolean; isPartial: boolean }, theme: unknown, context: unknown) => unknown;
 };
 let piThemeModulePromise: Promise<PiThemeModule | undefined> | undefined;
 let piThemeModule: PiThemeModule | undefined;
+let piKeybindingsModulePromise: Promise<PiKeybindingsModule | undefined> | undefined;
 const toolRendererStates = new Map<string, ToolRendererState>();
 const MAX_TOOL_RENDERER_STATES = 160;
 const lazyToolRendererRequests = new Set<string>();
@@ -253,6 +286,9 @@ const MAX_EXTENSION_WIDGETS = 32;
 const extensionWidgetKeys = new Set<string>();
 const MAX_EXTENSION_STATUSES = 32;
 const extensionStatusValues = new Map<string, string>();
+const pendingExtensionCustom = new Map<string, PendingExtensionCustom>();
+const MAX_PENDING_EXTENSION_CUSTOM = 4;
+const MAX_EXTENSION_CUSTOM_INPUTS_PER_SECOND = 100;
 let extensionHeaderFactory: ((tui: any, theme: unknown) => unknown) | undefined;
 let extensionFooterFactory: ((tui: any, theme: unknown, footerData: unknown) => unknown) | undefined;
 let extensionGitBranch: string | null = null;
@@ -718,6 +754,21 @@ async function loadToolRendererTheme(current: SessionLike): Promise<unknown> {
   return getCurrentToolRendererTheme(current);
 }
 
+async function createExtensionCustomKeybindings(): Promise<unknown> {
+  if (!piKeybindingsModulePromise) {
+    const modulePath = extensionRoot
+      ? join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'core', 'keybindings.js')
+      : '';
+    piKeybindingsModulePromise = modulePath && existsSync(modulePath)
+      ? import(pathToFileURL(modulePath).href).then((module) => module as PiKeybindingsModule).catch(() => undefined)
+      : Promise.resolve(undefined);
+  }
+  const module = await piKeybindingsModulePromise;
+  const create = module?.KeybindingsManager?.create;
+  if (typeof create !== 'function') throw new Error('Pi extension keybindings are unavailable.');
+  return create(getAgentDir());
+}
+
 function getCurrentToolRendererTheme(current: SessionLike): unknown {
   const module = piThemeModule;
   if (!module) return undefined;
@@ -845,6 +896,315 @@ function refreshExtensionChrome(current: SessionLike): void {
     send('extension-chrome', { header, footer });
   } finally {
     extensionChromeRefreshing = false;
+  }
+}
+
+function safeExtensionCustomLayout(value: unknown): { width?: string; maxHeight?: string } {
+  let options = value;
+  if (typeof options === 'function') {
+    try { options = options(); } catch { options = undefined; }
+  }
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return {};
+  const source = options as Record<string, unknown>;
+  const layout: { width?: string; maxHeight?: string } = {};
+  if (typeof source.width === 'number' && Number.isFinite(source.width)) {
+    layout.width = `${Math.round(Math.max(24, Math.min(120, source.width)) * 7.5)}px`;
+  } else if (typeof source.width === 'string' && /^(?:[1-9]|[1-9]\d|100)%$/.test(source.width)) {
+    layout.width = source.width;
+  }
+  if (typeof source.maxHeight === 'number' && Number.isFinite(source.maxHeight)) {
+    const rows = Math.round(Math.max(8, Math.min(80, source.maxHeight)));
+    layout.maxHeight = `min(85vh, ${rows * 1.45}em)`;
+  } else if (typeof source.maxHeight === 'string' && /^(?:[1-9]|[1-9]\d|100)%$/.test(source.maxHeight)) {
+    layout.maxHeight = source.maxHeight;
+  }
+  return layout;
+}
+
+function customTuiComponent(pending: PendingExtensionCustom): ExtensionCustomComponent | undefined {
+  return pending.overlayComponent ?? pending.focusedComponent ?? pending.component;
+}
+
+function scheduleExtensionCustomRender(pending: PendingExtensionCustom): void {
+  if (pending.settled || pending.hidden || pending.renderTimer) return;
+  const wait = Math.max(0, 34 - (Date.now() - pending.lastRenderAt));
+  pending.renderTimer = setTimeout(() => {
+    pending.renderTimer = undefined;
+    if (pending.settled || pending.hidden || pending.rendering) return;
+    pending.rendering = true;
+    try {
+      const component = customTuiComponent(pending);
+      const raw = component?.render(80);
+      const source = typeof raw === 'string' ? raw.slice(0, MAX_TUI_RENDER_CHARS + 1).split('\n')
+        : Array.isArray(raw) ? raw.slice(0, MAX_TUI_RENDER_LINES + 1) : [];
+      const visibleLines = source.flatMap((line): string[] => {
+        if (typeof line !== 'string') return [];
+        return [line.slice(0, MAX_TUI_RENDER_CHARS + 1)
+          .replace(/\u001b_pi:c\u0007/g, '\u001b[7m \u001b[0m')
+          .replace(/\u001b_pi:fc\u0007/g, '\u001b[7m')
+          .replace(/\u001b_pi:\/fc\u0007/g, '\u001b[0m')
+          .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, (sequence) => sequence.endsWith('m') && /^[\d;]*$/.test(sequence.slice(2, -1)) ? sequence : '')
+          .replace(/\u001b\](?:[^\u0007]|\u001b(?!\\))*(?:\u0007|\u001b\\)/g, '')
+          .replace(/\u001b[_P^][\s\S]*?(?:\u0007|\u001b\\)/g, '')
+          .replace(/\u001b[\s\S]?/g, '')];
+      });
+      const lines = safeTuiLines({ render: () => visibleLines }) ?? [];
+      pending.lastRenderAt = Date.now();
+      const type = pending.requestSent ? 'extension-custom-update' : 'extension-custom-request';
+      pending.requestSent = true;
+      send(type, {
+        requestId: pending.requestId,
+        lines,
+        wantsKeyRelease: customTuiComponent(pending)?.wantsKeyRelease === true,
+        layout: pending.layout,
+      });
+    } catch {
+      finishExtensionCustom(pending, undefined);
+    } finally {
+      pending.rendering = false;
+    }
+  }, wait);
+}
+
+function createExtensionCustomTui(pending: PendingExtensionCustom): any {
+  const tui = createStaticTuiContext();
+  const addChild = tui.addChild;
+  tui.addChild = (component: unknown) => {
+    if (tui.children.length >= 64 || !component || typeof component !== 'object') return;
+    addChild(component);
+  };
+  const redraw = () => scheduleExtensionCustomRender(pending);
+  const handle = {
+    hide: () => { pending.hidden = true; send('extension-custom-update', { requestId: pending.requestId, hidden: true }); },
+    setHidden: (hidden: boolean) => {
+      pending.hidden = hidden === true;
+      if (!pending.hidden) redraw();
+      else send('extension-custom-update', { requestId: pending.requestId, hidden: true });
+    },
+    isHidden: () => pending.hidden,
+    focus: () => { pending.hidden = false; redraw(); },
+    unfocus: () => { pending.hidden = true; send('extension-custom-update', { requestId: pending.requestId, hidden: true }); },
+    isFocused: () => !pending.hidden && !pending.settled,
+    getBounds: () => undefined,
+  };
+  tui.requestRender = redraw;
+  tui.renderNow = redraw;
+  tui.setFocus = (component: unknown) => {
+    pending.focusedComponent = component && typeof component === 'object' && typeof (component as any).render === 'function'
+      ? component as ExtensionCustomComponent
+      : undefined;
+    redraw();
+  };
+  tui.addInputListener = (listener: unknown) => {
+    if (typeof listener !== 'function') return () => undefined;
+    const inputListener = listener as (data: string) => { consume?: boolean; data?: string } | undefined;
+    pending.inputListeners.add(inputListener);
+    return () => pending.inputListeners.delete(inputListener);
+  };
+  tui.removeInputListener = (listener: unknown) => {
+    if (typeof listener === 'function') pending.inputListeners.delete(listener as (data: string) => { consume?: boolean; data?: string } | undefined);
+  };
+  tui.showOverlay = (component: unknown) => {
+    pending.overlayComponent = component && typeof component === 'object' && typeof (component as any).render === 'function'
+      ? component as ExtensionCustomComponent
+      : undefined;
+    pending.hidden = false;
+    redraw();
+    return handle;
+  };
+  tui.hideOverlay = () => {
+    pending.overlayComponent = undefined;
+    redraw();
+  };
+  tui.hasOverlay = () => pending.overlayComponent !== undefined;
+  tui.render = (width = 80) => {
+    const component = customTuiComponent(pending);
+    try {
+      const rendered = component?.render(Math.max(1, Math.min(160, Number(width) || 80)));
+      if (Array.isArray(rendered)) return rendered.slice(0, MAX_TUI_RENDER_LINES);
+      if (typeof rendered === 'string') return rendered.slice(0, MAX_TUI_RENDER_CHARS).split('\n').slice(0, MAX_TUI_RENDER_LINES);
+      return [];
+    } catch {
+      return [];
+    }
+  };
+  return tui;
+}
+
+function finishExtensionCustom(pending: PendingExtensionCustom, value: unknown): void {
+  if (pending.settled) return;
+  pending.settled = true;
+  if (pending.renderTimer) clearTimeout(pending.renderTimer);
+  pending.renderTimer = undefined;
+  pendingExtensionCustom.delete(pending.requestId);
+  pending.inputListeners.clear();
+  if (Array.isArray(pending.tui?.children)) pending.tui.children.length = 0;
+  const disposed = new Set<ExtensionCustomComponent>();
+  for (const component of [pending.component, pending.focusedComponent, pending.overlayComponent]) {
+    if (!component || disposed.has(component)) continue;
+    disposed.add(component);
+    try { component.dispose?.(); } catch { /* Dispose extension UI without blocking the session. */ }
+  }
+  send('extension-custom-close', { requestId: pending.requestId });
+  pending.resolve(value);
+}
+
+function cancelPendingExtensionCustom(): void {
+  for (const pending of [...pendingExtensionCustom.values()]) finishExtensionCustom(pending, undefined);
+}
+
+function requestExtensionCustom(
+  factory: unknown,
+  options: unknown,
+  current: SessionLike,
+): Promise<unknown> {
+  if (typeof factory !== 'function') return Promise.resolve(undefined);
+  if (pendingExtensionCustom.size >= MAX_PENDING_EXTENSION_CUSTOM) {
+    send('extension-ui-notice', { message: `Pi extensions can open up to ${MAX_PENDING_EXTENSION_CUSTOM} interactive components at once.`, level: 'warning' });
+    return Promise.resolve(undefined);
+  }
+  return new Promise((resolve) => {
+    const requestId = `pi-custom-${++uiRequestSequence}`;
+    const settings = options && typeof options === 'object' ? options as Record<string, unknown> : {};
+    const pending: PendingExtensionCustom = {
+      requestId,
+      session: current,
+      resolve,
+      tui: undefined,
+      inputListeners: new Set(),
+      layout: safeExtensionCustomLayout(settings.overlayOptions),
+      settled: false,
+      rendering: false,
+      hidden: false,
+      lastRenderAt: 0,
+      inputWindowStartedAt: Date.now(),
+      inputCount: 0,
+      requestSent: false,
+    };
+    pending.tui = createExtensionCustomTui(pending);
+    pendingExtensionCustom.set(requestId, pending);
+    const done = (value: unknown) => finishExtensionCustom(pending, value);
+    void createExtensionCustomKeybindings().then(async (keybindings) => {
+      if (pending.settled) return undefined;
+      const result = await (factory as (tui: unknown, theme: unknown, keybindings: unknown, done: (value: unknown) => void) => unknown)(
+        pending.tui,
+        getCurrentToolRendererTheme(current),
+        keybindings,
+        done,
+      );
+      return result;
+    }).then((component) => {
+      if (component === undefined && pending.settled) return;
+      if (!component || typeof component !== 'object' || typeof (component as any).render !== 'function') {
+        finishExtensionCustom(pending, undefined);
+        return;
+      }
+      if (pending.settled) {
+        try { (component as { dispose?: () => void }).dispose?.(); } catch { /* Dispose a late component after cancellation. */ }
+        return;
+      }
+      pending.component = component as ExtensionCustomComponent;
+      if (typeof settings.onHandle === 'function') {
+        try { (settings.onHandle as (handle: unknown) => void)({
+          hide: () => { pending.hidden = true; send('extension-custom-update', { requestId, hidden: true }); },
+          setHidden: (hidden: boolean) => { pending.hidden = hidden === true; if (!pending.hidden) scheduleExtensionCustomRender(pending); else send('extension-custom-update', { requestId, hidden: true }); },
+          isHidden: () => pending.hidden,
+          focus: () => { pending.hidden = false; scheduleExtensionCustomRender(pending); },
+          unfocus: () => { pending.hidden = true; send('extension-custom-update', { requestId, hidden: true }); },
+          isFocused: () => !pending.hidden && !pending.settled,
+          getBounds: () => undefined,
+        }); } catch { /* The custom component remains available if its optional handle callback fails. */ }
+      }
+      scheduleExtensionCustomRender(pending);
+    }).catch(() => finishExtensionCustom(pending, undefined));
+  });
+}
+
+function validExtensionCustomInput(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 32) return false;
+  if (value === '\u001b' || value === '\r' || value === '\n' || value === '\t' || value === '\u007f') return true;
+  if (/^[\u0001-\u001a\u001c-\u001f]$/.test(value)) return true;
+  if (value.startsWith('\u001b')) {
+    return /^\u001b\[(?:\d+(?:;\d+)?(?::[123])?u|[ABCDHF]|(?:\d+;)?\d+(?::[123])?[ABCDHF]|[2-8](?:;\d+(?::[123])?)?~|Z)$/.test(value)
+      || /^\u001b[^\u0000-\u001f\u007f-\u009f]$/.test(value);
+  }
+  return !/[\u0000-\u001f\u007f-\u009f]/.test(value) && Array.from(value).length <= 4;
+}
+
+function validExtensionCustomMouse(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const event = value as Record<string, unknown>;
+  if (!['press', 'release', 'move', 'drag', 'click', 'wheel'].includes(String(event.type))) return undefined;
+  if (!['left', 'middle', 'right', 'none'].includes(String(event.button))) return undefined;
+  const x = Number(event.x);
+  const y = Number(event.y);
+  if (!Number.isSafeInteger(x) || x < 0 || x >= 160 || !Number.isSafeInteger(y) || y < 0 || y >= MAX_TUI_RENDER_LINES) return undefined;
+  const result: Record<string, unknown> = {
+    type: event.type,
+    button: event.button,
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width: Math.max(1, Math.min(160, Number.isSafeInteger(Number(event.width)) ? Number(event.width) : 80)),
+    height: Math.max(1, Math.min(MAX_TUI_RENDER_LINES, Number.isSafeInteger(Number(event.height)) ? Number(event.height) : 24)),
+    shift: event.shift === true,
+    alt: event.alt === true,
+    ctrl: event.ctrl === true,
+  };
+  if (event.type === 'wheel') {
+    const delta = Number(event.wheelDelta);
+    if (!Number.isFinite(delta)) return undefined;
+    result.wheelDelta = Math.max(-20, Math.min(20, Math.trunc(delta)));
+  }
+  if (event.type === 'click' && Number.isSafeInteger(Number(event.clickCount))) {
+    result.clickCount = Math.max(1, Math.min(3, Number(event.clickCount)));
+  }
+  return result;
+}
+
+function handleExtensionCustomInput(input: WorkerInput): void {
+  const requestId = typeof input.requestId === 'string' && input.requestId.length <= 128 ? input.requestId : '';
+  const pending = pendingExtensionCustom.get(requestId);
+  if (!pending || pending.session !== session || pending.settled || pending.hidden) return;
+  const now = Date.now();
+  if (now - pending.inputWindowStartedAt >= 1000) {
+    pending.inputWindowStartedAt = now;
+    pending.inputCount = 0;
+  }
+  pending.inputCount += 1;
+  if (pending.inputCount > MAX_EXTENSION_CUSTOM_INPUTS_PER_SECOND) return;
+
+  if (input.mouse !== undefined) {
+    const event = validExtensionCustomMouse(input.mouse);
+    const target = customTuiComponent(pending);
+    if (!event || !target?.handleMouse) return;
+    try {
+      const result = target.handleMouse(event);
+      if (result && typeof result === 'object' && (result as Record<string, unknown>).focus === true) pending.focusedComponent = target;
+      target.invalidate?.();
+      scheduleExtensionCustomRender(pending);
+    } catch {
+      finishExtensionCustom(pending, undefined);
+    }
+    return;
+  }
+
+  const raw = input.data;
+  if (!validExtensionCustomInput(raw)) return;
+  let data = raw;
+  try {
+    for (const listener of pending.inputListeners) {
+      const result = listener(data);
+      if (result && typeof result.data === 'string' && validExtensionCustomInput(result.data)) data = result.data;
+      if (result?.consume) return;
+    }
+    const target = customTuiComponent(pending);
+    target?.handleInput?.(data);
+    target?.invalidate?.();
+    scheduleExtensionCustomRender(pending);
+  } catch {
+    finishExtensionCustom(pending, undefined);
   }
 }
 
@@ -1228,10 +1588,7 @@ function installExtensionUi(current: SessionLike): void {
     pasteToEditor: (text: string) => send('extension-editor-text', { text, append: true }),
     getEditorText: () => '',
     onTerminalInput: () => () => undefined,
-    custom: async () => {
-      send('extension-ui-notice', { message: 'This extension requests a terminal custom component, which the sidebar cannot display yet.', level: 'warning' });
-      return undefined;
-    },
+    custom: async (factory: unknown, options?: unknown) => requestExtensionCustom(factory, options, current),
     setWidgetPlacement: () => undefined,
     setFooter: (factory?: unknown) => {
       extensionFooterFactory = typeof factory === 'function'
@@ -1687,6 +2044,8 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   sessionListController = undefined;
   providerAuthController?.abort();
   providerAuthController = undefined;
+  cancelPendingExtensionCustom();
+  send('extension-custom-reset');
   if (pendingUiRequests.size) send('extension-ui-reset');
   for (const resolve of pendingUiRequests.values()) resolve(undefined);
   pendingUiRequests.clear();
@@ -2710,6 +3069,8 @@ async function handle(input: WorkerInput): Promise<void> {
         sessionListController?.abort();
         sessionListController = undefined;
         providerAuthController?.abort();
+        cancelPendingExtensionCustom();
+        send('extension-custom-reset');
         for (const resolve of pendingUiRequests.values()) resolve(undefined);
         pendingUiRequests.clear();
         pendingProviderAuthRequests.clear();
@@ -2749,6 +3110,15 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'suggestFollowUps':
         await suggestFollowUps(input);
         return;
+      case 'extensionCustomInput':
+        handleExtensionCustomInput(input);
+        return;
+      case 'extensionCustomCancel': {
+        const requestId = typeof input.requestId === 'string' && input.requestId.length <= 128 ? input.requestId : '';
+        const pending = pendingExtensionCustom.get(requestId);
+        if (pending && pending.session === session) finishExtensionCustom(pending, undefined);
+        return;
+      }
       case 'renderSavedToolCall':
         renderSavedToolCall(input);
         return;

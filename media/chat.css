@@ -254,6 +254,13 @@ button:focus-visible, textarea:focus-visible {
 .extension-dialog { display: flex; flex-direction: column; gap: 8px; width: min(420px, 100%); max-height: 82%; overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: 0 12px 28px color-mix(in srgb, #000 36%, transparent); }
 .extension-dialog h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .extension-dialog p { margin: 0; color: var(--muted); line-height: 1.45; white-space: pre-wrap; }
+.extension-custom-layer { position: absolute; z-index: 19; inset: 48px 0 0; display: grid; place-items: center; padding: 12px; background: color-mix(in srgb, var(--surface) 72%, transparent); }
+.extension-custom-dialog { display: flex; flex-direction: column; gap: 8px; width: var(--extension-custom-width, min(680px, 100%)); max-width: 100%; max-height: 88%; overflow: hidden; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); box-shadow: 0 12px 28px color-mix(in srgb, #000 36%, transparent); }
+.extension-custom-dialog h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.extension-custom-dialog p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.extension-custom-content { min-height: 0; overflow: auto; }
+.extension-custom-output { width: 100%; max-height: var(--extension-custom-max-height, min(68vh, 620px)); padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface); white-space: pre; overflow-wrap: normal; font-size: 10px; line-height: 1.45; }
+.extension-custom-output:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
 .extension-dialog-options { display: flex; flex-direction: column; gap: 2px; max-height: 35vh; overflow: auto; }
 .extension-dialog-option { display: flex; align-items: center; gap: 8px; padding: 7px 6px; border-radius: 4px; cursor: pointer; }
 .extension-dialog-option:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
