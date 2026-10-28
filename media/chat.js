@@ -82,6 +82,7 @@ const state = {
   activeTools: [],
   defaultTools: [],
   newSessionToolNames: null,
+  expandSuccessfulToolCalls: false,
   disabledSkills: [],
   branchPoints: [],
   gitChanges: [],
@@ -241,6 +242,7 @@ const ui = {
   newChatToolDefaultLabel: el('new-chat-tool-default-label'),
   saveToolDefault: el('save-tool-default'),
   resetToolDefault: el('reset-tool-default'),
+  expandSuccessfulTools: el('expand-successful-tools'),
   skillsToggle: el('skills-toggle'),
   skillsPopover: el('skills-popover'),
   skillList: el('skill-list'),
@@ -334,9 +336,22 @@ function isExplorationToolMessage(message) {
   return message?.role === 'tool' && EXPLORATION_TOOL_NAMES.has(String(message.toolName || '').toLowerCase());
 }
 
-function toolExpansionPreference(toolName, isError = false, defaultOpen = isError) {
+function toolExpansionPreference(toolName, isError = false, defaultOpen = undefined) {
   const name = String(toolName || 'tool').slice(0, 128);
-  return Object.prototype.hasOwnProperty.call(state.toolExpansion, name) ? state.toolExpansion[name] : defaultOpen;
+  if (isError) return true;
+  if (Object.prototype.hasOwnProperty.call(state.toolExpansion, name)) return state.toolExpansion[name];
+  return typeof defaultOpen === 'boolean' ? defaultOpen : state.expandSuccessfulToolCalls;
+}
+
+function applyToolExpansionDefaults() {
+  for (const card of ui.messageList.querySelectorAll('.tool-card')) {
+    const name = String(card.dataset.toolName || 'tool').slice(0, 128);
+    if (card.classList.contains('tool-error')) {
+      card.open = true;
+    } else if (!Object.prototype.hasOwnProperty.call(state.toolExpansion, name)) {
+      card.open = state.expandSuccessfulToolCalls;
+    }
+  }
 }
 
 function currentSessionKey() {
@@ -530,7 +545,7 @@ function updateControls() {
   ui.packageSearchButton.textContent = state.packageSearchBusy ? 'Cancel' : 'Search';
   ui.popularPackagesButton.disabled = state.packageSearchBusy;
   ui.packageSearchResults.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
-  ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
+  ui.toolsToggle.disabled = !state.hasSession || state.busy;
   ui.skillsToggle.disabled = !state.hasSession;
   ui.toolsPopover.querySelectorAll('input').forEach((input) => { input.disabled = state.busy; });
   ui.saveToolDefault.disabled = !state.hasSession || state.busy;
@@ -4362,6 +4377,11 @@ window.addEventListener('message', (event) => {
       ui.sessionGroupRunning.checked = state.groupRunningSessions;
       renderSessions();
       break;
+    case 'tool-expansion-default-setting':
+      state.expandSuccessfulToolCalls = data.enabled === true;
+      ui.expandSuccessfulTools.checked = state.expandSuccessfulToolCalls;
+      applyToolExpansionDefaults();
+      break;
     case 'running-session-status': {
       const statuses = Array.isArray(data.statuses) ? data.statuses.slice(0, 500) : [];
       const byPath = new Map(statuses.flatMap((status) => status && typeof status.path === 'string'
@@ -4395,6 +4415,9 @@ window.addEventListener('message', (event) => {
         : Array.isArray(data.newSessionToolNames)
           ? data.newSessionToolNames.filter((name) => typeof name === 'string').slice(0, 256)
           : null;
+      state.expandSuccessfulToolCalls = data.expandSuccessfulToolCalls === true;
+      ui.expandSuccessfulTools.checked = state.expandSuccessfulToolCalls;
+      applyToolExpansionDefaults();
       renderTools();
       updateControls();
       renderModelChoices(data);
@@ -5233,6 +5256,11 @@ ui.saveToolDefault.addEventListener('click', () => {
 });
 ui.resetToolDefault.addEventListener('click', () => {
   post('setNewChatToolDefault', { toolNames: ['*'] });
+});
+ui.expandSuccessfulTools.addEventListener('change', () => {
+  const requested = ui.expandSuccessfulTools.checked;
+  ui.expandSuccessfulTools.checked = state.expandSuccessfulToolCalls;
+  post('setSuccessfulToolExpansion', { enabled: requested });
 });
 ui.deliveryMode.addEventListener('click', () => {
   state.deliverAs = state.deliverAs === 'steer' ? 'followUp' : 'steer';

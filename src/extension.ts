@@ -1463,6 +1463,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           runtimeSettings: { ...runtimeSettings, offlineMode: readPiOfflineMode() },
           notificationSound: vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('sound', false),
           autoRefreshModels: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
+          expandSuccessfulToolCalls: vscode.workspace.getConfiguration('piChat.transcript').get<boolean>('expandSuccessfulToolCalls', false),
           presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []),
         });
       } else {
@@ -1619,6 +1620,18 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           this.post({ type: 'session-grouping-setting', enabled: message.enabled });
         } catch (error) {
           this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the session grouping preference.', isError: true });
+        }
+        return;
+      }
+      case 'setSuccessfulToolExpansion': {
+        if (typeof message.enabled !== 'boolean') return;
+        try {
+          await vscode.workspace.getConfiguration('piChat.transcript').update(
+            'expandSuccessfulToolCalls', message.enabled, vscode.ConfigurationTarget.Global,
+          );
+          this.post({ type: 'tool-expansion-default-setting', enabled: message.enabled });
+        } catch (error) {
+          this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the tool-card display preference.', isError: true });
         }
         return;
       }
@@ -5469,6 +5482,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 </div>
               </div>
               <div id="tool-list" class="option-list"></div>
+              <div class="tool-display-preference">
+                <span class="tool-display-title">Transcript</span>
+                <label><input id="expand-successful-tools" type="checkbox"><span>Expand successful calls by default</span></label>
+                <small>Errors always open. Manual changes to a tool card are remembered.</small>
+              </div>
             </section>
             <section id="skills-popover" class="control-popover skills-popover" aria-label="Skills and prompt templates" hidden>
               <div class="popover-heading"><strong>Skills</strong><span>Insert a slash command into the message</span></div>

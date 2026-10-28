@@ -576,6 +576,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-default-actions > div { display: flex; flex: 0 0 auto; gap: 3px; }
 .tool-default-actions .text-button { padding: 3px 5px; font-size: 9px; }
 .tool-default-actions button:disabled { opacity: .5; cursor: default; }
+.tool-display-preference { display: grid; gap: 4px; padding: 7px 6px 2px; border-top: 1px solid var(--line); }
+.tool-display-title { color: var(--muted); font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.tool-display-preference label { display: flex; align-items: center; gap: 5px; color: var(--text); cursor: pointer; font-size: 10px; }
+.tool-display-preference input { margin: 0; accent-color: var(--focus); }
+.tool-display-preference small { color: var(--muted); font-size: 9px; line-height: 1.35; }
 .skill-option { display: flex; align-items: center; gap: 3px; min-width: 0; }
 .skill-option .command-option { flex: 1; }
 .skill-auto-toggle { flex: 0 0 auto; margin: 0 6px; accent-color: var(--accent); }
