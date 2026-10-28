@@ -85,5 +85,5 @@ This checklist tracks implemented and pending product capabilities as of 29 Octo
 - Voice dictation is excluded at the user's request.
 - All-workspace session search is opt-in; opening a result from another folder requires confirmation and starts that session in the folder's own VS Code window.
 - Remote phone access is out of scope.
-- Direct shell execution from the composer is unimplemented because automatic security review rejected adding that command-execution path.
+- Native `!` and `!!` shell commands run through the Pi runtime; `!!` excludes its result from the next prompt.
 - Pi tool calls use the user's current Pi permissions; narrower tool sets are available in the extension.

@@ -3025,6 +3025,7 @@ function sendPrompt(value = ui.prompt.value) {
       showNotice('Remove attachments before running a shell command.', true);
       return;
     }
+    rememberPrompt(text);
     state.shellCommandPending = true;
     updateControls();
     post('send', { text, attachments: [], deliverAs: 'followUp' });

@@ -20,7 +20,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Copy controls for assistant code blocks, workspace definition links on inline symbols in finished replies, and on-demand model-generated follow-up prompts that fill the composer without sending automatically
 - Queued Pi extension dialogs with request-matched responses, abort signals, optional deadlines with countdowns, bounded static widgets and interactive text-only widget cards with keyboard/pointer input, selectable Pi extension UI mode, header/footer components, text-only interactive extension components with keyboard/pointer input and cancellation, custom editor components rendered through a bounded text bridge with routed input and composer synchronization, safe structured tool details, checklist results, supported subagent transcripts and usage, hidden-window VS Code notifications, and optional machine-scoped script hooks for selected events after explicit confirmation
 
-See [the feature coverage checklist](docs/feature-coverage.md) for implemented and planned capabilities. Voice dictation is out of scope. Direct shell execution from the composer is unavailable because the automatic security review rejected that execution path.
+See [the feature coverage checklist](docs/feature-coverage.md) for implemented and planned capabilities. Voice dictation is out of scope. Native Pi `!` and `!!` shell commands are available from the composer and pass through configured Pi `user_bash` handlers.
 
 ## Local verification
 
