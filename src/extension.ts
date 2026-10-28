@@ -879,6 +879,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.queuedWorkCount = 0;
     worker.on('message', (message: RuntimeMessage) => {
       if (this.worker !== worker) return;
+      if (message.type === 'extension-ui-cancel') {
+        const requestId = typeof message.requestId === 'string' && message.requestId.length <= 128
+          ? message.requestId
+          : '';
+        if (requestId && this.pendingExtensionUiRequestIds.delete(requestId)) this.post({ type: 'extension-ui-cancel', requestId });
+        return;
+      }
       if (message.type === 'extension-ui-request') {
         const requestId = typeof message.requestId === 'string' && message.requestId.length <= 128
           ? message.requestId

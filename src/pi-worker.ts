@@ -189,6 +189,7 @@ const MAX_SESSION_SEARCH_CACHE_ENTRIES = 32;
 const MAX_SESSION_SEARCH_CACHE_CHARS = 2_000_000;
 const MAX_SESSION_SEARCH_INDEX_CHARS = 128_000;
 const MAX_PENDING_UI_REQUESTS = 64;
+const MAX_EXTENSION_UI_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 let uiRequestSequence = 0;
 let modelWatcher: FSWatcher | undefined;
 let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -491,9 +492,18 @@ function boundedUiText(value: unknown, maxLength: number): string {
   }
 }
 
-function requestExtensionUi(kind: string, title: string, payload: Record<string, unknown> = {}): Promise<unknown> {
+function requestExtensionUi(
+  kind: string,
+  title: string,
+  payload: Record<string, unknown> = {},
+  options: { signal?: AbortSignal; timeout?: number } = {},
+): Promise<unknown> {
   if (pendingUiRequests.size >= MAX_PENDING_UI_REQUESTS) return Promise.resolve(undefined);
+  if (options.signal?.aborted) return Promise.resolve(undefined);
   const requestId = `pi-ui-${++uiRequestSequence}`;
+  const timeoutMs = typeof options.timeout === 'number' && Number.isFinite(options.timeout) && options.timeout > 0
+    ? Math.max(1, Math.min(Math.floor(options.timeout), MAX_EXTENSION_UI_TIMEOUT_MS))
+    : undefined;
   let boundedPayload: Record<string, unknown>;
   try {
     if (kind === 'select') {
@@ -515,8 +525,41 @@ function requestExtensionUi(kind: string, title: string, payload: Record<string,
     return Promise.resolve(undefined);
   }
   return new Promise((resolve) => {
-    pendingUiRequests.set(requestId, resolve);
-    send('extension-ui-request', { requestId, kind, title: boundedUiText(title, 256), ...boundedPayload });
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
+    const finish = (value: unknown, dismissView = false) => {
+      if (settled) return;
+      settled = true;
+      pendingUiRequests.delete(requestId);
+      cleanup();
+      if (dismissView) {
+        try { send('extension-ui-cancel', { requestId }); } catch { /* The worker may be shutting down. */ }
+      }
+      resolve(value);
+    };
+    const onAbort = () => finish(undefined, true);
+    pendingUiRequests.set(requestId, finish);
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (timeoutMs !== undefined) timeout = setTimeout(() => finish(undefined, true), timeoutMs);
+    if (options.signal?.aborted) {
+      finish(undefined, true);
+      return;
+    }
+    try {
+      send('extension-ui-request', {
+        requestId,
+        kind,
+        title: boundedUiText(title, 256),
+        ...(timeoutMs !== undefined ? { timeoutAt: Date.now() + timeoutMs } : {}),
+        ...boundedPayload,
+      });
+    } catch {
+      finish(undefined);
+    }
   });
 }
 
@@ -590,9 +633,9 @@ function requestProviderAuthPrompt(prompt: any): Promise<unknown> {
 
 function installExtensionUi(current: SessionLike): void {
   const ui = {
-    select: (title: string, options: string[]) => requestExtensionUi('select', title, { options }),
-    confirm: (title: string, message: string) => requestExtensionUi('confirm', title, { message }).then(Boolean),
-    input: (title: string, placeholder?: string) => requestExtensionUi('input', title, { placeholder }),
+    select: (title: string, options: string[], dialogOptions?: { signal?: AbortSignal; timeout?: number }) => requestExtensionUi('select', title, { options }, dialogOptions),
+    confirm: (title: string, message: string, dialogOptions?: { signal?: AbortSignal; timeout?: number }) => requestExtensionUi('confirm', title, { message }, dialogOptions).then(Boolean),
+    input: (title: string, placeholder?: string, dialogOptions?: { signal?: AbortSignal; timeout?: number }) => requestExtensionUi('input', title, { placeholder }, dialogOptions),
     editor: (title: string, prefill?: string) => requestExtensionUi('editor', title, { prefill }),
     notify: (message: string, level?: string) => send('extension-ui-notice', { message, level: level ?? 'info' }),
     setStatus: (key: string, text?: string) => send('extension-status', { key, text }),

@@ -78,6 +78,7 @@ const state = {
   extensionRequest: undefined,
   extensionRequestQueue: [],
   extensionQueueFullNotified: false,
+  extensionDialogTimer: undefined,
   showWorking: true,
   contextUsage: undefined,
   sessionStats: undefined,
@@ -2810,6 +2811,8 @@ function renderExtensionStatuses() {
 function finishExtensionDialog(value) {
   const request = state.extensionRequest;
   if (!request) return;
+  if (state.extensionDialogTimer) clearInterval(state.extensionDialogTimer);
+  state.extensionDialogTimer = undefined;
   state.extensionRequest = undefined;
   ui.dialogLayer.hidden = true;
   post('extensionUiResponse', { requestId: request.requestId, value });
@@ -2820,6 +2823,13 @@ function finishExtensionDialog(value) {
 
 const MAX_QUEUED_EXTENSION_DIALOGS = 20;
 const EXTENSION_DIALOG_KINDS = new Set(['select', 'confirm', 'input', 'editor']);
+
+function formatDialogCountdown(milliseconds) {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${Math.ceil((seconds % 3600) / 60)}m`;
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
 
 function showExtensionDialog(data) {
   const requestId = typeof data?.requestId === 'string' ? data.requestId : '';
@@ -2839,8 +2849,24 @@ function showExtensionDialog(data) {
     state.extensionRequestQueue.push(data);
     return;
   }
-  state.extensionRequest = { requestId: data.requestId, kind: data.kind };
-  ui.dialogTitle.textContent = data.title || 'Pi extension';
+  state.extensionRequest = {
+    requestId: data.requestId,
+    kind: data.kind,
+    title: typeof data.title === 'string' ? data.title.slice(0, 256) : 'Pi extension',
+    timeoutAt: Number.isSafeInteger(data.timeoutAt) && data.timeoutAt > Date.now() ? data.timeoutAt : 0,
+  };
+  const renderDialogTitle = () => {
+    const request = state.extensionRequest;
+    if (!request || request.requestId !== data.requestId) return;
+    const remaining = request.timeoutAt ? request.timeoutAt - Date.now() : 0;
+    ui.dialogTitle.textContent = remaining > 0
+      ? `${request.title} (${formatDialogCountdown(remaining)})`
+      : request.title;
+  };
+  if (state.extensionDialogTimer) clearInterval(state.extensionDialogTimer);
+  state.extensionDialogTimer = undefined;
+  renderDialogTitle();
+  if (state.extensionRequest.timeoutAt) state.extensionDialogTimer = setInterval(renderDialogTitle, 1000);
   ui.dialogMessage.textContent = data.message || '';
   ui.dialogMessage.hidden = !data.message;
   ui.dialogOptions.replaceChildren();
@@ -2871,7 +2897,27 @@ function showExtensionDialog(data) {
   else ui.dialogSubmit.focus();
 }
 
+function cancelExtensionDialog(requestId) {
+  if (!requestId || typeof requestId !== 'string') return;
+  state.extensionRequestQueue = state.extensionRequestQueue.filter((request) => request?.requestId !== requestId);
+  if (state.extensionRequest?.requestId !== requestId) return;
+  if (state.extensionDialogTimer) clearInterval(state.extensionDialogTimer);
+  state.extensionDialogTimer = undefined;
+  state.extensionRequest = undefined;
+  ui.dialogLayer.hidden = true;
+  ui.dialogOptions.replaceChildren();
+  ui.dialogInput.value = '';
+  ui.dialogTitle.textContent = '';
+  ui.dialogMessage.textContent = '';
+  ui.dialogMessage.hidden = true;
+  const next = state.extensionRequestQueue.shift();
+  if (state.extensionRequestQueue.length < MAX_QUEUED_EXTENSION_DIALOGS) state.extensionQueueFullNotified = false;
+  if (next) showExtensionDialog(next);
+}
+
 function resetExtensionDialogs() {
+  if (state.extensionDialogTimer) clearInterval(state.extensionDialogTimer);
+  state.extensionDialogTimer = undefined;
   state.extensionRequest = undefined;
   state.extensionRequestQueue = [];
   state.extensionQueueFullNotified = false;
@@ -3053,6 +3099,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'extension-ui-request':
       showExtensionDialog(data);
+      break;
+    case 'extension-ui-cancel':
+      cancelExtensionDialog(data.requestId);
       break;
     case 'extension-ui-reset':
       resetExtensionDialogs();

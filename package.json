@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.47",
+  "version": "0.1.48",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -106,7 +106,11 @@
         },
         "piChat.offlineMode": {
           "type": "string",
-          "enum": ["inherit", "offline", "online"],
+          "enum": [
+            "inherit",
+            "offline",
+            "online"
+          ],
           "enumDescriptions": [
             "Keep the PI_OFFLINE environment setting inherited by the Pi worker.",
             "Set PI_OFFLINE=1 to disable automatic Pi startup network operations.",
