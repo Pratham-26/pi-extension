@@ -9,6 +9,9 @@ const state = {
   sessionQuery: '',
   drafts: persistedWebviewState.drafts && typeof persistedWebviewState.drafts === 'object' ? persistedWebviewState.drafts : {},
   promptHistory: persistedWebviewState.promptHistory && typeof persistedWebviewState.promptHistory === 'object' ? persistedWebviewState.promptHistory : {},
+  toolExpansion: Object.fromEntries(Object.entries(persistedWebviewState.toolExpansion || {})
+    .filter(([name, open]) => typeof name === 'string' && name.length > 0 && name.length <= 128 && typeof open === 'boolean')
+    .slice(-200)),
   promptHistoryIndex: -1,
   promptHistoryDraft: '',
   mentionQuery: '',
@@ -186,7 +189,12 @@ function post(type, payload = {}) {
 }
 
 function persistWebviewState() {
-  vscode.setState({ drafts: state.drafts, promptHistory: state.promptHistory });
+  vscode.setState({ drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion });
+}
+
+function toolExpansionPreference(toolName, isError = false) {
+  const name = String(toolName || 'tool').slice(0, 128);
+  return Object.prototype.hasOwnProperty.call(state.toolExpansion, name) ? state.toolExpansion[name] : isError;
 }
 
 function currentSessionKey() {
@@ -965,10 +973,11 @@ function renderMessages(shouldFollow = true) {
 function createHistoricalToolCard(message) {
   const detail = document.createElement('details');
   detail.className = `tool-card historical-tool-card${message.isError ? ' tool-error' : ''}`;
-  detail.open = Boolean(message.isError);
-  detail.dataset.toolId = String(message.toolCallId || '').slice(0, 256);
-  const summary = document.createElement('summary');
   const toolName = String(message.toolName || 'tool').slice(0, 128);
+  detail.open = toolExpansionPreference(toolName, Boolean(message.isError));
+  detail.dataset.toolId = String(message.toolCallId || '').slice(0, 256);
+  detail.dataset.toolName = toolName;
+  const summary = document.createElement('summary');
   summary.textContent = `${message.isError ? 'Failed' : 'Finished'} ${toolName}`;
   detail.append(summary);
   const argsPreview = typeof message.argsPreview === 'string' ? message.argsPreview.slice(0, 12000) : '';
@@ -984,6 +993,23 @@ function createHistoricalToolCard(message) {
   detail.append(output);
   return detail;
 }
+
+ui.messageList.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element)) return;
+  const summary = event.target.closest('.tool-card > summary');
+  const card = summary?.parentElement;
+  if (!(card instanceof HTMLDetailsElement)) return;
+  const toolName = String(card.dataset.toolName || '').slice(0, 128);
+  if (!toolName) return;
+  const open = !card.open;
+  state.toolExpansion[toolName] = open;
+  const toolNames = Object.keys(state.toolExpansion);
+  if (toolNames.length > 200) delete state.toolExpansion[toolNames[0]];
+  persistWebviewState();
+  for (const peer of ui.messageList.querySelectorAll('.tool-card')) {
+    if (peer !== card && peer.dataset.toolName === toolName) peer.open = open;
+  }
+});
 
 function updateChatSearch(moveToCurrent = false) {
   const query = state.chatSearch.trim().toLocaleLowerCase();
@@ -2306,10 +2332,12 @@ window.addEventListener('message', (event) => {
     case 'tool-start': {
       const detail = document.createElement('details');
       detail.className = 'tool-card';
-      detail.open = false;
+      const toolName = String(data.name || 'tool').slice(0, 128);
+      detail.open = toolExpansionPreference(toolName);
       detail.dataset.toolId = String(data.id || '');
+      detail.dataset.toolName = toolName;
       const summary = document.createElement('summary');
-      summary.textContent = `Running ${data.name || 'tool'}`;
+      summary.textContent = `Running ${toolName}`;
       const output = document.createElement('pre');
       output.className = 'tool-output';
       output.textContent = typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}';
@@ -2333,8 +2361,10 @@ window.addEventListener('message', (event) => {
         if (output) output.textContent = text.slice(-12000);
         if (data.type === 'tool-end') {
           card.classList.toggle('tool-error', Boolean(data.isError));
-          card.querySelector('summary').textContent = `${data.isError ? 'Failed' : 'Finished'} ${data.name || 'tool'}`;
-          card.open = Boolean(data.isError);
+          const toolName = String(data.name || card.dataset.toolName || 'tool').slice(0, 128);
+          card.dataset.toolName = toolName;
+          card.querySelector('summary').textContent = `${data.isError ? 'Failed' : 'Finished'} ${toolName}`;
+          card.open = toolExpansionPreference(toolName, Boolean(data.isError));
         }
       }
       break;
