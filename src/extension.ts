@@ -197,6 +197,16 @@ function isValidBase64ImageData(data: string): boolean {
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new PiChatViewProvider(context);
   const editorProviders = new Set<PiChatViewProvider>();
+  const attachEditorPanel = (panel: vscode.WebviewPanel, state?: unknown): void => {
+    const panelProvider = new PiChatViewProvider(context);
+    panelProvider.setEditorPanelRestoreState(state);
+    editorProviders.add(panelProvider);
+    panelProvider.resolveWebviewPanel(panel);
+    panel.onDidDispose(() => {
+      editorProviders.delete(panelProvider);
+      panelProvider.dispose();
+    });
+  };
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VIEW_ID, provider, {
@@ -211,14 +221,13 @@ export function activate(context: vscode.ExtensionContext): void {
           vscode.Uri.joinPath(context.extensionUri, 'dist'),
         ],
       });
-      const panelProvider = new PiChatViewProvider(context);
-      editorProviders.add(panelProvider);
-      panelProvider.resolveWebviewPanel(panel);
-      panel.onDidDispose(() => {
-        editorProviders.delete(panelProvider);
-        panelProvider.dispose();
-      });
+      attachEditorPanel(panel);
       return panel;
+    }),
+    vscode.window.registerWebviewPanelSerializer('piChat.editorChat', {
+      async deserializeWebviewPanel(panel, state) {
+        attachEditorPanel(panel, state);
+      },
     }),
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
@@ -276,6 +285,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private sessionSearchAllWorkspaces = false;
   private sessionWorkspaceByPath = new Map<string, string>();
   private activeSessionPath = '';
+  private restoredEditorSessionPath?: string;
   private openLatestSessionOnStart: boolean;
   private latestSessionOpenAttempted = false;
   private sessionInteractionStarted = false;
@@ -357,6 +367,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewPanel(view: vscode.WebviewPanel): void {
     this.attachWebview(view);
+  }
+
+  setEditorPanelRestoreState(state: unknown): void {
+    if (!state || typeof state !== 'object' || Array.isArray(state)) return;
+    const sessionPath = (state as Record<string, unknown>).sessionPath;
+    if (typeof sessionPath === 'string' && sessionPath.length <= 4096
+      && path.isAbsolute(sessionPath) && !/[\u0000-\u001f\u007f]/.test(sessionPath)) {
+      this.restoredEditorSessionPath = sessionPath;
+    }
   }
 
   private attachWebview(view: vscode.WebviewView | vscode.WebviewPanel): void {
@@ -1194,7 +1213,27 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         void this.refreshRunningSessionStatuses();
         this.consumePendingSessionHandoff(worker);
         this.post({ ...message, sessions });
-        if (!this.sessionInteractionStarted && !this.activeSessionPath) {
+        let openingInitialSession = this.sessionInteractionStarted || Boolean(this.activeSessionPath);
+        if (!openingInitialSession && this.restoredEditorSessionPath) {
+          const sessionPath = this.restoredEditorSessionPath;
+          this.restoredEditorSessionPath = undefined;
+          let belongsToWorkspace = false;
+          try {
+            const cwd = this.sessionWorkspaceByPath.get(this.normalizeSessionPath(sessionPath));
+            belongsToWorkspace = Boolean(cwd && this.workerWorkspace
+              && this.normalizeSessionPath(cwd) === this.normalizeSessionPath(this.workerWorkspace));
+          } catch {
+            belongsToWorkspace = false;
+          }
+          if (this.isKnownSessionPath(sessionPath) && belongsToWorkspace) {
+            openingInitialSession = true;
+            this.sessionInteractionStarted = true;
+            this.worker?.postMessage({ type: 'openSession', path: sessionPath });
+          } else {
+            this.post({ type: 'notice', message: 'The previous editor chat session is no longer available in this workspace. A new session will open.' });
+          }
+        }
+        if (!openingInitialSession) {
           let openingLatestSession = false;
           if (this.openLatestSessionOnStart && !this.latestSessionOpenAttempted) {
             this.latestSessionOpenAttempted = true;

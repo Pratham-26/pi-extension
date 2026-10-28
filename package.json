@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -24,7 +24,8 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onView:piChat.chatView"
+    "onView:piChat.chatView",
+    "onWebviewPanel:piChat.editorChat"
   ],
   "contributes": {
     "viewsContainers": {

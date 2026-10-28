@@ -4,7 +4,11 @@ const persistedWebviewState = vscode.getState() || {};
 const state = {
   hasWorkspace: false,
   workspaceName: '',
-  sessionPath: '',
+  sessionPath: typeof persistedWebviewState.sessionPath === 'string'
+    && persistedWebviewState.sessionPath.length <= 4096
+    && !/[\u0000-\u001f\u007f]/.test(persistedWebviewState.sessionPath)
+    ? persistedWebviewState.sessionPath
+    : '',
   sessions: [],
   sessionQuery: '',
   sessionSearchAllWorkspaces: persistedWebviewState.sessionSearchAllWorkspaces === true,
@@ -219,7 +223,7 @@ function createRequestId() {
 }
 
 function persistWebviewState() {
-  vscode.setState({ drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces });
+  vscode.setState({ sessionPath: state.sessionPath, drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces });
 }
 
 function isTranscriptMessageVisible(message) {
