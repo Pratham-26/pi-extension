@@ -5311,11 +5311,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtml(webview: vscode.Webview): string {
     const nonce = randomBytes(16).toString('base64');
+    const assetVersion = Date.now();
     const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'))
-      .with({ query: `v=${Date.now()}` });
+      .with({ query: `v=${assetVersion}` });
     const rendererUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview-renderers.js'));
     const draftStoreUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'draft-store.js'));
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.js'));
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.js'))
+      .with({ query: `v=${assetVersion}` });
     const csp = [
       "default-src 'none'",
       `style-src ${webview.cspSource}`,
