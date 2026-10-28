@@ -999,7 +999,110 @@ function createHistoricalToolCard(message) {
   output.className = 'tool-output';
   output.textContent = String(message.result || '').slice(-12000);
   detail.append(output);
+  appendStructuredToolDetails(detail, message.details);
   return detail;
+}
+
+function structuredChecklist(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return undefined;
+  const keys = ['todos', 'tasks', 'checklist', 'steps', 'items'];
+  for (const key of keys) {
+    const entries = details[key];
+    if (!Array.isArray(entries)) continue;
+    const items = entries.slice(0, 100).flatMap((entry) => {
+      if (typeof entry === 'string') {
+        const text = entry.trim().slice(0, 1000);
+        if (!text || text.startsWith('[') && text.endsWith('omitted]')) return [];
+        return [{ text, done: /^\s*\[[xX]\]\s*/.test(text), status: '' }];
+      }
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+      const rawText = [entry.text, entry.title, entry.label, entry.name, entry.description]
+        .find((value) => typeof value === 'string' && value.trim());
+      if (typeof rawText !== 'string') return [];
+      const status = typeof entry.status === 'string' ? entry.status.trim().slice(0, 64) : '';
+      const normalizedStatus = status.toLocaleLowerCase();
+      return [{
+        text: rawText.trim().slice(0, 1000),
+        done: entry.done === true || entry.completed === true || ['done', 'complete', 'completed', 'success'].includes(normalizedStatus),
+        status,
+      }];
+    });
+    const title = [details.title, details.name, details.label]
+      .find((value) => typeof value === 'string' && value.trim());
+    return { title: typeof title === 'string' ? title.trim().slice(0, 120) : 'Checklist', items };
+  }
+  return undefined;
+}
+
+function appendStructuredToolDetails(card, details) {
+  card.querySelector('.tool-structured-result')?.remove();
+  if (details === undefined || details === null) return;
+  let serialized;
+  try {
+    serialized = JSON.stringify(details, null, 2);
+  } catch {
+    return;
+  }
+  if (typeof serialized !== 'string' || serialized === '{}' || serialized === '[]' || serialized.length > 24000) return;
+
+  const checklist = structuredChecklist(details);
+  if (checklist) {
+    const section = document.createElement('section');
+    section.className = 'tool-structured-result tool-checklist-result';
+    const heading = document.createElement('div');
+    heading.className = 'tool-checklist-heading';
+    const title = document.createElement('strong');
+    title.textContent = checklist.title;
+    const progress = document.createElement('span');
+    const completed = checklist.items.filter((item) => item.done).length;
+    progress.textContent = `${completed} of ${checklist.items.length} complete`;
+    heading.append(title, progress);
+    section.append(heading);
+    if (!checklist.items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'tool-checklist-empty';
+      empty.textContent = 'No tasks in this list.';
+      section.append(empty);
+    } else {
+      const list = document.createElement('ul');
+      list.className = 'tool-checklist';
+      for (const item of checklist.items) {
+        const row = document.createElement('li');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = item.done;
+        checkbox.disabled = true;
+        checkbox.tabIndex = -1;
+        checkbox.setAttribute('aria-label', item.done ? 'Completed' : 'Not completed');
+        const label = document.createElement('span');
+        label.textContent = item.text;
+        if (item.done) label.className = 'tool-checklist-done';
+        const taskLabel = document.createElement('label');
+        taskLabel.className = 'tool-checklist-label';
+        taskLabel.append(checkbox, label);
+        row.append(taskLabel);
+        if (item.status) {
+          const status = document.createElement('small');
+          status.textContent = item.status;
+          row.append(status);
+        }
+        list.append(row);
+      }
+      section.append(list);
+    }
+    card.append(section);
+    return;
+  }
+
+  const disclosure = document.createElement('details');
+  disclosure.className = 'tool-structured-result tool-structured-disclosure';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Structured details';
+  const content = document.createElement('pre');
+  content.className = 'tool-output';
+  content.textContent = serialized;
+  disclosure.append(summary, content);
+  card.append(disclosure);
 }
 
 ui.messageList.addEventListener('click', (event) => {
@@ -2463,7 +2566,7 @@ window.addEventListener('message', (event) => {
       output.className = 'tool-output';
       output.textContent = typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}';
       detail.append(summary, output);
-      const toolMessage = { role: 'tool', toolCallId: String(data.id || '').slice(0, 256), node: detail };
+      const toolMessage = { role: 'tool', toolCallId: String(data.id || '').slice(0, 256), result: '', details: undefined, node: detail };
       state.messages.push(toolMessage);
       const currentTools = state.toolMessagesBySession.get(state.sessionPath) || [];
       currentTools.push(toolMessage);
@@ -2474,12 +2577,19 @@ window.addEventListener('message', (event) => {
     }
     case 'tool-update':
     case 'tool-end': {
-      const card = [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === String(data.id || ''));
+      const toolId = String(data.id || '').slice(0, 256);
+      const card = [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === toolId);
       if (card) {
         const output = card.querySelector('.tool-output');
         const result = data.result;
         const text = typeof result === 'string' ? result : JSON.stringify(result ?? '', null, 2);
         if (output) output.textContent = text.slice(-12000);
+        appendStructuredToolDetails(card, data.details);
+        const toolMessage = [...state.messages].reverse().find((message) => message.role === 'tool' && message.toolCallId === toolId);
+        if (toolMessage) {
+          toolMessage.result = text.slice(-12000);
+          toolMessage.details = data.details;
+        }
         if (data.type === 'tool-end') {
           card.classList.toggle('tool-error', Boolean(data.isError));
           const toolName = String(data.name || card.dataset.toolName || 'tool').slice(0, 128);

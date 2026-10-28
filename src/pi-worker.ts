@@ -83,14 +83,14 @@ type SessionLike = {
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
   sessionManager?: {
-    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
     getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown } }>;
     getLeafId: () => string | null;
     appendCustomEntry: (customType: string, data?: unknown) => string;
     createBranchedSession: (leafId: string) => string | undefined;
     appendSessionInfo: (name: string) => string;
     appendContextEdit?: (targetId: string, replacement: { content: unknown } | null) => string;
-    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
@@ -135,6 +135,7 @@ const cwd = String(workerOptions?.cwd ?? process.cwd());
 let mcpEnabled = workerOptions?.mcpEnabled === true;
 let autoNameSessions = workerOptions?.autoNameSessions !== false;
 const MAX_TOOL_UI_CHARS = 100_000;
+const MAX_TOOL_DETAILS_CHARS = 24_000;
 let session: SessionLike | undefined;
 let packageManager: DefaultPackageManager | undefined;
 let unsubscribe: (() => void) | undefined;
@@ -268,6 +269,67 @@ function toolOutput(result: unknown): string {
     return limitToolUiText(JSON.stringify(boundedToolValue(result ?? ''), null, 2));
   } catch {
     return '[tool output unavailable]';
+  }
+}
+
+function boundedStructuredToolValue(value: unknown, budget: { remaining: number }, depth = 0): unknown {
+  if (budget.remaining <= 0) return '[details truncated]';
+  if (typeof value === 'string') {
+    const available = Math.max(0, budget.remaining - 24);
+    const text = value.length <= available ? value : `${value.slice(0, available)}[truncated]`;
+    budget.remaining -= text.length;
+    return text;
+  }
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') {
+    budget.remaining -= 16;
+    return value;
+  }
+  if (depth >= 5) return '[nested value omitted]';
+  if (Array.isArray(value)) {
+    const result: unknown[] = [];
+    const length = Math.min(value.length, 50);
+    for (let index = 0; index < length; index += 1) {
+      if (budget.remaining <= 32) {
+        result.push('[details truncated]');
+        break;
+      }
+      result.push(boundedStructuredToolValue(value[index], budget, depth + 1));
+    }
+    if (value.length > length && budget.remaining > 32) result.push(`[${value.length - length} more items omitted]`);
+    return result;
+  }
+  if (typeof value === 'object') {
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    let count = 0;
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      if (count >= 50 || budget.remaining <= 32) {
+        result['[remaining properties]'] = 'omitted';
+        break;
+      }
+      const safeKey = key.slice(0, Math.min(128, Math.max(1, budget.remaining - 32)));
+      budget.remaining -= safeKey.length;
+      try {
+        result[safeKey] = boundedStructuredToolValue((value as Record<string, unknown>)[key], budget, depth + 1);
+      } catch {
+        result[safeKey] = '[value unavailable]';
+      }
+      count += 1;
+    }
+    return result;
+  }
+  const text = String(value).slice(0, Math.max(0, budget.remaining - 24));
+  budget.remaining -= text.length;
+  return text;
+}
+
+function toolDetails(result: unknown): unknown {
+  if (!result || typeof result !== 'object') return undefined;
+  try {
+    const details = (result as { details?: unknown }).details;
+    return details === undefined ? undefined : boundedStructuredToolValue(details, { remaining: MAX_TOOL_DETAILS_CHARS });
+  } catch {
+    return undefined;
   }
 }
 
@@ -467,6 +529,7 @@ function snapshot(): void {
         toolName: typeof entry.message.toolName === 'string' ? entry.message.toolName.slice(0, 128) : call?.name ?? 'tool',
         argsPreview: call?.argsPreview ?? '{}',
         result: toolOutput(entry.message),
+        details: toolDetails(entry.message),
         isError: entry.message.isError === true,
       }];
     }
@@ -683,12 +746,14 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
         id: String(event.toolCallId ?? '').slice(0, 256),
         name: String(event.toolName ?? 'tool').slice(0, 128),
         result: toolOutput(event.partialResult),
+        details: toolDetails(event.partialResult),
       });
     } else if (event.type === 'tool_execution_end') {
       send('tool-end', {
         id: String(event.toolCallId ?? '').slice(0, 256),
         name: String(event.toolName ?? 'tool').slice(0, 128),
         result: toolOutput(event.result),
+        details: toolDetails(event.result),
         isError: Boolean(event.isError),
       });
     } else if (event.type === 'thinking_level_changed' || event.type === 'model_change') {
