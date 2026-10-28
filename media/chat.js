@@ -5022,17 +5022,25 @@ function closeComposerPopovers() {
   ui.runtimeSettingsToggle.setAttribute('aria-expanded', 'false');
 }
 
-const composerPopoverBoundary = '.control-popover, #model-toggle, #tools-toggle, #skills-toggle';
 function dismissComposerPopoversFromOutside(event) {
-  if (ui.modelPopover.hidden && ui.toolsPopover.hidden && ui.skillsPopover.hidden) return;
+  const openPopover = [
+    [ui.modelPopover, ui.modelToggle],
+    [ui.toolsPopover, ui.toolsToggle],
+    [ui.skillsPopover, ui.skillsToggle],
+  ].find(([popover]) => !popover.hidden);
+  if (!openPopover) return;
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
-  if (eventPath.some((item) => item instanceof Element && item.matches(composerPopoverBoundary))) return;
+  const [popover, toggle] = openPopover;
+  if (eventPath.includes(popover) || eventPath.includes(toggle)) return;
   closeComposerPopovers();
 }
 
-document.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
-document.addEventListener('click', dismissComposerPopoversFromOutside, true);
-document.addEventListener('focusin', dismissComposerPopoversFromOutside, true);
+// Capture at window level so a webview control cannot stop the outside event
+// before it reaches the dismissal handler.
+window.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
+window.addEventListener('mousedown', dismissComposerPopoversFromOutside, true);
+window.addEventListener('click', dismissComposerPopoversFromOutside, true);
+window.addEventListener('focusin', dismissComposerPopoversFromOutside, true);
 // Leaving the webview for the VS Code workbench can still provide a relatedTarget.
 // Any pointer exit from this document is outside the composer controls.
 document.documentElement.addEventListener('pointerleave', closeComposerPopovers);
