@@ -1012,6 +1012,87 @@ function openMessageContextEditor(row, message) {
   input.focus();
 }
 
+const TRANSCRIPT_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_TRANSCRIPT_IMAGE_DATA_LENGTH = 7_000_000;
+const MAX_TRANSCRIPT_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_TRANSCRIPT_IMAGE_COUNT = 3;
+const MAX_TRANSCRIPT_IMAGES_BYTES_PER_MESSAGE = 12 * 1024 * 1024;
+
+function isValidTranscriptImageData(data) {
+  if (typeof data !== 'string' || !data || data.length > MAX_TRANSCRIPT_IMAGE_DATA_LENGTH || data.length % 4 !== 0) return false;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  const contentLength = data.length - padding;
+  if (data.indexOf('=') !== (padding ? contentLength : -1)) return false;
+  for (let offset = 0; offset < contentLength; offset += 4096) {
+    if (!/^[A-Za-z0-9+/]+$/.test(data.slice(offset, Math.min(offset + 4096, contentLength)))) return false;
+  }
+  return true;
+}
+
+function appendTranscriptImages(body, message) {
+  const candidates = Array.isArray(message.images) ? message.images : [];
+  const displayed = [];
+  let totalBytes = 0;
+  for (const candidate of candidates.slice(0, MAX_TRANSCRIPT_IMAGE_COUNT)) {
+    const imageData = candidate && typeof candidate === 'object' ? candidate : {};
+    const { data, mimeType } = imageData;
+    if (typeof mimeType !== 'string' || !TRANSCRIPT_IMAGE_TYPES.has(mimeType) || !isValidTranscriptImageData(data)) continue;
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    const decodedBytes = Math.floor(data.length * 3 / 4) - padding;
+    if (decodedBytes <= 0 || decodedBytes > MAX_TRANSCRIPT_IMAGE_BYTES
+      || totalBytes + decodedBytes > MAX_TRANSCRIPT_IMAGES_BYTES_PER_MESSAGE) continue;
+    displayed.push({ data, mimeType });
+    totalBytes += decodedBytes;
+  }
+
+  const reportedCount = Number.isFinite(Number(message.imageCount)) ? Math.max(0, Math.trunc(Number(message.imageCount))) : 0;
+  const reportedOmitted = Number.isFinite(Number(message.imageDisplayOmitted)) ? Math.max(0, Math.trunc(Number(message.imageDisplayOmitted))) : 0;
+  const totalImageCount = Math.min(1000, Math.max(reportedCount, candidates.length + reportedOmitted, message.hasImages ? 1 : 0));
+  const hasImages = totalImageCount > 0;
+  if (!hasImages) return false;
+
+  if (displayed.length) {
+    const grid = document.createElement('div');
+    grid.className = 'message-image-grid';
+    grid.setAttribute('aria-label', `${displayed.length} ${displayed.length === 1 ? 'image' : 'images'}`);
+    for (let index = 0; index < displayed.length; index += 1) {
+      const source = displayed[index];
+      const image = document.createElement('img');
+      image.className = 'message-transcript-image';
+      image.alt = message.role === 'user' ? `Attached image ${index + 1}` : `Image output ${index + 1}`;
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.src = `data:${source.mimeType};base64,${source.data}`;
+      image.addEventListener('error', () => {
+        const fallback = document.createElement('span');
+        fallback.className = 'message-image-unavailable';
+        fallback.textContent = 'Image could not be displayed';
+        image.replaceWith(fallback);
+      }, { once: true });
+      grid.append(image);
+    }
+    body.append(grid);
+  }
+
+  const omitted = Math.max(0, totalImageCount - displayed.length);
+  if (omitted) {
+    const imageSummary = document.createElement('div');
+    imageSummary.className = 'message-image-summary';
+    imageSummary.textContent = `${omitted} ${omitted === 1 ? 'image' : 'images'} not shown (unsupported format or display limit).`;
+    body.append(imageSummary);
+  }
+  return true;
+}
+
+function renderToolImages(card, message) {
+  card.querySelector('.tool-image-output')?.remove();
+  if (!message || !(message.hasImages || Number(message.imageCount) > 0 || Array.isArray(message.images) && message.images.length)) return;
+  const output = document.createElement('div');
+  output.className = 'tool-image-output';
+  appendTranscriptImages(output, { ...message, role: 'tool' });
+  if (output.childNodes.length) card.append(output);
+}
+
 function renderMessages(shouldFollow = true) {
   const nearBottom = ui.messageArea.scrollHeight - ui.messageArea.scrollTop - ui.messageArea.clientHeight < 80;
   ui.messageList.replaceChildren();
@@ -1084,14 +1165,8 @@ function renderMessages(shouldFollow = true) {
     body.className = 'message-content';
     if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text, true);
     else body.textContent = message.text;
-    if (message.role === 'user' && message.hasImages) {
-      const imageSummary = document.createElement('div');
-      imageSummary.className = 'message-image-summary';
-      const imageCount = Math.max(1, Number(message.imageCount) || 1);
-      imageSummary.textContent = `${imageCount} image ${imageCount === 1 ? 'attachment' : 'attachments'}`;
-      body.append(imageSummary);
-    }
-    if (message.text || (message.role === 'user' && message.hasImages)) row.append(body);
+    const hasImages = appendTranscriptImages(body, message);
+    if (message.text || hasImages) row.append(body);
     if (message.contextStatus === 'edited') row.append(createContextDiff(message.text, message.contextEditText));
     const quoteIds = quoteSourceIds(message.context);
     if (quoteIds.length) {
@@ -1241,10 +1316,15 @@ function createHistoricalToolCard(message) {
     args.textContent = `Arguments\n${argsPreview}`;
     detail.append(args);
   }
-  const output = document.createElement('pre');
-  output.className = 'tool-output';
-  output.textContent = String(message.result || '').slice(-12000);
-  detail.append(output);
+  let resultText = String(message.result || '').slice(-12000);
+  if (message.hasImages) resultText = resultText.split('\n').filter((line) => line.trim() !== '[image output]').join('\n').trim();
+  if (resultText) {
+    const output = document.createElement('pre');
+    output.className = 'tool-output tool-result-output';
+    output.textContent = resultText;
+    detail.append(output);
+  }
+  renderToolImages(detail, message);
   appendStructuredToolDetails(detail, message.details);
   return detail;
 }
@@ -2947,7 +3027,7 @@ window.addEventListener('message', (event) => {
       const summary = document.createElement('summary');
       summary.textContent = `Running ${toolName}`;
       const output = document.createElement('pre');
-      output.className = 'tool-output';
+      output.className = 'tool-output tool-arguments';
       output.textContent = typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}';
       detail.append(summary, output);
       const toolMessage = {
@@ -2975,14 +3055,31 @@ window.addEventListener('message', (event) => {
       const card = [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === toolId)
         || (toolMessage?.node instanceof HTMLElement ? toolMessage.node : undefined);
       const result = data.result;
-      const text = typeof result === 'string' ? result : JSON.stringify(result ?? '', null, 2);
+      let text = typeof result === 'string' ? result : JSON.stringify(result ?? '', null, 2);
+      if (data.hasImages) text = text.split('\n').filter((line) => line.trim() !== '[image output]').join('\n').trim();
       if (toolMessage) {
         toolMessage.result = text.slice(-12000);
         toolMessage.details = data.details;
+        if (data.type === 'tool-end') {
+          toolMessage.hasImages = data.hasImages === true;
+          toolMessage.imageCount = Number.isFinite(Number(data.imageCount)) ? Math.max(0, Math.trunc(Number(data.imageCount))) : 0;
+          toolMessage.images = Array.isArray(data.images) ? data.images : [];
+          toolMessage.imageDisplayOmitted = Number.isFinite(Number(data.imageDisplayOmitted))
+            ? Math.max(0, Math.trunc(Number(data.imageDisplayOmitted)))
+            : 0;
+        }
       }
       if (card) {
-        const output = card.querySelector('.tool-output');
-        if (output) output.textContent = text.slice(-12000);
+        let output = card.querySelector('.tool-result-output');
+        if (text) {
+          if (!output) {
+            output = document.createElement('pre');
+            output.className = 'tool-output tool-result-output';
+            card.append(output);
+          }
+          output.textContent = text.slice(-12000);
+        } else output?.remove();
+        if (data.type === 'tool-end') renderToolImages(card, toolMessage || data);
         appendStructuredToolDetails(card, data.details, data.type === 'tool-update');
         if (data.type === 'tool-end') {
           card.classList.toggle('tool-error', Boolean(data.isError));

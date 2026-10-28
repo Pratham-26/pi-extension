@@ -353,7 +353,11 @@ button:focus-visible, textarea:focus-visible {
   background: var(--surface-raised);
   white-space: pre-wrap;
 }
-.message-image-summary { margin-top: 5px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; }
+.message-image-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 6px; max-width: min(100%, 480px); margin-top: 8px; }
+.message-transcript-image { display: block; width: 100%; max-height: 300px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-raised); object-fit: contain; }
+.message-image-summary, .message-image-unavailable { margin-top: 5px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; }
+.tool-image-output { padding: 0 8px 8px; }
+.tool-image-output .message-image-grid { max-width: 100%; margin-top: 0; }
 .branch-button { align-self: flex-end; padding: 3px 6px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
 .branch-button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
 .quote-references { display: flex; flex-wrap: wrap; gap: 4px; }

@@ -189,6 +189,9 @@ function contentText(content: unknown): string {
 const RESTORABLE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_RESTORED_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_RESTORED_IMAGE_COUNT = 5;
+const MAX_TRANSCRIPT_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_TRANSCRIPT_IMAGE_COUNT = 8;
+const MAX_TRANSCRIPT_IMAGES_PER_MESSAGE = 3;
 
 function isValidBase64ImageData(data: string): boolean {
   if (!data || data.length % 4 !== 0) return false;
@@ -228,6 +231,64 @@ function restoreImageContent(content: unknown): { images: Array<{ data: string; 
     totalBytes += decodedBytes;
   }
   return { images, skipped };
+}
+
+function addBoundedTranscriptImages(messages: Array<{ imageContent?: unknown; imageCount?: number; [key: string]: unknown }>): void {
+  let totalBytes = 0;
+  let totalImages = 0;
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    const content = message.imageContent;
+    delete message.imageContent;
+    if (!Array.isArray(content)) continue;
+    const parts = content.filter((part: any) => part && part.type === 'image');
+    if (!parts.length) continue;
+    const images: Array<{ data: string; mimeType: string }> = [];
+    let omitted = 0;
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const image = parts[index] as Record<string, unknown>;
+      const data = image.data;
+      const mimeType = image.mimeType;
+      if (typeof data !== 'string' || data.length > 7_000_000 || !isValidBase64ImageData(data)
+        || typeof mimeType !== 'string' || !RESTORABLE_IMAGE_TYPES.has(mimeType)) {
+        omitted += 1;
+        continue;
+      }
+      const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+      const decodedBytes = Math.floor(data.length * 3 / 4) - padding;
+      if (decodedBytes <= 0 || decodedBytes > MAX_RESTORED_IMAGE_BYTES
+        || totalBytes + decodedBytes > MAX_TRANSCRIPT_IMAGE_BYTES
+        || totalImages >= MAX_TRANSCRIPT_IMAGE_COUNT
+        || images.length >= MAX_TRANSCRIPT_IMAGES_PER_MESSAGE) {
+        omitted += 1;
+        continue;
+      }
+      images.push({ data, mimeType });
+      totalBytes += decodedBytes;
+      totalImages += 1;
+    }
+    images.reverse();
+    if (images.length) message.images = images;
+    if (omitted) message.imageDisplayOmitted = omitted;
+  }
+}
+
+function boundedTranscriptImageFields(content: unknown): Record<string, unknown> {
+  const imageCount = Array.isArray(content) ? content.filter((part: any) => part?.type === 'image').length : 0;
+  if (!imageCount) return {};
+  const message: { imageContent?: unknown; imageCount: number; hasImages: boolean; [key: string]: unknown } = {
+    imageContent: content,
+    imageCount,
+    hasImages: true,
+  };
+  addBoundedTranscriptImages([message]);
+  const { images, imageDisplayOmitted } = message;
+  return {
+    hasImages: true,
+    imageCount,
+    ...(images ? { images } : {}),
+    ...(imageDisplayOmitted ? { imageDisplayOmitted } : {}),
+  };
 }
 
 function boundedToolValue(value: unknown, depth = 0): unknown {
@@ -581,12 +642,24 @@ function snapshot(): void {
       });
     }
   }
-  type SnapshotMessage = { role: string; text?: string; [key: string]: unknown };
+  type SnapshotMessage = { role: string; text?: string; imageContent?: unknown; [key: string]: unknown };
+  const userAssistantSnapshot = (
+    display: NonNullable<ReturnType<typeof toUiMessage>>,
+    entryId: string,
+    content: unknown,
+  ): SnapshotMessage => ({
+    ...display,
+    entryId,
+    ...(display.hasImages ? { imageContent: content } : {}),
+  });
   const messages: SnapshotMessage[] = branchEntries.flatMap((entry): SnapshotMessage[] => {
     if (entry.type !== 'message' || !entry.message) return [];
     if (entry.message.role === 'toolResult') {
       const toolCallId = typeof entry.message.toolCallId === 'string' ? entry.message.toolCallId.slice(0, 256) : '';
       const call = toolCalls.get(toolCallId);
+      const imageCount = Array.isArray(entry.message.content)
+        ? entry.message.content.filter((part: any) => part?.type === 'image').length
+        : 0;
       return [{
         role: 'tool',
         toolCallId,
@@ -595,19 +668,25 @@ function snapshot(): void {
         result: toolOutput(entry.message),
         details: toolDetails(entry.message),
         isError: entry.message.isError === true,
+        ...(imageCount ? { imageContent: entry.message.content, imageCount, hasImages: true } : {}),
       }];
     }
     if (entry.message.role !== 'user' && entry.message.role !== 'assistant') return [];
     const display = toUiMessage(entry.message);
     if (!display) return [];
-    if (!contextEdits.has(entry.id)) return [{ ...display, entryId: entry.id }];
+    if (!contextEdits.has(entry.id)) return [userAssistantSnapshot(display, entry.id, entry.message.content)];
     const replacement = contextEdits.get(entry.id);
-    if (replacement === null) return [{ ...display, entryId: entry.id, contextStatus: 'omitted' }];
+    if (replacement === null) return [{ ...userAssistantSnapshot(display, entry.id, entry.message.content), contextStatus: 'omitted' }];
     const edited = replacement && 'content' in replacement
       ? toUiMessage({ role: entry.message.role, content: replacement.content })
       : undefined;
-    return [{ ...display, entryId: entry.id, contextStatus: 'edited', contextEditText: edited?.text ?? contentText(replacement?.content) }];
+    return [{
+      ...userAssistantSnapshot(display, entry.id, entry.message.content),
+      contextStatus: 'edited',
+      contextEditText: edited?.text ?? contentText(replacement?.content),
+    }];
   });
+  addBoundedTranscriptImages(messages);
   send('snapshot', {
     sessionId: session.sessionId,
     sessionFile: session.sessionFile,
@@ -822,6 +901,7 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
         result: toolOutput(event.result),
         details: toolDetails(event.result),
         isError: Boolean(event.isError),
+        ...boundedTranscriptImageFields(event.result?.content),
       });
     } else if (event.type === 'thinking_level_changed' || event.type === 'model_change') {
       sendOptions();
