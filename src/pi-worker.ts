@@ -609,6 +609,7 @@ function applyAnsiSgr(styles: Set<string>, sequence: string): void {
 function safeTuiLine(value: string, total: { chars: number }): SafeTuiLine {
   const line: SafeTuiLine = [];
   const styles = new Set<string>();
+  const boundedValue = value.slice(0, MAX_TUI_RENDER_CHARS + 1);
   const sgrOrControl = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
   const append = (source: string) => {
     if (total.chars >= MAX_TUI_RENDER_CHARS) return;
@@ -623,17 +624,17 @@ function safeTuiLine(value: string, total: { chars: number }): SafeTuiLine {
     total.chars += text.length;
   };
   let cursor = 0;
-  for (const match of value.matchAll(sgrOrControl)) {
+  for (const match of boundedValue.matchAll(sgrOrControl)) {
     const token = match[0];
     const start = match.index ?? cursor;
-    append(value.slice(cursor, start));
+    append(boundedValue.slice(cursor, start));
     if (token.startsWith('\u001b[') && token.endsWith('m')) {
       const params = token.slice(2, -1);
       if (/^[\d;]*$/.test(params)) applyAnsiSgr(styles, params);
     }
     cursor = start + token.length;
   }
-  append(value.slice(cursor));
+  append(boundedValue.slice(cursor));
   return line;
 }
 
@@ -641,15 +642,19 @@ function safeTuiLines(component: unknown): SafeTuiLine[] | undefined {
   if (!component || typeof component !== 'object' || typeof (component as { render?: unknown }).render !== 'function') return undefined;
   try {
     const rendered = (component as { render: (width: number) => unknown }).render(80);
-    const sourceLines = Array.isArray(rendered) ? rendered : typeof rendered === 'string' ? rendered.split('\n') : [];
+    const renderedText = typeof rendered === 'string' ? rendered.slice(0, MAX_TUI_RENDER_CHARS + 1) : undefined;
+    const sourceLines = Array.isArray(rendered) ? rendered : renderedText !== undefined ? renderedText.split('\n') : [];
+    let truncated = (typeof rendered === 'string' && rendered.length > MAX_TUI_RENDER_CHARS)
+      || sourceLines.length > MAX_TUI_RENDER_LINES;
     const total = { chars: 0 };
     const lines: SafeTuiLine[] = [];
     for (const value of sourceLines.slice(0, MAX_TUI_RENDER_LINES)) {
       if (typeof value !== 'string') continue;
+      if (value.length > 2_000) truncated = true;
       lines.push(safeTuiLine(value, total));
       if (total.chars >= MAX_TUI_RENDER_CHARS) break;
     }
-    if (sourceLines.length > lines.length && lines.length) {
+    if ((truncated || sourceLines.length > lines.length) && lines.length) {
       lines.push([{ text: '[renderer output truncated]', styles: [] }]);
     }
     return lines;
