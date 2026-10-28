@@ -42,7 +42,7 @@ const state = {
   commandCompletionSequence: 0,
   mcpEnabled: false,
   mcpSettingPending: false,
-  runtimeSettings: { autoCompaction: false, autoRetry: false, cacheWarming: 'off' },
+  runtimeSettings: { autoCompaction: false, autoRetry: false, cacheWarming: 'off', offlineMode: 'inherit' },
   models: [],
   modelSearch: '',
   chatSearch: '',
@@ -158,6 +158,7 @@ const ui = {
   autoCompaction: el('auto-compaction'),
   autoRetry: el('auto-retry'),
   cacheWarming: el('cache-warming'),
+  offlineMode: el('offline-mode'),
   mcpEnabled: el('mcp-enabled'),
   editMcpConfig: el('edit-mcp-config'),
   contextMeter: el('context-meter'),
@@ -367,6 +368,7 @@ function updateControls() {
   ui.autoCompaction.disabled = !state.hasSession || state.busy;
   ui.autoRetry.disabled = !state.hasSession || state.busy;
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
+  ui.offlineMode.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
   ui.mcpEnabled.disabled = !state.hasSession || state.busy || state.mcpSettingPending;
   ui.editMcpConfig.disabled = !state.hasWorkspace || state.busy;
   ui.gitReviewToggle.disabled = !state.hasWorkspace;
@@ -1937,10 +1939,12 @@ function renderModelChoices(data) {
     autoCompaction: runtimeSettings.autoCompaction === true,
     autoRetry: runtimeSettings.autoRetry === true,
     cacheWarming: ['off', 'streaming', 'idle'].includes(runtimeSettings.cacheWarming) ? runtimeSettings.cacheWarming : 'off',
+    offlineMode: ['inherit', 'offline', 'online'].includes(runtimeSettings.offlineMode) ? runtimeSettings.offlineMode : 'inherit',
   };
   ui.autoCompaction.checked = state.runtimeSettings.autoCompaction;
   ui.autoRetry.checked = state.runtimeSettings.autoRetry;
   ui.cacheWarming.value = state.runtimeSettings.cacheWarming;
+  ui.offlineMode.value = state.runtimeSettings.offlineMode;
   state.mcpEnabled = data.mcpEnabled === true;
   if (!state.mcpSettingPending) ui.mcpEnabled.checked = state.mcpEnabled;
   state.presets = Array.isArray(data.presets) ? data.presets : state.presets;
@@ -2958,6 +2962,13 @@ window.addEventListener('message', (event) => {
     case 'options':
       renderModelChoices(data);
       break;
+    case 'offline-mode-setting':
+      if (['inherit', 'offline', 'online'].includes(data.mode)) {
+        state.runtimeSettings.offlineMode = data.mode;
+        ui.offlineMode.value = data.mode;
+        updateControls();
+      }
+      break;
     case 'command-completions':
       renderExtensionCommandCompletions(data);
       break;
@@ -3416,6 +3427,10 @@ ui.autoRetry.addEventListener('change', () => {
 ui.cacheWarming.addEventListener('change', () => {
   ui.cacheWarming.disabled = true;
   post('updatePiSetting', { setting: 'cacheWarming', value: ui.cacheWarming.value });
+});
+ui.offlineMode.addEventListener('change', () => {
+  ui.offlineMode.disabled = true;
+  post('setPiOfflineMode', { mode: ui.offlineMode.value });
 });
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
 ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));

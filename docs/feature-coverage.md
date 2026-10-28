@@ -11,7 +11,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Save, rename, remove, reorder, and use model/thinking presets.
 - [~] OAuth/API-key sign-in through Pi's SDK; open Pi's custom model file and manually refresh remote model catalogs. Provider account balance and in-app custom endpoint forms are not shown.
 - [~] Show cumulative tokens and cost for the active session from Pi's recorded usage; provider account quota and balance are unavailable.
-- [~] In-app Pi controls for automatic retry, automatic compaction, and cache warming; Pi's configuration folder can be changed with a machine-scoped setting and folder picker. Offline mode, custom runtime environment variables, sandbox, and context-file controls remain unavailable.
+- [~] In-app Pi controls for automatic retry, automatic compaction, cache warming, and Pi startup network mode; Pi's configuration folder can be changed with a machine-scoped setting and folder picker. Custom runtime environment variables, sandbox, and context-file controls remain unavailable.
 - [~] Settings open the extension's searchable VS Code settings and Pi's `settings.json`; extension settings cover editor context and notifications, while other Pi-specific settings must be edited in the file.
 
 ## Chat and transcript

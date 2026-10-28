@@ -80,6 +80,8 @@ type PiResourceChoice = vscode.QuickPickItem & {
   enabled: boolean;
 };
 
+type PiOfflineMode = 'inherit' | 'offline' | 'online';
+
 const VIEW_ID = 'piChat.chatView';
 const PENDING_SESSION_HANDOFF_KEY = 'piChat.pendingSessionHandoff';
 const SESSION_HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;
@@ -91,6 +93,11 @@ const MAX_GIT_DIFF_CHARS = 500_000;
 const MAX_GIT_DRAFT_CHARS = 30_000;
 const MAX_GIT_DRAFT_FILES = 24;
 const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
+
+function readPiOfflineMode(): PiOfflineMode {
+  const value = vscode.workspace.getConfiguration('piChat').get<string>('offlineMode', 'inherit');
+  return value === 'offline' || value === 'online' ? value : 'inherit';
+}
 
 type PendingSessionHandoff = {
   sessionPath: string;
@@ -143,6 +150,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.restartRuntime()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('piChat.agentDir')) provider.onAgentDirConfigurationChanged();
+      if (event.affectsConfiguration('piChat.offlineMode')) provider.onOfflineModeConfigurationChanged();
     }),
     provider,
   );
@@ -157,6 +165,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private worker?: Worker;
   private workerWorkspace?: string;
   private workerAgentDirSetting = '';
+  private workerOfflineModeSetting: PiOfflineMode = 'inherit';
   private runtimeBusy = false;
   private queuedWorkCount = 0;
   private webviewMessageSubscription?: vscode.Disposable;
@@ -317,6 +326,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   restartRuntime(): void {
     const previous = this.worker;
     this.workerAgentDirSetting = '';
+    this.workerOfflineModeSetting = 'inherit';
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
@@ -378,11 +388,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.workerWorkspace = cwd;
     const workerUri = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'pi-worker.mjs');
     const configuredAgentDir = vscode.workspace.getConfiguration('piChat').get<string>('agentDir', '').trim();
+    const offlineMode = readPiOfflineMode();
     const workerEnv: NodeJS.Dict<string> = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (typeof value === 'string') workerEnv[key] = value;
     }
     if (configuredAgentDir) workerEnv.PI_CODING_AGENT_DIR = configuredAgentDir;
+    if (offlineMode === 'offline') workerEnv.PI_OFFLINE = '1';
+    else if (offlineMode === 'online') delete workerEnv.PI_OFFLINE;
     const worker = new Worker(workerUri.fsPath, {
       env: workerEnv,
       workerData: {
@@ -393,6 +406,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     });
     this.worker = worker;
     this.workerAgentDirSetting = configuredAgentDir;
+    this.workerOfflineModeSetting = offlineMode;
     this.runtimeBusy = false;
     this.queuedWorkCount = 0;
     worker.on('message', (message: RuntimeMessage) => {
@@ -410,6 +424,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           void this.showChatNotification('A Pi extension is waiting for your answer.');
         }
         this.post(message);
+        return;
+      }
+      if (message.type === 'options') {
+        const runtimeSettings = message.runtimeSettings && typeof message.runtimeSettings === 'object'
+          ? message.runtimeSettings as Record<string, unknown>
+          : {};
+        this.post({ ...message, runtimeSettings: { ...runtimeSettings, offlineMode: readPiOfflineMode() } });
         return;
       }
       if (message.type === 'extension-ui-reset') this.pendingExtensionUiRequestIds.clear();
@@ -942,6 +963,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'restartPiRuntime':
         await this.restartPiRuntime();
+        return;
+      case 'setPiOfflineMode':
+        await this.setPiOfflineMode(message);
         return;
       case 'openMcpConfig':
         await this.openMcpConfig();
@@ -2245,6 +2269,27 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       : 'The Pi configuration folder setting changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
   }
 
+  onOfflineModeConfigurationChanged(): void {
+    const currentMode = readPiOfflineMode();
+    this.post({ type: 'offline-mode-setting', mode: currentMode });
+    if (currentMode === this.workerOfflineModeSetting) return;
+    this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
+      ? 'Pi startup network mode changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
+      : 'Pi startup network mode changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
+  }
+
+  private async setPiOfflineMode(message: RuntimeMessage): Promise<void> {
+    const mode = message.mode;
+    if (mode !== 'inherit' && mode !== 'offline' && mode !== 'online') return;
+    try {
+      await vscode.workspace.getConfiguration('piChat').update('offlineMode', mode, vscode.ConfigurationTarget.Global);
+      this.post({ type: 'offline-mode-setting', mode });
+    } catch {
+      this.post({ type: 'offline-mode-setting', mode: readPiOfflineMode() });
+      this.post({ type: 'notice', message: 'Could not update Pi startup network mode.', isError: true });
+    }
+  }
+
   async chooseAgentDir(): Promise<void> {
     if (this.runtimeBusy || this.queuedWorkCount > 0) {
       this.post({ type: 'notice', message: 'Finish the current Pi run and queued work before changing its configuration folder.', isError: true });
@@ -2956,6 +3001,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <label class="runtime-setting"><input id="auto-compaction" type="checkbox"><span>Automatic context compaction</span></label>
                 <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
                 <label class="runtime-setting cache-warming-setting" for="cache-warming"><span>Cache warming</span><select id="cache-warming"><option value="off">Off</option><option value="streaming">While streaming</option><option value="idle">Between runs</option></select></label>
+                <label class="runtime-setting cache-warming-setting" for="offline-mode"><span>Startup network mode</span><select id="offline-mode"><option value="inherit">Use Pi environment</option><option value="offline">Offline startup</option><option value="online">Allow startup checks</option></select></label>
+                <p class="runtime-settings-note">Offline mode disables automatic startup network operations. Model requests still need a connection. Restart Pi to apply changes.</p>
                 <p class="runtime-settings-note">These choices affect Pi sessions using your global settings. Cache warming sends extra provider requests and may cost money.</p>
                 <div class="popover-heading extension-command-heading"><strong>MCP servers</strong><span>Configured connections are off until you enable them here</span></div>
                 <label class="runtime-setting"><input id="mcp-enabled" type="checkbox"><span>Connect configured MCP servers</span></label>

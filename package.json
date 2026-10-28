@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -92,6 +92,18 @@
           "default": "",
           "scope": "machine",
           "description": "Use this Pi configuration folder for models, credentials, resources, and sessions. Empty uses Pi's default or PI_CODING_AGENT_DIR. Restart the Pi runtime after editing this setting."
+        },
+        "piChat.offlineMode": {
+          "type": "string",
+          "enum": ["inherit", "offline", "online"],
+          "enumDescriptions": [
+            "Keep the PI_OFFLINE environment setting inherited by the Pi worker.",
+            "Set PI_OFFLINE=1 to disable automatic Pi startup network operations.",
+            "Remove PI_OFFLINE from the Pi worker environment and allow startup network operations."
+          ],
+          "default": "inherit",
+          "scope": "machine",
+          "description": "Choose Pi's startup network behavior. Offline mode does not block model API requests. Restart the Pi runtime after changing this setting."
         },
         "piChat.context.followSelection": {
           "type": "boolean",
