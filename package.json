@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -234,7 +234,7 @@
   },
   "scripts": {
     "compile": "npm run compile:extension && npm run compile:worker && npm run compile:webview",
-    "compile:extension": "esbuild src/extension.ts --bundle --platform=node --target=node22 --external:vscode --outfile=dist/extension.js",
+    "compile:extension": "esbuild src/extension.ts --bundle --platform=node --target=node22 --external:vscode --main-fields=module,main --outfile=dist/extension.js",
     "compile:worker": "esbuild src/pi-worker.ts --bundle --platform=node --target=node22 --format=esm --external:@earendil-works/pi-coding-agent --outfile=dist/pi-worker.mjs",
     "compile:webview": "esbuild src/webview-renderers.js --bundle --platform=browser --target=es2022 --format=iife --minify --legal-comments=linked --outfile=dist/webview-renderers.js",
     "typecheck": "tsc --noEmit",

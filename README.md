@@ -22,7 +22,7 @@ See [the feature coverage checklist](docs/feature-coverage.md) for implemented a
 
 Set `piChat.sessions.openLatestOnStart` in VS Code Settings to reopen the latest session for the active workspace when the chat view starts. It defaults to `false`.
 
-The extension runs Pi in a worker thread. The webview uses a restrictive Content Security Policy and renders Pi output as text or a safe Markdown subset; external links are limited to HTTPS and loopback HTTP. It does not add telemetry or route requests through a hosted service. Live session indicators are shared between local VS Code windows using short-lived records with hashed session identifiers and generic activity labels; prompts, titles, and file paths are not stored in those records.
+The extension instantiates the bundled Pi SDK directly in a worker thread; it does not launch the Pi CLI and speak the CLI's RPC protocol. The `piChat.extensionUiMode` setting controls the UI mode exposed to loaded Pi extensions. The webview uses a restrictive Content Security Policy and renders Pi output as text or a safe Markdown subset; external links are limited to HTTPS and loopback HTTP. It does not add telemetry or route requests through a hosted service. Live session indicators are shared between local VS Code windows using short-lived records with hashed session identifiers and generic activity labels; prompts, titles, and file paths are not stored in those records.
 
 Use **Pi Chat: Choose Pi Configuration Folder** to select another machine-local Pi configuration directory. The picker restarts Pi after confirmation when there is no running or queued work. If you change `piChat.agentDir` or `piChat.offlineMode` directly in VS Code Settings, use **Pi Chat: Restart Pi Runtime** to apply the change; the command refuses while Pi work is active. Offline mode disables automatic startup network operations, but it does not block model API requests.
 
@@ -32,7 +32,7 @@ Pi's configured tools and extensions retain the same local permissions they have
 
 MCP connections are disabled by default. Enabling a server requires confirmation because configured servers can run local commands or contact remote services. The MCP manager can change enablement and tool exposure in user settings or, after Pi trust, a workspace-only override. Project-local Pi resources remain behind Pi's workspace trust decision.
 
-The extension bundles the Pi SDK version listed in `package.json`. Updating a separately installed Pi CLI with `pi update` does not change the runtime bundled in this extension; install a newer extension build to update that SDK. Guided custom endpoint setup adds a provider to the selected Pi configuration's `models.json`; optional API keys are stored in VS Code SecretStorage and referenced through a runtime environment variable.
+The extension bundles the Pi SDK version listed in `package.json`. Running `pi update` updates a separately installed Pi CLI, but does not change the runtime bundled in this extension; install a newer extension build to update that SDK. Guided custom endpoint setup adds a provider to the selected Pi configuration's `models.json`; optional API keys are stored in VS Code SecretStorage and referenced through a runtime environment variable.
 
 ## Develop
 

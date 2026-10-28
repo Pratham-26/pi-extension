@@ -137,6 +137,8 @@ const RUNNING_SESSION_RECORD_TTL_MS = 12_000;
 const MAX_GIT_BRANCHES_FOR_PICKER = 500;
 const GIT_WORKTREE_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 const RUNTIME_ENV_SECRET_PREFIX = 'piChat.runtimeEnv:';
+const PINNED_EXTENSION_WIDGETS_KEY = 'piChat.pinnedExtensionWidgets';
+const MAX_PINNED_EXTENSION_WIDGETS = 32;
 const MAX_RUNTIME_ENV_VARIABLES = 32;
 const MAX_RUNTIME_ENV_VALUE_CHARS = 4096;
 const MAX_RUNTIME_ENV_TOTAL_CHARS = 8192;
@@ -1366,6 +1368,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.publishPinnedActiveFile();
   }
 
+  private getPinnedExtensionWidgetKeys(): string[] {
+    const value = this.context.globalState.get<unknown>(PINNED_EXTENSION_WIDGETS_KEY);
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.filter((key): key is string => typeof key === 'string'
+      && key.length > 0 && key.length <= 128 && !/[\u0000-\u001f\u007f]/.test(key)))].slice(0, MAX_PINNED_EXTENSION_WIDGETS);
+  }
+
   private async handleWebviewMessage(message: RuntimeMessage): Promise<void> {
     switch (message.type) {
       case 'togglePinActiveFile':
@@ -1376,6 +1385,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'ready':
         this.sessionSearchAllWorkspaces = message.allWorkspaces === true;
+        this.post({ type: 'extension-widget-pins', keys: this.getPinnedExtensionWidgetKeys() });
         await this.ensureRuntime();
         this.refreshSessions();
         this.worker?.postMessage({ type: 'listPackages' });
@@ -1732,6 +1742,26 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             clickCount: mouse.clickCount,
           },
         });
+        return;
+      }
+      case 'setExtensionWidgetPinned': {
+        const key = typeof message.key === 'string' && message.key.length > 0 && message.key.length <= 128
+          && !/[\u0000-\u001f\u007f]/.test(message.key) ? message.key : '';
+        if (!key || typeof message.pinned !== 'boolean') return;
+        const keys = this.getPinnedExtensionWidgetKeys();
+        const next = message.pinned
+          ? (keys.includes(key) ? keys : keys.length < MAX_PINNED_EXTENSION_WIDGETS ? [...keys, key] : keys)
+          : keys.filter((entry) => entry !== key);
+        if (next.length !== keys.length || next.some((entry, index) => entry !== keys[index])) {
+          try {
+            await this.context.globalState.update(PINNED_EXTENSION_WIDGETS_KEY, next);
+          } catch {
+            this.post({ type: 'notice', message: 'Could not save the extension widget pin.', isError: true });
+            this.post({ type: 'extension-widget-pins', keys });
+            return;
+          }
+        }
+        this.post({ type: 'extension-widget-pins', keys: next });
         return;
       }
       case 'navigateTree':
@@ -4943,6 +4973,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       </section>
       <main id="messages" class="messages" aria-live="polite" aria-relevant="additions text">
         <div id="extension-header" class="extension-chrome extension-chrome-header" aria-label="Pi extension header" hidden></div>
+        <div id="extension-widgets-pinned" class="extension-widgets extension-widgets-pinned" aria-label="Pinned Pi extension widgets"></div>
         <div id="empty-state" class="empty-state">
           <div class="empty-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16M9 6v12M15 6v12M15 6h5"/></svg></div>
           <h1>What can Pi help with?</h1>

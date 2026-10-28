@@ -79,6 +79,7 @@ const state = {
   toolMessagesBySession: new Map(),
   thinkingExpansion: new Map(),
   extensionWidgets: new Map(),
+  pinnedExtensionWidgetKeys: new Set(),
   extensionWidgetFocusRequestId: '',
   extensionWidgetPressedKeys: new Map(),
   extensionWidgetLastPointerAt: 0,
@@ -142,6 +143,7 @@ const ui = {
   extensionFooter: el('extension-footer'),
   extensionWidgetsAbove: el('extension-widgets-above'),
   extensionWidgetsBelow: el('extension-widgets-below'),
+  extensionWidgetsPinned: el('extension-widgets-pinned'),
   extensionStatus: el('extension-status'),
   dialogLayer: el('extension-dialog-layer'),
   dialogTitle: el('extension-dialog-title'),
@@ -3164,7 +3166,10 @@ function renderExtensionWidgets() {
   const preserveFocusId = focusedOutput?.dataset.requestId || state.extensionWidgetFocusRequestId;
   ui.extensionWidgetsAbove.replaceChildren();
   ui.extensionWidgetsBelow.replaceChildren();
+  ui.extensionWidgetsPinned.replaceChildren();
   for (const [key, widget] of state.extensionWidgets) {
+    const row = document.createElement('div');
+    row.className = 'extension-widget-row';
     const details = document.createElement('details');
     details.className = 'extension-widget';
     details.open = widget.options?.alwaysVisible !== false || (widget.interactive && widget.requestId === preserveFocusId);
@@ -3232,8 +3237,22 @@ function renderExtensionWidgets() {
     if (rendered) content.append(rendered);
     else content.textContent = widget.content.join('\n');
     details.append(summary, content);
-    const target = widget.options?.placement === 'belowEditor' ? ui.extensionWidgetsBelow : ui.extensionWidgetsAbove;
-    target.append(details);
+    const pinned = state.pinnedExtensionWidgetKeys.has(key);
+    const pinButton = document.createElement('button');
+    pinButton.className = 'text-button extension-widget-pin';
+    pinButton.type = 'button';
+    pinButton.textContent = pinned ? 'Unpin' : 'Pin';
+    pinButton.setAttribute('aria-pressed', String(pinned));
+    pinButton.setAttribute('aria-label', `${pinned ? 'Unpin' : 'Pin'} extension widget ${String(widget.options?.title || key).slice(0, 128)}`);
+    pinButton.title = pinned ? 'Unpin from the top of chat' : 'Pin to the top of chat';
+    pinButton.disabled = !pinned && state.pinnedExtensionWidgetKeys.size >= 32;
+    if (pinButton.disabled) pinButton.title = 'The chat pin limit has been reached';
+    pinButton.addEventListener('click', () => post('setExtensionWidgetPinned', { key, pinned: !pinned }));
+    row.append(details, pinButton);
+    const target = pinned
+      ? ui.extensionWidgetsPinned
+      : widget.options?.placement === 'belowEditor' ? ui.extensionWidgetsBelow : ui.extensionWidgetsAbove;
+    target.append(row);
   }
   if (preserveFocusId) {
     const output = [...document.querySelectorAll('.extension-widget-renderer-output')]
@@ -4034,6 +4053,12 @@ window.addEventListener('message', (event) => {
         requestId: data.interactive === true ? data.requestId : '',
         wantsKeyRelease: data.wantsKeyRelease === true,
       });
+      renderExtensionWidgets();
+      break;
+    case 'extension-widget-pins':
+      state.pinnedExtensionWidgetKeys = new Set(Array.isArray(data.keys)
+        ? data.keys.filter((key) => typeof key === 'string' && key.length > 0 && key.length <= 128 && !/[\u0000-\u001f\u007f]/.test(key)).slice(0, 32)
+        : []);
       renderExtensionWidgets();
       break;
     case 'extension-widgets-reset':
