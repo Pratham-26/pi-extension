@@ -348,6 +348,13 @@ button:focus-visible, textarea:focus-visible {
 .context-diff-line.added { background: color-mix(in srgb, var(--vscode-diffEditor-insertedTextBackground, #2da44e33) 70%, transparent); }
 .context-diff-line.removed { background: color-mix(in srgb, var(--vscode-diffEditor-removedTextBackground, #cf222e33) 70%, transparent); }
 .context-diff-line.truncated { color: var(--muted); font-style: italic; }
+.context-edit-history { width: 100%; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.context-edit-history > summary { padding: 4px 7px; color: var(--muted); cursor: pointer; font-size: 10px; }
+.context-edit-history[open] > summary { color: var(--text); border-bottom: 1px solid var(--line); }
+.context-edit-history-revisions { display: grid; gap: 6px; max-height: 360px; padding: 6px; overflow: auto; }
+.context-edit-history-revision { min-width: 0; }
+.context-edit-history-heading, .context-edit-history-note { color: var(--muted); font-size: 10px; }
+.context-edit-history-content { max-height: 160px; margin: 3px 0 0; padding: 5px; overflow: auto; color: var(--vscode-editor-foreground, var(--text)); background: var(--vscode-editor-background, transparent); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-row.search-match { outline: 1px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 4px; border-radius: 3px; }
 .message-row.search-current { outline: 2px solid var(--focus); outline-offset: 4px; border-radius: 3px; }
 .message-row.quote-reference-target { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 5px; transition: outline-color 180ms ease; }

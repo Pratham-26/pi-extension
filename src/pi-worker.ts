@@ -102,7 +102,7 @@ type SessionLike = {
     appendSessionInfo: (name: string) => string;
     appendUsage?: (kind: string, provider: string, model: string, usage: unknown, note?: string) => unknown;
     appendContextEdit?: (targetId: string, replacement: { content: unknown } | null) => string;
-    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    buildContextEntries: () => Array<{ type?: string; id: string; timestamp?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
@@ -166,6 +166,10 @@ let disabledContextFilePaths = new Set(parseContextFilePaths(workerOptions?.disa
 let contextFileCandidates: string[] = [];
 const MAX_TOOL_UI_CHARS = 100_000;
 const MAX_TOOL_DETAILS_CHARS = 24_000;
+const MAX_CONTEXT_EDIT_HISTORY_ENTRIES = 160;
+const MAX_CONTEXT_EDIT_HISTORY_PER_MESSAGE = 12;
+const MAX_CONTEXT_EDIT_HISTORY_CHARS = 120_000;
+const MAX_CONTEXT_EDIT_HISTORY_TEXT_CHARS = 8_000;
 const PI_RESOURCE_TYPES = ['extensions', 'skills', 'prompts', 'themes'] as const;
 type PiResourceType = typeof PI_RESOURCE_TYPES[number];
 type ConfiguredPiResource = {
@@ -251,6 +255,20 @@ function contentText(content: unknown): string {
     .filter((part: any) => part && part.type === 'text' && typeof part.text === 'string')
     .map((part: any) => part.text as string)
     .join('');
+}
+
+function boundedTextContent(content: unknown, maxChars: number): { text: string; truncated: boolean } {
+  if (typeof content === 'string') return { text: content.slice(0, maxChars), truncated: content.length > maxChars };
+  if (!Array.isArray(content)) return { text: '', truncated: false };
+  let text = '';
+  for (const part of content) {
+    if (!part || part.type !== 'text' || typeof part.text !== 'string') continue;
+    const remaining = maxChars - text.length;
+    if (remaining <= 0) return { text, truncated: true };
+    text += part.text.slice(0, remaining);
+    if (part.text.length > remaining) return { text, truncated: true };
+  }
+  return { text, truncated: false };
 }
 
 const RESTORABLE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
@@ -1066,6 +1084,45 @@ function snapshot(): void {
   for (const entry of branchEntries) {
     if (entry.type === 'context_edit' && typeof entry.targetId === 'string') contextEdits.set(entry.targetId, entry.replacement ?? null);
   }
+  const contextEditHistory = new Map<string, Array<{ status: 'omitted' | 'edited'; text: string; timestamp?: string }>>();
+  const contextEditHistoryTruncated = new Set<string>();
+  let contextHistoryCount = 0;
+  let contextHistoryChars = 0;
+  for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
+    const entry = branchEntries[index];
+    if (entry.type !== 'context_edit' || typeof entry.targetId !== 'string' || entry.targetId.length > 256
+      || /[\u0000-\u001f\u007f]/.test(entry.targetId)) continue;
+    const history = contextEditHistory.get(entry.targetId) ?? [];
+    contextEditHistory.set(entry.targetId, history);
+    if (history.length >= MAX_CONTEXT_EDIT_HISTORY_PER_MESSAGE
+      || contextHistoryCount >= MAX_CONTEXT_EDIT_HISTORY_ENTRIES
+      || contextHistoryChars >= MAX_CONTEXT_EDIT_HISTORY_CHARS) {
+      contextEditHistoryTruncated.add(entry.targetId);
+      continue;
+    }
+    const replacement = entry.replacement ?? null;
+    const remainingChars = Math.min(MAX_CONTEXT_EDIT_HISTORY_TEXT_CHARS, MAX_CONTEXT_EDIT_HISTORY_CHARS - contextHistoryChars);
+    const bounded = replacement === null ? { text: '', truncated: false }
+      : replacement && typeof replacement === 'object' && 'content' in replacement
+        ? boundedTextContent(replacement.content, remainingChars)
+        : undefined;
+    if (!bounded) continue;
+    history.push({
+      status: replacement === null ? 'omitted' : 'edited',
+      text: bounded.text,
+      ...(typeof entry.timestamp === 'string' ? { timestamp: entry.timestamp.slice(0, 64) } : {}),
+    });
+    contextHistoryCount += 1;
+    contextHistoryChars += bounded.text.length;
+    if (bounded.truncated) contextEditHistoryTruncated.add(entry.targetId);
+  }
+  const contextEditHistoryPayload = (entryId: string): Record<string, unknown> => {
+    const history = contextEditHistory.get(entryId) ?? [];
+    const truncated = contextEditHistoryTruncated.has(entryId) || (contextEdits.has(entryId) && history.length === 0);
+    return history.length || truncated
+      ? { contextHistory: [...history].reverse(), contextHistoryTruncated: truncated }
+      : {};
+  };
   const toolCalls = new Map<string, { name: string; args: unknown; argsPreview: string }>();
   for (const entry of branchEntries) {
     if (entry.type !== 'message' || entry.message?.role !== 'assistant' || !Array.isArray(entry.message.content)) continue;
@@ -1123,9 +1180,13 @@ function snapshot(): void {
     if (entry.message.role !== 'user' && entry.message.role !== 'assistant') return [];
     const display = toUiMessage(entry.message);
     if (!display) return [];
-    if (!contextEdits.has(entry.id)) return [userAssistantSnapshot(display, entry.id, entry.message.content)];
+    if (!contextEdits.has(entry.id)) {
+      return [{ ...userAssistantSnapshot(display, entry.id, entry.message.content), ...contextEditHistoryPayload(entry.id) }];
+    }
     const replacement = contextEdits.get(entry.id);
-    if (replacement === null) return [{ ...userAssistantSnapshot(display, entry.id, entry.message.content), contextStatus: 'omitted' }];
+    if (replacement === null) {
+      return [{ ...userAssistantSnapshot(display, entry.id, entry.message.content), contextStatus: 'omitted', ...contextEditHistoryPayload(entry.id) }];
+    }
     const edited = replacement && 'content' in replacement
       ? toUiMessage({ role: entry.message.role, content: replacement.content })
       : undefined;
@@ -1133,6 +1194,7 @@ function snapshot(): void {
       ...userAssistantSnapshot(display, entry.id, entry.message.content),
       contextStatus: 'edited',
       contextEditText: edited?.text ?? contentText(replacement?.content),
+      ...contextEditHistoryPayload(entry.id),
     }];
   });
   addBoundedTranscriptImages(messages);

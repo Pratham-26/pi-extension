@@ -1281,6 +1281,7 @@ function renderMessages(shouldFollow = true) {
     const hasImages = appendTranscriptImages(body, message);
     if (message.text || hasImages) row.append(body);
     if (message.contextStatus === 'edited') row.append(createContextDiff(message.text, message.contextEditText));
+    appendContextEditHistory(row, message);
     const quoteIds = quoteSourceIds(message.context);
     if (quoteIds.length) {
       const references = document.createElement('div');
@@ -1927,6 +1928,46 @@ function createContextDiff(originalText, editedText) {
   output.append(lines);
   diff.append(summary, output);
   return diff;
+}
+
+function appendContextEditHistory(row, message) {
+  const history = Array.isArray(message.contextHistory) ? message.contextHistory.slice(-12) : [];
+  const truncated = message.contextHistoryTruncated === true;
+  if (!history.length && !truncated) return;
+
+  const details = document.createElement('details');
+  details.className = 'context-edit-history';
+  const summary = document.createElement('summary');
+  summary.textContent = `Context edit history (${history.length}${truncated ? '+' : ''})`;
+  details.append(summary);
+
+  const revisions = document.createElement('div');
+  revisions.className = 'context-edit-history-revisions';
+  history.forEach((revision, index) => {
+    if (!revision || (revision.status !== 'omitted' && revision.status !== 'edited')) return;
+    const item = document.createElement('section');
+    item.className = 'context-edit-history-revision';
+    const heading = document.createElement('div');
+    heading.className = 'context-edit-history-heading';
+    const date = typeof revision.timestamp === 'string' ? Date.parse(revision.timestamp) : Number.NaN;
+    heading.textContent = `${revision.status === 'omitted' ? 'Omitted from Pi context' : `Revision ${index + 1}`}${Number.isFinite(date) ? ` · ${new Date(date).toLocaleString()}` : ''}`;
+    item.append(heading);
+    if (revision.status === 'edited' && typeof revision.text === 'string' && revision.text) {
+      const content = document.createElement('pre');
+      content.className = 'context-edit-history-content';
+      content.textContent = revision.text.slice(0, 8000);
+      item.append(content);
+    }
+    revisions.append(item);
+  });
+  if (truncated) {
+    const note = document.createElement('div');
+    note.className = 'context-edit-history-note';
+    note.textContent = 'Some earlier revisions were omitted from this preview.';
+    revisions.append(note);
+  }
+  details.append(revisions);
+  row.append(details);
 }
 
 function stepChatSearch(direction) {
