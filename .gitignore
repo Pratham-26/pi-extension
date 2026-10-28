@@ -10,8 +10,5 @@ dist/
 .pi/
 .vscode-test/
 .vscode-test-web/
-pendant-rea-evidence*.json
-pendant-static-evidence*.json
-docs/pendant-findings.md
 .rea/
 .rea/**

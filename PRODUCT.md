@@ -24,20 +24,20 @@ The extension is a local interface to Pi through its official SDK. Pi remains th
 
 ## Operating Context
 
-The extension runs inside VS Code against the currently open workspace. Pendant is a behavioral and UI reference; this project is independently implemented.
+The extension runs inside VS Code against the currently open workspace.
 
 ## Capabilities and Constraints
 
 - The current build includes model search and refresh, session/model controls, workspace references, transcript search, prompt history/drafts, editable queues, notifications, and session exports.
-- Feature coverage is tracked in `docs/feature-parity.md`; full Pendant parity is still in progress.
-- Voice dictation and internal-only Pendant remote access are out of scope.
+- Feature coverage is tracked in `docs/feature-coverage.md`.
+- Voice dictation is out of scope.
 - Use the official Pi SDK and the user's existing Pi configuration and credentials.
 - Do not add a hosted account, proxy, telemetry, or a direct-shell composer command.
 - Session context and Pi resources resolve from the active workspace and the user's existing Pi setup.
 
 ## Evidence on Hand
 
-The user has Pendant 0.90.0 installed in VS Code. This extension is a clean-room implementation based on published behavior and runtime observations; no Pendant code or assets are included.
+The extension is independently implemented and contains no third-party product code or branding beyond its declared dependencies.
 
 ## Product Principles
 

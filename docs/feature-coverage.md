@@ -1,6 +1,6 @@
-# Pendant feature parity
+# Pi Chat feature coverage
 
-This checklist follows Pendant's published [guide](https://pendant.sh/guide/) as checked on 28 October 2026. It tracks behavior, not copied implementation. `[~]` means a partial implementation; `[ ]` means not implemented.
+This checklist tracks implemented and pending product capabilities as of 28 October 2026. `[~]` means a partial implementation; `[ ]` means not implemented.
 
 ## Pi runtime, models, and settings
 
@@ -76,6 +76,6 @@ This checklist follows Pendant's published [guide](https://pendant.sh/guide/) as
 ## Explicit scope and review notes
 
 - Voice dictation is excluded at the user's request.
-- Pendant's guide describes phone access as internal development, not a published feature; it is excluded.
+- Remote phone access is out of scope.
 - Direct shell execution from the composer is unimplemented because automatic security review rejected adding that command-execution path.
-- Pendant does not ask before agent tools run; this extension offers narrower tool sets instead.
+- Pi tool calls use the user's current Pi permissions; narrower tool sets are available in the extension.

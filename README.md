@@ -13,7 +13,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Copy controls for assistant code blocks
 - Basic Pi extension dialogs/widgets and hidden-view VS Code notifications
 
-See [the feature-parity checklist](docs/feature-parity.md) for partial and missing Pendant features. Voice dictation is excluded. Direct shell execution from the composer is unavailable because the automatic security review rejected that execution path.
+See [the feature coverage checklist](docs/feature-coverage.md) for implemented and planned capabilities. Voice dictation is out of scope. Direct shell execution from the composer is unavailable because the automatic security review rejected that execution path.
 
 The extension runs Pi in a worker thread. The webview uses a restrictive Content Security Policy and renders Pi output as text or a limited Markdown subset. It does not add telemetry or route requests through a hosted service.
 
@@ -29,10 +29,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.4.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.5.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.4.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.5.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.
@@ -44,5 +44,3 @@ To package a VSIX after installing dependencies:
 ```powershell
 npm run package
 ```
-
-Pendant was used only as a behavioral and interface reference; its bundled code and branding are not included.

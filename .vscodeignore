@@ -4,7 +4,7 @@
 .rea
 src/**
 docs/**
-!docs/feature-parity.md
+!docs/feature-coverage.md
 PRODUCT.md
 tsconfig.json
 package-lock.json
