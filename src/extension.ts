@@ -509,6 +509,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.switchSession', () => provider.switchSessionFromCommandPalette()),
     vscode.commands.registerCommand('piChat.chooseModel', () => provider.chooseModelFromCommandPalette()),
     vscode.commands.registerCommand('piChat.chooseThinkingLevel', () => provider.chooseThinkingLevelFromCommandPalette()),
+    vscode.commands.registerCommand('piChat.draftCommitMessage', () => {
+      const targetProvider = [...editorProviders].find((activeProvider) => activeProvider.isActiveEditorChat()) ?? provider;
+      return targetProvider.draftCommitMessageFromSourceControl();
+    }),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piChat.createWorktree', () => provider.createGitWorktreeSession()),
     vscode.commands.registerCommand('piChat.removeWorktree', () => provider.removeGitWorktreeSession()),
@@ -583,6 +587,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private runningSessionLeaseSignature = '';
   private runningSessionLeaseWrittenAt = 0;
   private webviewMessageSubscription?: vscode.Disposable;
+  private webviewReady = false;
+  private pendingScmDraft?: 'commit';
+  private scmDraftInFlight = false;
   private sessionQuery = '';
   private sessionSearchAllWorkspaces = false;
   private sessionWorkspaceByPath = new Map<string, string>();
@@ -710,6 +717,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   private attachWebview(view: vscode.WebviewView | vscode.WebviewPanel): void {
     this.view = view;
+    this.webviewReady = false;
     const dismissComposerPopovers = () => this.post({ type: 'dismiss-composer-popovers' });
     if ('onDidChangeVisibility' in view) {
       view.onDidChangeVisibility(() => {
@@ -740,6 +748,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       this.webviewMessageSubscription = undefined;
       if (this.view === view) {
         this.view = undefined;
+        this.webviewReady = false;
+        this.pendingScmDraft = undefined;
         this.cancelPendingExtensionUiRequests(this.worker);
         this.cancelPackageSearch(false);
       }
@@ -2010,6 +2020,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.setPinnedActiveFile(false);
         return;
       case 'ready':
+        this.webviewReady = true;
         this.sessionSearchAllWorkspaces = message.allWorkspaces === true;
         this.postPromptHistorySetting();
         await this.savedDraftsWrite;
@@ -2023,6 +2034,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.worker?.postMessage({ type: 'listPackages' });
         await this.refreshGitChanges();
         this.publishPinnedActiveFile();
+        await this.flushPendingScmDraft();
         return;
       case 'saveSavedDrafts': {
         const requestId = typeof message.requestId === 'string' && /^[a-f0-9]{24}$/.test(message.requestId)
@@ -3182,11 +3194,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  private async getGitRepository(workspace: vscode.WorkspaceFolder): Promise<{ api: GitApiLike; repository: GitRepositoryLike } | undefined> {
+  private async getGitApi(): Promise<GitApiLike> {
     const extension = vscode.extensions.getExtension('vscode.git');
     if (!extension) throw new Error('The built-in Git extension is unavailable.');
     const git = extension.isActive ? extension.exports : await extension.activate();
-    const api = git.getAPI(1) as GitApiLike;
+    return git.getAPI(1) as GitApiLike;
+  }
+
+  private async getGitRepository(workspace: vscode.WorkspaceFolder): Promise<{ api: GitApiLike; repository: GitRepositoryLike } | undefined> {
+    const api = await this.getGitApi();
     const containing = api.repositories
       .filter((item) => this.relativePathFrom(item.rootUri, workspace.uri) !== undefined)
       .sort((a, b) => b.rootUri.fsPath.length - a.rootUri.fsPath.length);
@@ -4167,21 +4183,23 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async draftGitChanges(value: unknown): Promise<void> {
+  private async draftGitChanges(
+    value: unknown,
+    target?: { workspace: vscode.WorkspaceFolder; repository: GitRepositoryLike },
+  ): Promise<void> {
     const kind = value === 'commit' || value === 'pullRequest' ? value : undefined;
     if (!kind) return;
-    const workspace = vscode.workspace.workspaceFolders?.[0];
+    const workspace = target?.workspace ?? vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
       this.post({ type: 'notice', message: 'Open a workspace before preparing a Git draft.', isError: true });
       return;
     }
     try {
-      const handle = await this.getGitRepository(workspace);
-      if (!handle) {
+      const repository = target?.repository ?? (await this.getGitRepository(workspace))?.repository;
+      if (!repository) {
         this.post({ type: 'notice', message: 'This workspace is not inside a Git repository.', isError: true });
         return;
       }
-      const { repository } = handle;
       await repository.status?.();
       const gitState = repository.state;
       const changes = new Map<string, { uri: vscode.Uri; statuses: Set<string>; untracked: boolean }>();
@@ -4279,6 +4297,99 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'attachment', attachment, draftPrompt });
     } catch {
       this.post({ type: 'notice', message: 'Could not prepare Git changes for a draft. Refresh the Git review and try again.', isError: true });
+    }
+  }
+
+  isActiveEditorChat(): boolean {
+    const view = this.view;
+    return Boolean(view && 'onDidChangeViewState' in view && view.active);
+  }
+
+  async draftCommitMessageFromSourceControl(): Promise<void> {
+    if (this.pendingScmDraft || this.scmDraftInFlight) {
+      await vscode.window.showInformationMessage('A commit-message draft is already being prepared.');
+      return;
+    }
+    this.pendingScmDraft = 'commit';
+    if (this.view) this.revealChatView();
+    else {
+      try {
+        await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+      } catch {
+        this.pendingScmDraft = undefined;
+        await vscode.window.showErrorMessage('Could not open the Pi Chat view.');
+        return;
+      }
+    }
+    if (!this.view) {
+      this.pendingScmDraft = undefined;
+      await vscode.window.showErrorMessage('Could not open the Pi Chat view.');
+      return;
+    }
+    await this.flushPendingScmDraft();
+  }
+
+  private revealChatView(): void {
+    const view = this.view;
+    if (!view) return;
+    if ('onDidChangeViewState' in view) view.reveal(undefined, false);
+    else view.show(false);
+  }
+
+  private async flushPendingScmDraft(): Promise<void> {
+    const kind = this.pendingScmDraft;
+    if (!kind || !this.webviewReady || this.scmDraftInFlight) return;
+    this.scmDraftInFlight = true;
+    this.pendingScmDraft = undefined;
+    try {
+      const folders = vscode.workspace.workspaceFolders ?? [];
+      if (!folders.length) {
+        await vscode.window.showErrorMessage('Open a workspace containing a Git repository first.');
+        return;
+      }
+      let api: GitApiLike;
+      try {
+        api = await this.getGitApi();
+      } catch {
+        await vscode.window.showErrorMessage('The built-in Git extension is unavailable.');
+        return;
+      }
+      const choices = api.repositories.flatMap((repository) => {
+        const containingFolders = folders
+          .filter((folder) => this.relativePathFrom(folder.uri, repository.rootUri) !== undefined)
+          .sort((a, b) => b.uri.fsPath.length - a.uri.fsPath.length);
+        const nestedFolders = folders
+          .filter((folder) => this.relativePathFrom(repository.rootUri, folder.uri) !== undefined)
+          .sort((a, b) => b.uri.fsPath.length - a.uri.fsPath.length);
+        const workspace = containingFolders[0] ?? nestedFolders[0];
+        return workspace ? [{ workspace, repository }] : [];
+      });
+      if (!choices.length) {
+        await vscode.window.showErrorMessage('No Git repository was found in the open workspace folders.');
+        return;
+      }
+
+      let target = choices.length === 1 ? choices[0] : undefined;
+      if (!target) {
+        const pickerItems = choices.map((choice) => ({
+          label: path.basename(choice.repository.rootUri.fsPath) || choice.workspace.name,
+          description: `${choice.workspace.name} · ${choice.repository.rootUri.fsPath}`,
+          target: choice,
+        }));
+        const selected = await vscode.window.showQuickPick(pickerItems, {
+          placeHolder: 'Choose a Git repository for the commit-message draft',
+          matchOnDescription: true,
+        });
+        if (!selected) return;
+        target = selected.target;
+      }
+      if (!this.view || !this.webviewReady) {
+        await vscode.window.showInformationMessage('Pi Chat closed before the draft was ready. Reopen it and try again.');
+        return;
+      }
+      await this.draftGitChanges(kind, target);
+    } finally {
+      this.scmDraftInFlight = false;
     }
   }
 

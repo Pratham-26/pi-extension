@@ -6,6 +6,8 @@ src/**
 scripts/**
 docs/**
 !docs/feature-coverage.md
+dist/extension-probe.js
+dist/*.cjs
 PRODUCT.md
 tsconfig.json
 package-lock.json

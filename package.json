@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.124",
+  "version": "0.1.125",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -68,6 +68,13 @@
         "command": "piChat.chooseThinkingLevel",
         "title": "Choose Thinking Level",
         "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.draftCommitMessage",
+        "title": "Pi Chat: Draft Commit Message",
+        "shortTitle": "Draft commit message",
+        "category": "Pi Chat",
+        "icon": "$(git-commit)"
       },
       {
         "command": "piChat.newEditorChat",
@@ -497,6 +504,13 @@
       }
     },
     "menus": {
+      "scm/title": [
+        {
+          "command": "piChat.draftCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ],
       "view/title": [
         {
           "command": "piChat.newSession",
