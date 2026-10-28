@@ -41,6 +41,7 @@ type WorkerInput = {
   disabledSkills?: string[];
   source?: string;
   scope?: string;
+  autoNameSessions?: boolean;
   steering?: string[];
   followUp?: string[];
   deliverAs?: 'steer' | 'followUp';
@@ -129,9 +130,10 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
 let mcpEnabled = workerOptions?.mcpEnabled === true;
+let autoNameSessions = workerOptions?.autoNameSessions !== false;
 const MAX_TOOL_UI_CHARS = 100_000;
 let session: SessionLike | undefined;
 let packageManager: DefaultPackageManager | undefined;
@@ -737,6 +739,13 @@ async function manageConfiguredPackage(input: WorkerInput): Promise<void> {
   }
 }
 
+function titleFromFirstPrompt(prompt: string): string {
+  const normalized = prompt.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= 64) return normalized;
+  const shortened = normalized.slice(0, 64).replace(/\s+\S*$/, '').trim();
+  return shortened || normalized.slice(0, 64).trim();
+}
+
 async function createSession(path?: string): Promise<boolean> {
   let createdSession: SessionLike | undefined;
   let createdExtensionsBound = false;
@@ -916,6 +925,7 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'newSession':
+        autoNameSessions = input.autoNameSessions !== false;
         if (authenticatingProvider) {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
           return;
@@ -1273,6 +1283,13 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'prompt':
         if (!session) await createSession();
         if (!session || !input.text) return;
+        const hasPriorNonCommandPrompt = (session.getUserMessagesForForking?.() ?? [])
+          .some((message) => typeof message.text === 'string' && !message.text.trimStart().startsWith('/'));
+        if (autoNameSessions && !session.sessionName?.trim() && !input.text.trimStart().startsWith('/')
+          && !hasPriorNonCommandPrompt) {
+          const title = titleFromFirstPrompt(input.text);
+          if (title) session.setSessionName?.(title);
+        }
         const images = (input.images ?? [])
           .filter((image) => typeof image.data === 'string' && typeof image.mimeType === 'string')
           .map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }));

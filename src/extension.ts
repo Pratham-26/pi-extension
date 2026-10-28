@@ -167,7 +167,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   async newSession(): Promise<void> {
     if (!this.worker) await this.ensureRuntime();
-    this.worker?.postMessage({ type: 'newSession' });
+    this.worker?.postMessage({
+      type: 'newSession',
+      autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
+    });
   }
 
   async cloneSession(): Promise<void> {
@@ -265,6 +268,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const worker = new Worker(workerUri.fsPath, {
       workerData: {
         cwd,
+        autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
         mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
       },
     });

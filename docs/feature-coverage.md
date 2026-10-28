@@ -37,7 +37,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [~] Fork from a user message, edit earlier text/context prompts into a new branch, and navigate the current branch history; original image attachments cannot be restored into the editor.
 - [~] Session search is limited to the current workspace and session name/message text; it does not index all workspaces, thinking, or tool calls.
 - [ ] Multiple independent chat editor tabs, persisted tab restore, new chat beside a file, and open-latest-session preference.
-- [ ] Auto-name a session.
+- [x] Save a local title from the first non-command prompt without an extra provider request; configurable through `piChat.sessions.autoName`.
 - [ ] Git worktree sessions, setup commands, ignored-file copying, and safe worktree removal.
 - [ ] Group running sessions and expose live progress in the session list.
 
