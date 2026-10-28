@@ -3288,8 +3288,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const apiChoice = await vscode.window.showQuickPick([
       { label: 'OpenAI Chat Completions', description: 'openai-completions', api: 'openai-completions' },
       { label: 'OpenAI Responses', description: 'openai-responses', api: 'openai-responses' },
+      { label: 'Azure OpenAI Responses', description: 'azure-openai-responses · Model ID is the Azure deployment name', api: 'azure-openai-responses' },
       { label: 'Anthropic Messages', description: 'anthropic-messages', api: 'anthropic-messages' },
       { label: 'Google Generative AI', description: 'google-generative-ai', api: 'google-generative-ai' },
+      { label: 'Mistral Conversations', description: 'mistral-conversations', api: 'mistral-conversations' },
     ], { title: 'Add custom Pi endpoint · 4/9', placeHolder: 'Choose the API format supported by the endpoint' });
     if (!apiChoice) return;
 
