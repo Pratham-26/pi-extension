@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.112",
+  "version": "0.1.113",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -294,6 +294,17 @@
           "scope": "window",
           "description": "Load additional local Pi prompt-template files or directories. Paths are relative to the workspace or absolute. Workspace settings are ignored until the workspace is trusted. Restart the Pi runtime after changing this setting."
         },
+        "piChat.resources.additionalThemePaths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 64,
+          "default": [],
+          "scope": "window",
+          "description": "Load additional local Pi theme files or directories for Pi extension renderers. Paths are relative to the workspace or absolute. Workspace settings are ignored until the workspace is trusted. Restart the Pi runtime after changing this setting."
+        },
         "piChat.resources.disableExtensionDiscovery": {
           "type": "boolean",
           "default": false,
@@ -311,6 +322,12 @@
           "default": false,
           "scope": "window",
           "description": "Stop Pi from discovering configured prompt templates automatically; explicitly listed additional prompt-template paths remain enabled. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.resources.disableThemeDiscovery": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Stop Pi from discovering configured themes automatically; explicitly listed additional theme paths remain enabled. This does not change the VS Code chat appearance. Restart the Pi runtime after changing this setting."
         },
         "piChat.sessions.autoName": {
           "type": "boolean",
@@ -414,6 +431,23 @@
           "default": true,
           "scope": "window",
           "description": "Use smooth scrolling when navigating the Pi Chat transcript."
+        },
+        "piChat.appearance.spacing": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "normal",
+            "relaxed"
+          ],
+          "default": "normal",
+          "scope": "window",
+          "description": "Set vertical spacing between Pi Chat transcript messages."
+        },
+        "piChat.appearance.showSeparators": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Show a divider between a finished assistant turn and the next user message."
         },
         "piChat.models.autoRefresh": {
           "type": "boolean",

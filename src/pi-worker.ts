@@ -177,9 +177,11 @@ type PiPromptResourceSettings = {
   additionalExtensionPaths: string[];
   additionalSkillPaths: string[];
   additionalPromptTemplatePaths: string[];
+  additionalThemePaths: string[];
   disableExtensionDiscovery: boolean;
   disableSkillDiscovery: boolean;
   disablePromptTemplateDiscovery: boolean;
+  disableThemeDiscovery: boolean;
 };
 const MAX_PROMPT_SETTING_CHARS = 100_000;
 const MAX_PROMPT_FILE_BYTES = 1024 * 1024;
@@ -214,9 +216,11 @@ function parsePiPromptResourceSettings(value: unknown): PiPromptResourceSettings
     additionalExtensionPaths: readPaths('additionalExtensionPaths', 64),
     additionalSkillPaths: readPaths('additionalSkillPaths', 64),
     additionalPromptTemplatePaths: readPaths('additionalPromptTemplatePaths', 64),
+    additionalThemePaths: readPaths('additionalThemePaths', 64),
     disableExtensionDiscovery: input.disableExtensionDiscovery === true,
     disableSkillDiscovery: input.disableSkillDiscovery === true,
     disablePromptTemplateDiscovery: input.disablePromptTemplateDiscovery === true,
+    disableThemeDiscovery: input.disableThemeDiscovery === true,
   };
 }
 const piPromptResourceSettings = parsePiPromptResourceSettings(workerOptions?.piPromptResources);
@@ -3808,10 +3812,12 @@ async function createSessionInternal(path?: string): Promise<boolean> {
       additionalExtensionPaths: piPromptResourceSettings.additionalExtensionPaths,
       additionalSkillPaths: piPromptResourceSettings.additionalSkillPaths,
       additionalPromptTemplatePaths: piPromptResourceSettings.additionalPromptTemplatePaths,
+      additionalThemePaths: piPromptResourceSettings.additionalThemePaths,
       noExtensions: piPromptResourceSettings.disableExtensionDiscovery,
       disabledBuiltinExtensions: ['mcp'],
       noSkills: piPromptResourceSettings.disableSkillDiscovery,
       noPromptTemplates: piPromptResourceSettings.disablePromptTemplateDiscovery,
+      noThemes: piPromptResourceSettings.disableThemeDiscovery,
       noContextFiles: workerOptions?.disableContextFiles === true,
       ...(customSystemPrompt !== undefined ? { systemPromptOverride: () => customSystemPrompt } : {}),
       ...(appendedPromptText.length > 0

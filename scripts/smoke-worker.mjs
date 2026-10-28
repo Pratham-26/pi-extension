@@ -16,7 +16,9 @@ const extraExtensionPath = join(temporaryRoot, 'extra-smoke-extension.mjs');
 const agentSkillPath = join(agentDir, 'skills', 'base-smoke-skill', 'SKILL.md');
 const extraSkillPath = join(temporaryRoot, 'extra-smoke-skill.md');
 const agentPromptPath = join(agentDir, 'prompts', 'base-smoke-prompt.md');
+const agentThemePath = join(agentDir, 'themes', 'base-smoke-theme.json');
 const extraPromptPath = join(temporaryRoot, 'extra-smoke-prompt.md');
+const extraThemePath = join(temporaryRoot, 'extra-smoke-theme.json');
 const appendedPromptPath = join(temporaryRoot, 'appended-system-prompt.md');
 const providerCallsPath = join(temporaryRoot, 'provider-calls.jsonl');
 await Promise.all([
@@ -24,6 +26,7 @@ await Promise.all([
   mkdir(extensionDir, { recursive: true }),
   mkdir(dirname(agentSkillPath), { recursive: true }),
   mkdir(dirname(agentPromptPath), { recursive: true }),
+  mkdir(dirname(agentThemePath), { recursive: true }),
 ]);
 await Promise.all([
   writeFile(providerCallsPath, ''),
@@ -39,8 +42,10 @@ await Promise.all([
   writeFile(agentSkillPath, '---\nname: base-smoke-skill\ndescription: Baseline skill for the isolated smoke check.\n---\nBASE_SMOKE_SKILL_MARKER\n'),
   writeFile(extraSkillPath, '---\nname: extra-smoke-skill\ndescription: Explicitly added skill for the isolated smoke check.\n---\nEXTRA_SMOKE_SKILL_MARKER\n'),
   writeFile(agentPromptPath, '---\nname: base-smoke-prompt\ndescription: Baseline prompt template for the isolated smoke check.\n---\nBASE_SMOKE_PROMPT_MARKER\n'),
+  writeFile(agentThemePath, JSON.stringify({ name: 'base-smoke-theme', colors: {} })),
   writeFile(extraPromptPath, '---\nname: extra-smoke-prompt\ndescription: Explicitly added prompt template for the isolated smoke check.\n---\nEXTRA_SMOKE_PROMPT_MARKER\n'),
   writeFile(appendedPromptPath, 'APPENDED_SYSTEM_PROMPT_FILE_MARKER\n'),
+  writeFile(extraThemePath, JSON.stringify({ name: 'smoke-theme', colors: {} })),
 ]);
 
 let worker;
@@ -189,6 +194,8 @@ export default function (pi) {
         appendSystemPromptFiles: [appendedPromptPath],
         additionalSkillPaths: [extraSkillPath],
         additionalPromptTemplatePaths: [extraPromptPath],
+        additionalThemePaths: [extraThemePath],
+        disableThemeDiscovery: true,
       },
       autoNameSessions: false,
       autoRefreshModels: false,
@@ -236,6 +243,10 @@ export default function (pi) {
     'an explicitly listed additional prompt-template path should load');
   assert.ok(discoveredOptions.extensionCommands.some((command) => command.name === 'extra-smoke-command'),
     'an explicitly listed additional extension path should load');
+  assert.ok(discoveredOptions.resourceDiagnostics.some((item) => item.resource === 'Theme' && item.path === extraThemePath),
+    'an explicitly listed theme path should be checked even when automatic theme discovery is disabled');
+  assert.ok(!discoveredOptions.resourceDiagnostics.some((item) => item.resource === 'Theme' && item.path === agentThemePath),
+    'disabling theme discovery should skip themes from Pi’s default themes directory');
 
   const sessionListRequestId = 'b'.repeat(32);
   const sessionListPromise = waitForWorkerMessage((message) => message?.type === 'sessions'
@@ -336,7 +347,7 @@ export default function (pi) {
   const freshSessionToolOptions = await freshSessionToolOptionsPromise;
   assert.deepEqual(freshSessionToolOptions.activeTools, ['read'], 'new chats should use the configured default tool set');
 
-  console.log('Worker smoke check passed: prompt overrides and explicit resources loaded; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
+  console.log('Worker smoke check passed: prompt overrides, explicit resources, and theme discovery controls worked; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   const resolvedTemporaryRoot = resolve(temporaryRoot);

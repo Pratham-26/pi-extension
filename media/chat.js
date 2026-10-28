@@ -682,6 +682,9 @@ function applyAppearanceSettings(data) {
   root.classList.toggle('user-messages-left', data.userMessagesOnRight === false);
   root.classList.toggle('untinted-user-messages', data.tintUserMessages === false);
   root.classList.toggle('stronger-contrast', data.strongerContrast === true);
+  root.classList.toggle('transcript-compact', data.spacing === 'compact');
+  root.classList.toggle('transcript-relaxed', data.spacing === 'relaxed');
+  root.classList.toggle('transcript-show-separators', data.showSeparators === true);
   const fontSize = Number(data.fontSize);
   if (Number.isInteger(fontSize) && fontSize >= 10 && fontSize <= 24) {
     root.style.setProperty('--pi-chat-font-size', `${fontSize}px`);

@@ -191,9 +191,11 @@ type PiPromptResourceSettings = {
   additionalExtensionPaths: string[];
   additionalSkillPaths: string[];
   additionalPromptTemplatePaths: string[];
+  additionalThemePaths: string[];
   disableExtensionDiscovery: boolean;
   disableSkillDiscovery: boolean;
   disablePromptTemplateDiscovery: boolean;
+  disableThemeDiscovery: boolean;
 };
 
 type RunningSessionRecord = {
@@ -295,9 +297,11 @@ function readPiPromptResourceSettings(): PiPromptResourceSettings {
     additionalExtensionPaths: readPaths('additionalExtensionPaths', 64),
     additionalSkillPaths: readPaths('additionalSkillPaths', 64),
     additionalPromptTemplatePaths: readPaths('additionalPromptTemplatePaths', 64),
+    additionalThemePaths: readPaths('additionalThemePaths', 64),
     disableExtensionDiscovery: read<unknown>(resources, 'disableExtensionDiscovery', false) === true,
     disableSkillDiscovery: read<unknown>(resources, 'disableSkillDiscovery', false) === true,
     disablePromptTemplateDiscovery: read<unknown>(resources, 'disablePromptTemplateDiscovery', false) === true,
+    disableThemeDiscovery: read<unknown>(resources, 'disableThemeDiscovery', false) === true,
   };
 }
 
@@ -696,6 +700,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   onAppearanceConfigurationChanged(): void {
     const appearance = vscode.workspace.getConfiguration('piChat.appearance');
     const fontSize = appearance.get<number>('fontSize', 0);
+    const spacing = appearance.get<string>('spacing', 'normal');
     this.post({
       type: 'appearance-settings',
       userMessagesOnRight: appearance.get<boolean>('userMessagesOnRight', true),
@@ -703,6 +708,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       strongerContrast: appearance.get<boolean>('strongerContrast', false),
       fontSize: Number.isInteger(fontSize) && fontSize >= 10 && fontSize <= 24 ? fontSize : 0,
       smoothScrolling: appearance.get<boolean>('smoothScrolling', true),
+      spacing: spacing === 'compact' || spacing === 'relaxed' ? spacing : 'normal',
+      showSeparators: appearance.get<boolean>('showSeparators', false),
     });
   }
 

@@ -374,6 +374,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .message-list { width: 100%; max-width: 92ch; margin: 0 auto; }
 .message-row { display: flex; flex-direction: column; gap: 5px; margin: 17px 0 20px; min-width: 0; }
+:root.transcript-compact .message-row { gap: 4px; margin-block: 11px 13px; }
+:root.transcript-relaxed .message-row { gap: 7px; margin-block: 23px 26px; }
+:root.transcript-show-separators .message-row.assistant + .message-row.user { margin-top: 22px; padding-top: 10px; border-top: 1px solid var(--line); }
 .message-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; width: 100%; }
 .message-row.user .message-actions { justify-content: flex-end; }
 .message-row.assistant .message-actions { justify-content: flex-start; }
