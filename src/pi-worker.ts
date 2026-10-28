@@ -168,6 +168,50 @@ function contentText(content: unknown): string {
     .join('');
 }
 
+const RESTORABLE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_RESTORED_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_RESTORED_IMAGE_COUNT = 5;
+
+function isValidBase64ImageData(data: string): boolean {
+  if (!data || data.length % 4 !== 0) return false;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  const contentLength = data.length - padding;
+  if (data.indexOf('=') !== (padding ? contentLength : -1)) return false;
+  for (let offset = 0; offset < contentLength; offset += 4096) {
+    if (!/^[A-Za-z0-9+/]+$/.test(data.slice(offset, Math.min(offset + 4096, contentLength)))) return false;
+  }
+  return true;
+}
+
+function restoreImageContent(content: unknown): { images: Array<{ data: string; mimeType: string }>; skipped: number } {
+  if (!Array.isArray(content)) return { images: [], skipped: 0 };
+  const images: Array<{ data: string; mimeType: string }> = [];
+  let skipped = 0;
+  let totalBytes = 0;
+  for (const part of content) {
+    if (!part || typeof part !== 'object' || (part as Record<string, unknown>).type !== 'image') continue;
+    const image = part as Record<string, unknown>;
+    const data = image.data;
+    const mimeType = image.mimeType;
+    if (typeof data !== 'string' || data.length > 7_000_000 || !isValidBase64ImageData(data)
+      || typeof mimeType !== 'string' || !RESTORABLE_IMAGE_TYPES.has(mimeType)) {
+      skipped += 1;
+      continue;
+    }
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    const decodedBytes = Math.floor(data.length * 3 / 4) - padding;
+    if (decodedBytes <= 0 || decodedBytes > MAX_RESTORED_IMAGE_BYTES
+      || totalBytes + decodedBytes > MAX_RESTORED_IMAGE_BYTES * MAX_RESTORED_IMAGE_COUNT
+      || images.length >= MAX_RESTORED_IMAGE_COUNT) {
+      skipped += 1;
+      continue;
+    }
+    images.push({ data, mimeType });
+    totalBytes += decodedBytes;
+  }
+  return { images, skipped };
+}
+
 function boundedToolValue(value: unknown, depth = 0): unknown {
   if (typeof value === 'string') return value.length <= 8000 ? value : `${value.slice(0, 8000)}\n[value truncated]`;
   if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
@@ -352,11 +396,14 @@ function installExtensionUi(current: SessionLike): void {
   current.extensionRunner?.setUIContext(ui, 'rpc');
 }
 
-function toUiMessage(message: { role?: string; content?: unknown }): { role: string; text: string; context?: string; hasImages?: boolean } | undefined {
+function toUiMessage(message: { role?: string; content?: unknown }): { role: string; text: string; context?: string; hasImages?: boolean; imageCount?: number } | undefined {
   if (message.role !== 'user' && message.role !== 'assistant') return undefined;
   const raw = contentText(message.content).trim();
-  if (!raw) return undefined;
-  const hasImages = Array.isArray(message.content) && message.content.some((part: any) => part?.type === 'image');
+  const imageCount = Array.isArray(message.content)
+    ? message.content.filter((part: any) => part?.type === 'image').length
+    : 0;
+  const hasImages = imageCount > 0;
+  if (!raw && !hasImages) return undefined;
 
   const start = '--- pi-extension-context:start ---';
   const end = '--- pi-extension-context:end ---';
@@ -365,9 +412,9 @@ function toUiMessage(message: { role?: string; content?: unknown }): { role: str
   if (message.role === 'user' && startIndex >= 0 && endIndex > startIndex) {
     const context = raw.slice(startIndex + start.length, endIndex).trim();
     const text = `${raw.slice(0, startIndex)}\n${raw.slice(endIndex + end.length)}`.trim();
-    return { role: message.role, text, context, hasImages };
+    return { role: message.role, text, context, hasImages, imageCount };
   }
-  return { role: message.role, text: raw, hasImages };
+  return { role: message.role, text: raw, hasImages, imageCount };
 }
 
 function withContext(text: string, context?: string): string {
@@ -1187,7 +1234,13 @@ async function handle(input: WorkerInput): Promise<void> {
         if (result.cancelled) return;
         const restored = toUiMessage(entry.message);
         const text = restored?.text ?? contentText(entry.message.content);
-        send('extension-editor-text', { text, context: restored?.context });
+        const imageRestore = restoreImageContent(entry.message.content);
+        send('extension-editor-text', {
+          text,
+          context: restored?.context,
+          images: imageRestore.images,
+          imageRestoreSkipped: imageRestore.skipped,
+        });
         snapshot();
         return;
       }

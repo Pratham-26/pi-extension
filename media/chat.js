@@ -838,6 +838,13 @@ function renderMessages(shouldFollow = true) {
     body.className = 'message-content';
     if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text);
     else body.textContent = message.text;
+    if (message.role === 'user' && message.hasImages) {
+      const imageSummary = document.createElement('div');
+      imageSummary.className = 'message-image-summary';
+      const imageCount = Math.max(1, Number(message.imageCount) || 1);
+      imageSummary.textContent = `${imageCount} image ${imageCount === 1 ? 'attachment' : 'attachments'}`;
+      body.append(imageSummary);
+    }
     row.append(body);
     if (message.contextStatus === 'edited') row.append(createContextDiff(message.text, message.contextEditText));
     const quoteIds = quoteSourceIds(message.context);
@@ -865,12 +872,12 @@ function renderMessages(shouldFollow = true) {
       branch.addEventListener('click', () => post('forkSession', { entryId: message.entryId }));
       actions.append(branch);
 
-      if (!message.hasImages && (String(message.text || '').trim() || message.context)) {
+      if (String(message.text || '').trim() || message.context || message.hasImages) {
         const edit = document.createElement('button');
         edit.type = 'button';
         edit.className = 'branch-button';
         edit.textContent = 'Edit & branch';
-        edit.title = 'Put this prompt and its text context back in the composer and continue from a new branch';
+        edit.title = 'Put this prompt, its text context, and image attachments back in the composer and continue from a new branch';
         edit.addEventListener('click', () => post('editUserMessage', { entryId: message.entryId }));
         actions.append(edit);
       }
@@ -1234,6 +1241,52 @@ function attachImageFile(file) {
   });
   reader.readAsDataURL(file);
   return true;
+}
+
+function isValidBase64ImageData(data) {
+  if (!data || data.length % 4 !== 0) return false;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  const contentLength = data.length - padding;
+  if (data.indexOf('=') !== (padding ? contentLength : -1)) return false;
+  for (let offset = 0; offset < contentLength; offset += 4096) {
+    if (!/^[A-Za-z0-9+/]+$/.test(data.slice(offset, Math.min(offset + 4096, contentLength)))) return false;
+  }
+  return true;
+}
+
+function restoreImageAttachments(value) {
+  if (!Array.isArray(value)) return { attachments: [], skipped: 0 };
+  const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+  const candidates = value.slice(0, 5);
+  const attachments = [];
+  let skipped = Math.max(0, value.length - candidates.length);
+  let totalBytes = 0;
+  for (const candidate of candidates) {
+    const image = candidate && typeof candidate === 'object' ? candidate : {};
+    const data = image.data;
+    const mimeType = image.mimeType;
+    if (typeof data !== 'string' || data.length > 7_000_000 || !isValidBase64ImageData(data)
+      || typeof mimeType !== 'string' || !allowedTypes.has(mimeType)) {
+      skipped += 1;
+      continue;
+    }
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    const decodedBytes = Math.floor(data.length * 3 / 4) - padding;
+    if (decodedBytes <= 0 || decodedBytes > 5 * 1024 * 1024 || totalBytes + decodedBytes > 25 * 1024 * 1024) {
+      skipped += 1;
+      continue;
+    }
+    const index = attachments.length + 1;
+    attachments.push({
+      id: `restored-image-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
+      label: `Restored image ${index}`,
+      path: 'transcript image',
+      context: '',
+      image: { data, mimeType },
+    });
+    totalBytes += decodedBytes;
+  }
+  return { attachments, skipped };
 }
 
 function setBusy(busy, activityText, stopAllowed = true) {
@@ -2336,8 +2389,14 @@ window.addEventListener('message', (event) => {
           path: 'transcript context',
           context: data.context.slice(0, 100_000),
         });
-        renderAttachments();
       }
+      if (!data.append && Array.isArray(data.images)) {
+        const restored = restoreImageAttachments(data.images);
+        state.attachments.push(...restored.attachments);
+        const skipped = restored.skipped + Math.max(0, Number(data.imageRestoreSkipped) || 0);
+        if (skipped) showNotice(`Could not restore ${skipped} image ${skipped === 1 ? 'attachment' : 'attachments'}; supported images must be PNG, JPEG, WebP, or GIF up to 5 MB each.`);
+      }
+      if (!data.append && (typeof data.context === 'string' && data.context.trim() || Array.isArray(data.images))) renderAttachments();
       ui.prompt.focus();
       updateControls();
       break;

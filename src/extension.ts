@@ -79,6 +79,17 @@ const MAX_GIT_DRAFT_CHARS = 30_000;
 const MAX_GIT_DRAFT_FILES = 24;
 const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
 
+function isValidBase64ImageData(data: string): boolean {
+  if (!data || data.length % 4 !== 0) return false;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  const contentLength = data.length - padding;
+  if (data.indexOf('=') !== (padding ? contentLength : -1)) return false;
+  for (let offset = 0; offset < contentLength; offset += 4096) {
+    if (!/^[A-Za-z0-9+/]+$/.test(data.slice(offset, Math.min(offset + 4096, contentLength)))) return false;
+  }
+  return true;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new PiChatViewProvider(context);
 
@@ -2112,7 +2123,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (rawImage && typeof rawImage === 'object') {
         const image = rawImage as Record<string, unknown>;
         if (typeof image.data === 'string' && image.data.length <= 7_000_000
-          && /^[A-Za-z0-9+/]*={0,2}$/.test(image.data)
+          && isValidBase64ImageData(image.data)
           && typeof image.mimeType === 'string' && allowedImageTypes.has(image.mimeType)
           && imageCount < 5 && imageChars + image.data.length <= 35_000_000) {
           attachment.image = { data: image.data, mimeType: image.mimeType };

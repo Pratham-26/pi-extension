@@ -348,6 +348,7 @@ button:focus-visible, textarea:focus-visible {
   background: var(--surface-raised);
   white-space: pre-wrap;
 }
+.message-image-summary { margin-top: 5px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; }
 .branch-button { align-self: flex-end; padding: 3px 6px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
 .branch-button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
 .quote-references { display: flex; flex-wrap: wrap; gap: 4px; }

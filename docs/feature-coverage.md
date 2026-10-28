@@ -34,7 +34,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 ## Sessions
 
 - [x] Create, list, search, rename, pin, color, reorder, reopen, clone, export, and delete workspace sessions.
-- [~] Fork from a user message, edit earlier text/context prompts into a new branch, and navigate the current branch history; original image attachments cannot be restored into the editor.
+- [~] Fork from a user message, edit earlier text/context/image prompts into a new branch, and navigate the current branch history. Multi-tab session restore and cross-workspace search remain unavailable.
 - [~] Session search is limited to the current workspace and session name/message text; it does not index all workspaces, thinking, or tool calls.
 - [~] Open the latest session when the chat view starts is optional; multiple independent chat editor tabs, persisted tab restore, and new chat beside a file are unavailable.
 - [x] Save a local title from the first non-command prompt without an extra provider request; configurable through `piChat.sessions.autoName`.
