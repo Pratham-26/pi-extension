@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.110",
+  "version": "0.1.111",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -208,6 +208,12 @@
           "type": "boolean",
           "default": false,
           "description": "Include the active workspace Git branch and changed file names with each message."
+        },
+        "piChat.context.disableFiles": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Prevent Pi from loading configured or workspace instruction files such as AGENTS.md and CLAUDE.md. Restart the Pi runtime after changing this setting."
         },
         "piChat.sessions.autoName": {
           "type": "boolean",

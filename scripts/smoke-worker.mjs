@@ -9,10 +9,16 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workerPath = join(repositoryRoot, 'dist', 'pi-worker.mjs');
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'pi-chat-worker-smoke-'));
 const workspacePath = join(temporaryRoot, 'workspace');
+const projectPath = join(workspacePath, 'nested');
 const agentDir = join(temporaryRoot, 'agent');
 const extensionDir = join(agentDir, 'extensions');
 const providerCallsPath = join(temporaryRoot, 'provider-calls.jsonl');
-await Promise.all([mkdir(workspacePath), mkdir(extensionDir, { recursive: true }), writeFile(providerCallsPath, '')]);
+await Promise.all([mkdir(projectPath, { recursive: true }), mkdir(extensionDir, { recursive: true })]);
+await Promise.all([
+  writeFile(providerCallsPath, ''),
+  writeFile(join(workspacePath, 'AGENTS.md'), 'Temporary parent workspace instructions for the isolated smoke check.\n'),
+  writeFile(join(projectPath, 'CLAUDE.md'), 'Temporary nested workspace instructions for the isolated smoke check.\n'),
+]);
 
 let worker;
 const messages = [];
@@ -141,13 +147,14 @@ export default function (pi) {
   worker = new Worker(workerPath, {
     env: environment,
     workerData: {
-      cwd: workspacePath,
+      cwd: projectPath,
       extensionRoot: repositoryRoot,
       autoNameSessions: false,
       autoRefreshModels: false,
       mcpEnabled: false,
       newSessionToolNames: ['read'],
       disabledContextFiles: [],
+      disableContextFiles: false,
       extensionUiMode: 'rpc',
     },
   });
@@ -176,6 +183,8 @@ export default function (pi) {
     'the temporary Pi configuration should provide a local test credential');
   assert.deepEqual(newSessionToolOptions.activeTools, ['read'], 'the configured tool set should apply to new smoke sessions');
   assert.deepEqual(newSessionToolOptions.newSessionToolNames, ['read'], 'the worker should report its configured new-chat default');
+  assert.deepEqual(discoveredOptions.contextFiles.map((item) => item.path).sort(), [join(projectPath, 'CLAUDE.md'), join(workspacePath, 'AGENTS.md')].sort(),
+    'the default Pi runtime should load nested and parent instruction files');
 
   const sessionListRequestId = 'b'.repeat(32);
   const sessionListPromise = waitForWorkerMessage((message) => message?.type === 'sessions'
@@ -232,13 +241,14 @@ export default function (pi) {
   worker = new Worker(workerPath, {
     env: environment,
     workerData: {
-      cwd: workspacePath,
+      cwd: projectPath,
       extensionRoot: repositoryRoot,
       autoNameSessions: false,
       autoRefreshModels: false,
       mcpEnabled: false,
       newSessionToolNames: ['read'],
       disabledContextFiles: [],
+      disableContextFiles: true,
       extensionUiMode: 'rpc',
     },
   });
@@ -246,11 +256,13 @@ export default function (pi) {
   const reopenedSnapshotPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
     && message.sessionFile === sessionFile, 'reopened smoke session');
   const restoredToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
-    && Array.isArray(message.activeTools) && message.activeTools.length === 0, 'restored per-session tool selection');
+    && Array.isArray(message.activeTools) && message.activeTools.length === 0
+    && Array.isArray(message.contextFiles), 'restored per-session tool selection and context-file settings');
   worker.postMessage({ type: 'openSession', path: sessionFile });
   const [, restoredToolOptions] = await Promise.all([reopenedSnapshotPromise, restoredToolOptionsPromise]);
   assert.deepEqual(restoredToolOptions.defaultTools, [], 'the session choice should not replace Pi defaults');
   assert.deepEqual(restoredToolOptions.activeTools, [], 'the saved session choice should override the new-chat default');
+  assert.deepEqual(restoredToolOptions.contextFiles, [], 'disabling Pi context files should suppress AGENTS.md and CLAUDE.md discovery');
 
   const freshSessionToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
     && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'new chat tool defaults');

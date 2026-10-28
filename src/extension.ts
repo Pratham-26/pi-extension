@@ -416,6 +416,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.notifications.sound')) activeProvider.onNotificationSoundConfigurationChanged();
         if (event.affectsConfiguration('piChat.models.autoRefresh')) activeProvider.onModelRefreshConfigurationChanged();
         if (event.affectsConfiguration('piChat.queue.defaultAction')) activeProvider.onQueueDefaultActionConfigurationChanged();
+        if (event.affectsConfiguration('piChat.context.disableFiles')) activeProvider.onContextFilesConfigurationChanged();
         if (event.affectsConfiguration('piChat.composer.promptHistory')) activeProvider.onPromptHistoryConfigurationChanged();
         if (event.affectsConfiguration('piChat.appearance')) activeProvider.onAppearanceConfigurationChanged();
       }
@@ -441,6 +442,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerAgentDirSetting = '';
   private workerOfflineModeSetting: PiOfflineMode = 'inherit';
   private workerExtensionUiModeSetting: PiExtensionUiMode = 'rpc';
+  private workerDisableContextFiles = false;
   private runtimeBusy = false;
   private turnFileCapture?: TurnFileCapture;
   private queuedWorkCount = 0;
@@ -573,6 +575,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   private attachWebview(view: vscode.WebviewView | vscode.WebviewPanel): void {
     this.view = view;
+    const dismissComposerPopovers = () => this.post({ type: 'dismiss-composer-popovers' });
+    if ('onDidChangeVisibility' in view) {
+      view.onDidChangeVisibility(() => {
+        if (!view.visible) dismissComposerPopovers();
+      });
+    } else {
+      view.onDidChangeViewState((event) => {
+        if (!event.webviewPanel.visible) dismissComposerPopovers();
+      });
+    }
     view.webview.options = {
       enableScripts: true,
       localResourceRoots: [
@@ -1252,6 +1264,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.workerAgentDirSetting = '';
     this.workerOfflineModeSetting = 'inherit';
     this.workerExtensionUiModeSetting = 'rpc';
+    this.workerDisableContextFiles = false;
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
@@ -1413,6 +1426,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const configuredAgentDir = vscode.workspace.getConfiguration('piChat').get<string>('agentDir', '').trim();
     const offlineMode = readPiOfflineMode();
     const extensionUiMode = readPiExtensionUiMode();
+    const disableContextFiles = vscode.workspace.getConfiguration('piChat.context').get<boolean>('disableFiles', false);
     const workerEnv: NodeJS.Dict<string> = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (typeof value === 'string') workerEnv[key] = value;
@@ -1447,6 +1461,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
           newSessionToolNames: this.readNewSessionToolNames(),
           disabledContextFiles: this.readDisabledContextFiles(),
+          disableContextFiles,
           extensionUiMode,
         },
       });
@@ -1459,6 +1474,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.workerAgentDirSetting = configuredAgentDir;
     this.workerOfflineModeSetting = offlineMode;
     this.workerExtensionUiModeSetting = extensionUiMode;
+    this.workerDisableContextFiles = disableContextFiles;
     this.runtimeBusy = false;
     this.queuedWorkCount = 0;
     worker.on('message', (message: RuntimeMessage) => {
@@ -4954,6 +4970,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
       ? 'Pi extension UI mode changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
       : 'Pi extension UI mode changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
+  }
+
+  onContextFilesConfigurationChanged(): void {
+    const current = vscode.workspace.getConfiguration('piChat.context').get<boolean>('disableFiles', false);
+    if (!this.worker || current === this.workerDisableContextFiles) return;
+    this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
+      ? 'Pi context-file loading changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
+      : 'Pi context-file loading changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
   }
 
   onExtensionStatusConfigurationChanged(): void {

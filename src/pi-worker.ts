@@ -167,7 +167,7 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui' } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; disableContextFiles?: boolean; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui' } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
 const modelScopeOverrides = new WeakMap<object, string[] | null>();
 const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbsolute(workerOptions.extensionRoot)
@@ -3718,6 +3718,7 @@ async function createSessionInternal(path?: string): Promise<boolean> {
       settingsManager,
       extensionFactories,
       disabledBuiltinExtensions: ['mcp'],
+      noContextFiles: workerOptions?.disableContextFiles === true,
       agentsFilesOverride: (current) => {
         contextFileCandidates = current.agentsFiles
           .map((file) => file.path)
