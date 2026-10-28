@@ -196,10 +196,29 @@ function isValidBase64ImageData(data: string): boolean {
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new PiChatViewProvider(context);
+  const editorProviders = new Set<PiChatViewProvider>();
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VIEW_ID, provider, {
       webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.commands.registerCommand('piChat.newEditorChat', () => {
+      const panel = vscode.window.createWebviewPanel('piChat.editorChat', 'Pi Chat', vscode.ViewColumn.Beside, {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [
+          vscode.Uri.joinPath(context.extensionUri, 'media'),
+          vscode.Uri.joinPath(context.extensionUri, 'dist'),
+        ],
+      });
+      const panelProvider = new PiChatViewProvider(context);
+      editorProviders.add(panelProvider);
+      panelProvider.resolveWebviewPanel(panel);
+      panel.onDidDispose(() => {
+        editorProviders.delete(panelProvider);
+        panelProvider.dispose();
+      });
+      return panel;
     }),
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
@@ -212,10 +231,18 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.exportDiagnostics', () => provider.exportDiagnostics()),
     vscode.commands.registerCommand('piChat.openLogs', () => provider.openLogs()),
     vscode.commands.registerCommand('piChat.manageMcpServers', () => provider.manageMcpServers()),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => provider.restartRuntime()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      for (const activeProvider of [provider, ...editorProviders]) void activeProvider.restartRuntime();
+    }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('piChat.agentDir')) provider.onAgentDirConfigurationChanged();
-      if (event.affectsConfiguration('piChat.offlineMode')) provider.onOfflineModeConfigurationChanged();
+      for (const activeProvider of [provider, ...editorProviders]) {
+        if (event.affectsConfiguration('piChat.agentDir')) activeProvider.onAgentDirConfigurationChanged();
+        if (event.affectsConfiguration('piChat.offlineMode')) activeProvider.onOfflineModeConfigurationChanged();
+      }
+    }),
+    new vscode.Disposable(() => {
+      for (const panelProvider of editorProviders) panelProvider.dispose();
+      editorProviders.clear();
     }),
     provider,
   );
@@ -226,7 +253,7 @@ export function deactivate(): void {
 }
 
 class PiChatViewProvider implements vscode.WebviewViewProvider {
-  private view?: vscode.WebviewView;
+  private view?: vscode.WebviewView | vscode.WebviewPanel;
   private worker?: Worker;
   private runtimeStartInFlight?: Promise<void>;
   private runtimeStartGeneration = 0;
@@ -325,6 +352,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
+    this.attachWebview(view);
+  }
+
+  resolveWebviewPanel(view: vscode.WebviewPanel): void {
+    this.attachWebview(view);
+  }
+
+  private attachWebview(view: vscode.WebviewView | vscode.WebviewPanel): void {
     this.view = view;
     view.webview.options = {
       enableScripts: true,

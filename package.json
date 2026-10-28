@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.56",
+  "version": "0.1.57",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -51,6 +51,11 @@
         "title": "New Pi Chat",
         "category": "Pi Chat",
         "icon": "$(add)"
+      },
+      {
+        "command": "piChat.newEditorChat",
+        "title": "Pi Chat: Open New Chat Beside Active Editor",
+        "category": "Pi Chat"
       },
       {
         "command": "piChat.cloneSession",
@@ -181,6 +186,11 @@
       "view/title": [
         {
           "command": "piChat.newSession",
+          "when": "view == piChat.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "piChat.newEditorChat",
           "when": "view == piChat.chatView",
           "group": "navigation"
         },
