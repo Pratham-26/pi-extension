@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.91",
+  "version": "0.1.92",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -203,6 +203,12 @@
           "type": "boolean",
           "default": false,
           "description": "Open the most recently updated Pi session for this workspace when the chat view starts. Pi project resources remain subject to the existing trust prompt."
+        },
+        "piChat.sessions.groupRunning": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Show running Pi sessions in a separate group at the top of session history."
         },
         "piChat.mcp.enabled": {
           "type": "boolean",

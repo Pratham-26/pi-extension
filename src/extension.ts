@@ -1329,7 +1329,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.sessionListForRunningStatus = sessions;
         void this.refreshRunningSessionStatuses();
         this.consumePendingSessionHandoff(worker);
-        this.post({ ...message, sessions });
+        this.post({
+          ...message,
+          sessions,
+          groupRunningSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('groupRunning', false),
+        });
         let openingInitialSession = this.sessionInteractionStarted || Boolean(this.activeSessionPath);
         if (!openingInitialSession && this.restoredEditorSessionPath) {
           const sessionPath = this.restoredEditorSessionPath;
@@ -1604,6 +1608,18 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const order = [...proposed, ...prior.filter((item) => this.isKnownSessionPath(item) && !visible.has(item))];
         await this.context.globalState.update('piChat.sessionOrder', order);
         this.refreshSessions();
+        return;
+      }
+      case 'setGroupRunningSessions': {
+        if (typeof message.enabled !== 'boolean') return;
+        try {
+          await vscode.workspace.getConfiguration('piChat.sessions').update(
+            'groupRunning', message.enabled, vscode.ConfigurationTarget.Global,
+          );
+          this.post({ type: 'session-grouping-setting', enabled: message.enabled });
+        } catch (error) {
+          this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not save the session grouping preference.', isError: true });
+        }
         return;
       }
       case 'renameSession': {
@@ -5308,6 +5324,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           <input id="session-search" class="session-search" type="search" aria-label="Search sessions" placeholder="Search chats, thinking, and tool activity">
           <label class="session-search-scope" title="Search Pi session history from every workspace on this machine"><input id="session-search-all" type="checkbox"><span>All workspaces</span></label>
         </div>
+        <label class="session-running-group"><input id="session-group-running" type="checkbox"><span>Group running sessions</span></label>
         <div id="session-results-note" class="session-results-note" aria-live="polite" hidden></div>
         <div id="session-list" class="session-list"></div>
         <div id="session-empty" class="session-empty" hidden>No matching sessions.</div>
