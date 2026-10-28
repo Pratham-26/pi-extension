@@ -483,9 +483,161 @@ function contextLabels(context) {
   return String(context || '').split('\n').map((line) => line.trim()).filter((line) => line.startsWith('@'));
 }
 
-function appendInlineText(parent, text, enableSymbolLinks = false) {
+const MATHML_NAMESPACE = 'http://www.w3.org/1998/Math/MathML';
+const MATHML_ELEMENTS = new Set([
+  'math', 'semantics', 'mrow', 'mi', 'mn', 'mo', 'mtext', 'ms', 'mspace', 'menclose', 'mfrac', 'msqrt', 'mroot',
+  'mstyle', 'msub', 'msup', 'msubsup', 'munder', 'mover', 'munderover', 'mmultiscripts', 'mprescripts', 'none',
+  'mtable', 'mtr', 'mtd', 'malignmark', 'maligngroup', 'annotation',
+]);
+const MATHML_ATTRIBUTES = new Set([
+  'xmlns', 'display', 'mathvariant', 'stretchy', 'fence', 'separator', 'form', 'accent', 'accentunder', 'largeop',
+  'movablelimits', 'linethickness', 'notation', 'encoding', 'scriptlevel', 'width', 'height', 'depth', 'lspace',
+  'rspace', 'voffset', 'columnalign', 'rowalign', 'columnspacing', 'rowspacing', 'rowlines', 'columnlines',
+  'columnwidth', 'groupalign', 'align', 'bevelled', 'dir',
+]);
+
+function cloneSafeMathNode(source, budget, depth = 0) {
+  budget.nodes += 1;
+  if (budget.nodes > 5000 || depth > 64) throw new Error('Math output exceeds the rendering limit.');
+  if (source.nodeType === 3) {
+    const text = source.textContent || '';
+    budget.text += text.length;
+    if (budget.text > 80_000) throw new Error('Math output exceeds the rendering limit.');
+    return document.createTextNode(text);
+  }
+  if (source.nodeType !== 1) return undefined;
+  if (source.namespaceURI !== MATHML_NAMESPACE || !MATHML_ELEMENTS.has(source.localName)) {
+    const text = source.textContent || '';
+    budget.text += text.length;
+    if (budget.text > 80_000) throw new Error('Math output exceeds the rendering limit.');
+    return document.createTextNode(text);
+  }
+  const target = document.createElementNS(MATHML_NAMESPACE, source.localName);
+  for (const attribute of Array.from(source.attributes)) {
+    const name = attribute.name.toLowerCase();
+    const value = attribute.value;
+    if (!MATHML_ATTRIBUTES.has(name) || value.length > 64 || /[<>"';]/.test(value)) continue;
+    if (name === 'xmlns' && value !== MATHML_NAMESPACE) continue;
+    if (name === 'encoding' && value !== 'application/x-tex') continue;
+    if (name === 'display' && !/^(?:inline|block)$/.test(value)) continue;
+    target.setAttribute(name, value);
+  }
+  for (const child of Array.from(source.childNodes)) {
+    const safeChild = cloneSafeMathNode(child, budget, depth + 1);
+    if (safeChild) target.append(safeChild);
+  }
+  return target;
+}
+
+function createMathNode(source, displayMode) {
+  const wrapper = document.createElement(displayMode ? 'div' : 'span');
+  wrapper.className = displayMode ? 'math-block' : 'math-inline';
+  try {
+    if (typeof window.piChatRenderers?.renderMath !== 'function') throw new Error('Math renderer is unavailable.');
+    const markup = window.piChatRenderers.renderMath(source, displayMode);
+    if (typeof markup !== 'string' || markup.length > 100_000) throw new Error('Math output exceeds the rendering limit.');
+    const parsed = new DOMParser().parseFromString(markup, 'text/html');
+    const math = parsed.querySelector('math');
+    if (!math || math.namespaceURI !== MATHML_NAMESPACE) throw new Error('Math output is invalid.');
+    wrapper.append(cloneSafeMathNode(math, { nodes: 0, text: 0 }));
+  } catch {
+    wrapper.classList.add('math-render-error');
+    const fallback = document.createElement('code');
+    fallback.textContent = String(source).slice(0, 8_000);
+    wrapper.title = 'Could not render this mathematical notation.';
+    wrapper.append(fallback);
+  }
+  return wrapper;
+}
+
+function isSafeRenderedSvg(svg) {
+  return typeof svg === 'string' && svg.length > 0 && svg.length <= 300_000
+    && /^<svg(?:\s|>)/i.test(svg.trim())
+    && !/<\s*(?:script|foreignObject)\b|\son[a-z0-9_-]+\s*=|javascript\s*:|(?:href|xlink:href)\s*=\s*["'](?:https?:|\/\/)/i.test(svg);
+}
+
+function createDiagramBlock(source) {
+  const block = document.createElement('section');
+  block.className = 'diagram-card';
+  const toolbar = document.createElement('div');
+  toolbar.className = 'diagram-toolbar';
+  const label = document.createElement('span');
+  label.className = 'diagram-label';
+  label.textContent = 'Mermaid diagram';
+  const controls = document.createElement('div');
+  controls.className = 'diagram-controls';
+  const sourceToggle = document.createElement('button');
+  sourceToggle.type = 'button';
+  sourceToggle.className = 'text-button';
+  sourceToggle.textContent = 'Show source';
+  sourceToggle.setAttribute('aria-expanded', 'false');
+  const openDiagram = document.createElement('button');
+  openDiagram.type = 'button';
+  openDiagram.className = 'text-button';
+  openDiagram.textContent = 'Open diagram';
+  openDiagram.disabled = true;
+  controls.append(sourceToggle, openDiagram);
+  toolbar.append(label, controls);
+
+  const view = document.createElement('div');
+  view.className = 'diagram-view';
+  view.setAttribute('aria-live', 'polite');
+  const image = document.createElement('img');
+  image.alt = 'Rendered Mermaid diagram';
+  const error = document.createElement('p');
+  error.className = 'diagram-error';
+  error.hidden = true;
+  error.textContent = 'The diagram could not be rendered. Check its syntax or view the source.';
+  view.append(image, error);
+
+  const sourceView = document.createElement('pre');
+  sourceView.className = 'diagram-source';
+  sourceView.hidden = true;
+  const code = document.createElement('code');
+  code.textContent = String(source).slice(0, 20_000);
+  sourceView.append(code);
+  block.append(toolbar, view, sourceView);
+
+  let renderedSvg = '';
+  let showingSource = false;
+  sourceToggle.addEventListener('click', () => {
+    showingSource = !showingSource;
+    sourceView.hidden = !showingSource;
+    view.hidden = showingSource;
+    sourceToggle.textContent = showingSource ? 'Show diagram' : 'Show source';
+    sourceToggle.setAttribute('aria-expanded', String(showingSource));
+  });
+  openDiagram.addEventListener('click', () => {
+    if (renderedSvg) post('openDiagram', { svg: renderedSvg });
+  });
+
+  const render = window.piChatRenderers?.renderDiagram;
+  if (typeof render !== 'function' || typeof source !== 'string' || source.length > 20_000) {
+    error.hidden = false;
+    return block;
+  }
+  Promise.resolve()
+    .then(() => render(source))
+    .then((svg) => {
+      if (!isSafeRenderedSvg(svg)) throw new Error('Diagram output failed validation.');
+      renderedSvg = svg;
+      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+      openDiagram.disabled = false;
+    })
+    .catch(() => {
+      error.hidden = false;
+      openDiagram.disabled = true;
+    });
+  image.addEventListener('error', () => {
+    error.hidden = false;
+    openDiagram.disabled = true;
+  });
+  return block;
+}
+
+function appendInlineText(parent, text, enableAssistantEnhancements = false) {
   const source = String(text);
-  const tokens = /(`[^`\n]+`|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|\[([^\]\n]{1,500})\]\(([^)\s]{1,2048})\))/g;
+  const tokens = /(`[^`\n]+`|\$\$[^$\n]{1,2000}\$\$|\$(?!\$)[^$\n]{1,2000}\$|\\\([^\\\n]{1,2000}\\\)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|\[([^\]\n]{1,500})\]\(([^)\s]{1,2048})\))/g;
   let cursor = 0;
   for (const match of source.matchAll(tokens)) {
     const token = match[0];
@@ -493,7 +645,7 @@ function appendInlineText(parent, text, enableSymbolLinks = false) {
     if (start > cursor) parent.append(document.createTextNode(source.slice(cursor, start)));
     if (token.startsWith('`') && token.endsWith('`')) {
       const source = token.slice(1, -1);
-      const symbol = enableSymbolLinks ? source.replace(/\(\)$/, '') : '';
+      const symbol = enableAssistantEnhancements ? source.replace(/\(\)$/, '') : '';
       if (symbol && source.length <= 132 && /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*){0,3}(?:\(\))?$/.test(source)) {
         const link = document.createElement('button');
         link.type = 'button';
@@ -506,6 +658,14 @@ function appendInlineText(parent, text, enableSymbolLinks = false) {
         const code = document.createElement('code');
         code.textContent = source;
         parent.append(code);
+      }
+    } else if ((token.startsWith('$') && token.endsWith('$')) || (token.startsWith('\\(') && token.endsWith('\\)'))) {
+      if (!enableAssistantEnhancements) {
+        parent.append(document.createTextNode(token));
+      } else {
+        const displayMode = token.startsWith('$$');
+        const delimiterSize = displayMode ? 2 : token.startsWith('$') ? 1 : 2;
+        parent.append(createMathNode(token.slice(delimiterSize, -delimiterSize), displayMode));
       }
     } else if (token.startsWith('**') && token.endsWith('**')) {
       const strong = document.createElement('strong');
@@ -585,14 +745,14 @@ function isMarkdownTableDelimiter(line, columnCount) {
   return cells.length === columnCount && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
-function createMarkdownTable(headers, rows, enableSymbolLinks = false) {
+function createMarkdownTable(headers, rows, enableAssistantEnhancements = false) {
   const table = document.createElement('table');
   table.className = 'markdown-table';
   const head = document.createElement('thead');
   const headerRow = document.createElement('tr');
   for (const value of headers) {
     const cell = document.createElement('th');
-    appendInlineText(cell, value, enableSymbolLinks);
+    appendInlineText(cell, value, enableAssistantEnhancements);
     headerRow.append(cell);
   }
   head.append(headerRow);
@@ -601,7 +761,7 @@ function createMarkdownTable(headers, rows, enableSymbolLinks = false) {
     const row = document.createElement('tr');
     headers.forEach((_, index) => {
       const cell = document.createElement('td');
-      appendInlineText(cell, values[index] || '', enableSymbolLinks);
+      appendInlineText(cell, values[index] || '', enableAssistantEnhancements);
       row.append(cell);
     });
     body.append(row);
@@ -634,7 +794,7 @@ function createCodeBlock(source, language = '') {
   return block;
 }
 
-function renderMarkdown(container, text, enableSymbolLinks = false) {
+function renderMarkdown(container, text, enableAssistantEnhancements = false) {
   container.replaceChildren();
   const lines = String(text || '').split('\n');
   let paragraph = [];
@@ -646,7 +806,7 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
   const flushParagraph = () => {
     if (!paragraph.length) return;
     const p = document.createElement('p');
-    appendInlineText(p, paragraph.join('\n'), enableSymbolLinks);
+    appendInlineText(p, paragraph.join('\n'), enableAssistantEnhancements);
     container.append(p);
     paragraph = [];
   };
@@ -658,7 +818,7 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
     if (!quoteLines.length) return;
     const quote = document.createElement('blockquote');
     const p = document.createElement('p');
-    appendInlineText(p, quoteLines.join('\n'), enableSymbolLinks);
+    appendInlineText(p, quoteLines.join('\n'), enableAssistantEnhancements);
     quote.append(p);
     container.append(quote);
     quoteLines = [];
@@ -675,7 +835,9 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
         codeLines = [];
         language = fence[1];
       } else {
-        container.append(createCodeBlock(codeLines.join('\n'), language));
+        const code = codeLines.join('\n');
+        if (enableAssistantEnhancements && language.toLowerCase() === 'mermaid') container.append(createDiagramBlock(code));
+        else container.append(createCodeBlock(code, language));
         codeLines = undefined;
         language = '';
       }
@@ -683,6 +845,32 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
     }
     if (codeLines) {
       codeLines.push(line);
+      continue;
+    }
+
+    const mathFence = enableAssistantEnhancements
+      ? (line.trim() === '$$' ? '$$' : line.trim() === '\\[' ? '\\]' : '')
+      : '';
+    if (mathFence) {
+      flushParagraph();
+      flushList();
+      flushQuote();
+      const mathLines = [];
+      let closingIndex = lineIndex + 1;
+      let length = 0;
+      while (closingIndex < lines.length && mathLines.length < 250) {
+        if (lines[closingIndex].trim() === mathFence) break;
+        length += lines[closingIndex].length;
+        if (length > 8_000) break;
+        mathLines.push(lines[closingIndex]);
+        closingIndex += 1;
+      }
+      if (closingIndex < lines.length && lines[closingIndex].trim() === mathFence) {
+        container.append(createMathNode(mathLines.join('\n'), true));
+        lineIndex = closingIndex;
+      } else {
+        paragraph.push(line);
+      }
       continue;
     }
 
@@ -704,7 +892,7 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
         rows.push(splitMarkdownTableRow(lines[rowIndex]).slice(0, tableHeaders.length));
         rowIndex += 1;
       }
-      container.append(createMarkdownTable(tableHeaders, rows, enableSymbolLinks));
+      container.append(createMarkdownTable(tableHeaders, rows, enableAssistantEnhancements));
       lineIndex = rowIndex - 1;
       continue;
     }
@@ -715,7 +903,7 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
       flushList();
       flushQuote();
       const h = document.createElement(heading[1].length === 1 ? 'h2' : 'h3');
-      appendInlineText(h, heading[2], enableSymbolLinks);
+      appendInlineText(h, heading[2], enableAssistantEnhancements);
       container.append(h);
       continue;
     }
@@ -755,7 +943,7 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
       checkbox.checked = task[1].toLowerCase() === 'x';
       checkbox.setAttribute('aria-label', checkbox.checked ? 'Completed task' : 'Incomplete task');
       const content = document.createElement('span');
-      appendInlineText(content, task[2], enableSymbolLinks);
+      appendInlineText(content, task[2], enableAssistantEnhancements);
       item.append(checkbox, content);
       list.append(item);
       continue;
@@ -771,7 +959,7 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
         list = document.createElement(tag);
       }
       const item = document.createElement('li');
-      appendInlineText(item, (unordered || ordered)[1], enableSymbolLinks);
+      appendInlineText(item, (unordered || ordered)[1], enableAssistantEnhancements);
       list.append(item);
       continue;
     }
@@ -780,7 +968,9 @@ function renderMarkdown(container, text, enableSymbolLinks = false) {
   }
 
   if (codeLines) {
-    container.append(createCodeBlock(codeLines.join('\n'), language));
+    const code = codeLines.join('\n');
+    if (enableAssistantEnhancements && language.toLowerCase() === 'mermaid') container.append(createDiagramBlock(code));
+    else container.append(createCodeBlock(code, language));
   }
   flushParagraph();
   flushList();

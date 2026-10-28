@@ -167,7 +167,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')],
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.context.extensionUri, 'media'),
+        vscode.Uri.joinPath(this.context.extensionUri, 'dist'),
+      ],
     };
     view.webview.html = this.getHtml(view.webview);
     this.webviewMessageSubscription?.dispose();
@@ -630,6 +633,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'openSymbol':
         await this.openWorkspaceSymbol(message.name);
+        return;
+      case 'openDiagram':
+        this.openDiagramPanel(message.svg);
         return;
       case 'setModel':
       case 'setThinkingLevel':
@@ -1862,6 +1868,31 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private openDiagramPanel(value: unknown): void {
+    if (typeof value !== 'string' || value.length > 300_000) {
+      this.post({ type: 'notice', message: 'That diagram is too large to open separately.', isError: true });
+      return;
+    }
+    const svg = value.trim();
+    if (!/^<svg(?:\s|>)/i.test(svg)
+      || /<\s*(?:script|foreignObject)\b|\son[a-z0-9_-]+\s*=|javascript\s*:|(?:href|xlink:href)\s*=\s*["'](?:https?:|\/\/)/i.test(svg)) {
+      this.post({ type: 'notice', message: 'The diagram output failed the safety check.', isError: true });
+      return;
+    }
+    const nonce = randomBytes(16).toString('base64');
+    const imageUri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    const panel = vscode.window.createWebviewPanel('piChat.diagram', 'Pi Diagram', vscode.ViewColumn.Beside, {
+      enableScripts: false,
+      retainContextWhenHidden: true,
+      localResourceRoots: [],
+    });
+    panel.webview.html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'nonce-${nonce}'">
+<style nonce="${nonce}">html,body{width:100%;height:100%;margin:0;background:var(--vscode-editor-background,#fff);overflow:auto}body{display:grid;place-items:center}img{display:block;max-width:100%;max-height:100%;object-fit:contain}</style>
+</head><body><img alt="Rendered Mermaid diagram" src="${imageUri}"></body></html>`;
+  }
+
   private async openWorkspaceSymbol(value: unknown): Promise<void> {
     if (typeof value !== 'string' || value.length > 128
       || !/^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*){0,3}$/.test(value)) {
@@ -2263,6 +2294,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private getHtml(webview: vscode.Webview): string {
     const nonce = randomBytes(16).toString('base64');
     const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'));
+    const rendererUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview-renderers.js'));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.js'));
     const csp = [
       "default-src 'none'",
@@ -2492,6 +2524,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       </footer>
     </section>
   </div>
+  <script nonce="${nonce}" src="${rendererUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -145,20 +145,31 @@
     }
   },
   "scripts": {
-    "compile": "npm run compile:extension && npm run compile:worker",
+    "compile": "npm run compile:extension && npm run compile:worker && npm run compile:webview",
     "compile:extension": "esbuild src/extension.ts --bundle --platform=node --target=node22 --external:vscode --outfile=dist/extension.js",
     "compile:worker": "esbuild src/pi-worker.ts --bundle --platform=node --target=node22 --format=esm --external:@earendil-works/pi-coding-agent --outfile=dist/pi-worker.mjs",
+    "compile:webview": "esbuild src/webview-renderers.js --bundle --platform=browser --target=es2022 --format=iife --minify --legal-comments=linked --outfile=dist/webview-renderers.js",
     "typecheck": "tsc --noEmit",
     "package": "npm run compile && vsce package"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0"
   },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "undici": "8.12.2"
+    },
+    "@azure/identity": {
+      "@azure/msal-node": "7.1.2"
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.19.0",
     "@types/vscode": "^1.109.0",
     "@vscode/vsce": "^3.3.2",
     "esbuild": "^0.25.0",
+    "katex": "0.19.1",
+    "mermaid": "12.2.0",
     "typescript": "^5.8.3"
   }
 }
