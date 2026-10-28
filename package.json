@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.78",
+  "version": "0.1.79",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -278,7 +278,8 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
-    "jsonc-parser": "3.3.1"
+    "jsonc-parser": "3.3.1",
+    "minimatch": "10.2.6"
   },
   "overrides": {
     "@earendil-works/pi-coding-agent": {

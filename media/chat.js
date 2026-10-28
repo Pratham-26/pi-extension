@@ -52,6 +52,10 @@ const state = {
   runtimeSettings: { autoCompaction: false, autoRetry: false, cacheWarming: 'off', offlineMode: 'inherit' },
   models: [],
   modelSearch: '',
+  modelScopeIds: null,
+  modelScopeSource: 'all',
+  modelScopeStatus: '',
+  modelScopeSaving: false,
   chatSearch: '',
   chatSearchHits: [],
   chatSearchIndex: -1,
@@ -182,9 +186,17 @@ const ui = {
   mentionPanel: el('mention-panel'),
   model: el('model-label'),
   modelToggle: el('model-toggle'),
+  modelCycle: el('cycle-model'),
   modelPopover: el('model-popover'),
   modelSearch: el('model-search'),
   modelList: el('model-list'),
+  modelScopeToggle: el('model-scope-toggle'),
+  modelScopePanel: el('model-scope-panel'),
+  modelScopeList: el('model-scope-list'),
+  modelScopeSummary: el('model-scope-summary'),
+  modelScopeStatus: el('model-scope-status'),
+  modelScopeAll: el('model-scope-all'),
+  saveModelScope: el('save-model-scope'),
   providerStatus: el('provider-status'),
   connectProvider: el('connect-provider'),
   editModelsConfig: el('edit-models-config'),
@@ -447,7 +459,17 @@ function updateControls() {
   ui.empty.hidden = state.messages.length > 0;
   ui.model.textContent = state.model;
   ui.modelToggle.disabled = !state.hasWorkspace || !state.hasSession || state.busy || state.models.length === 0;
+  const availableModelIds = new Set(state.models.map((model) => `${model.provider}/${model.id}`));
+  const cycleModelCount = state.modelScopeIds === null
+    ? state.models.length
+    : state.modelScopeIds.filter((id) => availableModelIds.has(id)).length;
+  ui.modelCycle.hidden = cycleModelCount < 2;
+  ui.modelCycle.disabled = !state.hasSession || state.busy || cycleModelCount < 2;
   ui.modelList.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
+  ui.modelScopeToggle.disabled = !state.hasSession || state.busy;
+  ui.modelScopeAll.disabled = !state.hasSession || state.busy;
+  ui.saveModelScope.disabled = !state.hasSession || state.busy || state.modelScopeSaving;
+  ui.modelScopeList.querySelectorAll('input, button').forEach((control) => { control.disabled = state.busy; });
   el('refresh-models').disabled = state.busy;
   ui.presets.querySelectorAll('.preset-choice').forEach((button) => { button.disabled = button.dataset.available !== 'true' || state.busy; });
   ui.thinkingChoice.disabled = !state.hasSession || state.busy || state.thinkingLevels.length === 0;
@@ -2336,6 +2358,10 @@ function renderModelChoices(data) {
   state.notificationSoundEnabled = data.notificationSound === true;
   ui.notificationSound.checked = state.notificationSoundEnabled;
   state.models = Array.isArray(data.models) ? data.models : [];
+  state.modelScopeIds = Array.isArray(data.modelScopeIds)
+    ? data.modelScopeIds.filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 512).slice(0, 2_000)
+    : null;
+  state.modelScopeSource = ['all', 'settings', 'session'].includes(data.modelScopeSource) ? data.modelScopeSource : 'all';
   state.providers = Array.isArray(data.providers) ? data.providers.slice(0, 200).filter((provider) => provider
     && typeof provider.id === 'string' && typeof provider.name === 'string'
     && (provider.supportsApiKey === true || provider.supportsOAuth === true)).map((provider) => ({
@@ -2364,6 +2390,7 @@ function renderModelChoices(data) {
   ui.modelToggle.textContent = selectedModel ? shorten(selectedModel.name || selectedModel.id, 30) : state.models.length ? 'Choose model' : 'No models';
   ui.modelToggle.title = selectedModel ? `${selectedModel.provider}/${selectedModel.id}` : 'Choose model';
   renderModelList();
+  renderModelScope();
 
   state.thinkingLevel = String(data.thinkingLevel || '');
   state.thinkingLevels = Array.isArray(data.thinkingLevels) ? data.thinkingLevels : [];
@@ -2446,6 +2473,115 @@ function renderModelList() {
     });
     ui.modelList.append(option);
   }
+}
+
+function renderModelScope() {
+  ui.modelScopeList.replaceChildren();
+  const ids = state.modelScopeIds;
+  const availableIds = state.models.map((model) => `${model.provider}/${model.id}`);
+  const selected = ids === null ? new Set(availableIds) : new Set(ids);
+  const unknownCount = ids === null ? 0 : ids.filter((id) => !availableIds.includes(id)).length;
+  const selectedCount = availableIds.filter((id) => selected.has(id)).length;
+  ui.modelScopeSummary.textContent = ids === null
+    ? `All ${state.models.length} models are enabled for cycling.`
+    : `${selectedCount} of ${state.models.length} available models enabled${unknownCount ? ` · ${unknownCount} saved ${unknownCount === 1 ? 'entry' : 'entries'} unavailable` : ''}.`;
+  if (state.modelScopeStatus) {
+    ui.modelScopeStatus.textContent = state.modelScopeStatus;
+  } else if (state.modelScopeSource === 'settings') {
+    ui.modelScopeStatus.textContent = 'Loaded from Pi settings. Changes apply to this session until you save them.';
+  } else if (state.modelScopeSource === 'session') {
+    ui.modelScopeStatus.textContent = 'Session-only scope. Save to Pi settings to use it in future sessions.';
+  } else {
+    ui.modelScopeStatus.textContent = 'All models are available by default. Saving a selection updates Pi’s global settings.json.';
+  }
+
+  const terms = state.modelSearch.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const searchable = (model) => `${model.provider} ${model.name || ''} ${model.id} ${model.supportsImages ? 'vision images' : ''}`.toLocaleLowerCase();
+  const visible = state.models.filter((model) => terms.every((term) => searchable(model).includes(term)));
+  const ordered = ids === null
+    ? visible
+    : [
+        ...ids.flatMap((id) => visible.filter((model) => `${model.provider}/${model.id}` === id)),
+        ...visible.filter((model) => !selected.has(`${model.provider}/${model.id}`)),
+      ];
+  if (!ordered.length) {
+    const empty = document.createElement('div');
+    empty.className = 'option-empty';
+    empty.textContent = state.models.length ? 'No models match this search.' : 'No configured models are available.';
+    ui.modelScopeList.append(empty);
+    return;
+  }
+
+  for (const model of ordered) {
+    const key = `${model.provider}/${model.id}`;
+    const row = document.createElement('div');
+    row.className = 'model-scope-row';
+    const label = document.createElement('label');
+    label.className = 'model-scope-choice';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selected.has(key);
+    checkbox.setAttribute('aria-label', `Enable ${model.provider}/${model.id} for model cycling`);
+    checkbox.addEventListener('change', () => {
+      let next = ids === null ? [...availableIds] : [...ids];
+      if (checkbox.checked) {
+        if (!next.includes(key)) next.push(key);
+      } else {
+        next = next.filter((item) => item !== key);
+      }
+      state.modelScopeIds = next.length ? next : null;
+      state.modelScopeSource = 'session';
+      state.modelScopeStatus = 'Session scope updated. Save to Pi settings to keep it for future sessions.';
+      post('setModelScope', { modelIds: state.modelScopeIds });
+      renderModelScope();
+      updateControls();
+    });
+    const text = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = model.name || model.id;
+    const detail = document.createElement('small');
+    detail.textContent = `${model.provider} · ${model.id}`;
+    text.append(name, detail);
+    label.append(checkbox, text);
+    row.append(label);
+
+    if (ids !== null && selected.has(key)) {
+      const index = ids.indexOf(key);
+      const moveUp = document.createElement('button');
+      moveUp.type = 'button';
+      moveUp.className = 'model-scope-move';
+      moveUp.textContent = '↑';
+      moveUp.title = `Move ${model.name || model.id} earlier`;
+      moveUp.setAttribute('aria-label', moveUp.title);
+      moveUp.disabled = index <= 0;
+      moveUp.addEventListener('click', () => moveModelScopeItem(key, -1));
+      const moveDown = document.createElement('button');
+      moveDown.type = 'button';
+      moveDown.className = 'model-scope-move';
+      moveDown.textContent = '↓';
+      moveDown.title = `Move ${model.name || model.id} later`;
+      moveDown.setAttribute('aria-label', moveDown.title);
+      moveDown.disabled = index < 0 || index >= ids.length - 1;
+      moveDown.addEventListener('click', () => moveModelScopeItem(key, 1));
+      row.append(moveUp, moveDown);
+    }
+    ui.modelScopeList.append(row);
+  }
+}
+
+function moveModelScopeItem(id, delta) {
+  if (!Array.isArray(state.modelScopeIds)) return;
+  const next = [...state.modelScopeIds];
+  const index = next.indexOf(id);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= next.length) return;
+  [next[index], next[target]] = [next[target], next[index]];
+  state.modelScopeIds = next;
+  state.modelScopeSource = 'session';
+  state.modelScopeStatus = 'Session scope order updated. Save to Pi settings to keep it for future sessions.';
+  post('setModelScope', { modelIds: next });
+  renderModelScope();
+  updateControls();
 }
 
 function renderContextUsage() {
@@ -4036,6 +4172,12 @@ window.addEventListener('message', (event) => {
     case 'options':
       renderModelChoices(data);
       break;
+    case 'model-scope-saved':
+      state.modelScopeSaving = false;
+      state.modelScopeStatus = String(data.message || (data.success ? 'Model scope saved to Pi settings.' : 'Could not save the model scope.')).slice(0, 240);
+      renderModelScope();
+      updateControls();
+      break;
     case 'notification-sound-setting':
       state.notificationSoundEnabled = data.enabled === true;
       ui.notificationSound.checked = state.notificationSoundEnabled;
@@ -4665,14 +4807,33 @@ document.addEventListener('keydown', (event) => {
     else stepChatSearch(1);
   }
 });
-ui.modelToggle.addEventListener('click', () => {
-  const open = ui.modelPopover.hidden;
-  ui.modelPopover.hidden = !open;
+function closeComposerPopovers() {
+  ui.modelPopover.hidden = true;
   ui.toolsPopover.hidden = true;
   ui.skillsPopover.hidden = true;
-  ui.modelToggle.setAttribute('aria-expanded', String(open));
+  ui.modelScopePanel.hidden = true;
+  ui.modelList.hidden = false;
+  ui.modelToggle.setAttribute('aria-expanded', 'false');
   ui.toolsToggle.setAttribute('aria-expanded', 'false');
   ui.skillsToggle.setAttribute('aria-expanded', 'false');
+  ui.modelScopeToggle.setAttribute('aria-expanded', 'false');
+  ui.modelScopeToggle.textContent = 'Model cycling scope';
+  ui.runtimeSettings.hidden = true;
+  ui.runtimeSettingsToggle.setAttribute('aria-expanded', 'false');
+}
+
+document.addEventListener('pointerdown', (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  if (target.closest('.control-popover, #model-toggle, #tools-toggle, #skills-toggle, #delivery-mode')) return;
+  closeComposerPopovers();
+});
+
+ui.modelToggle.addEventListener('click', () => {
+  const open = ui.modelPopover.hidden;
+  closeComposerPopovers();
+  ui.modelPopover.hidden = !open;
+  ui.modelToggle.setAttribute('aria-expanded', String(open));
   if (open) {
     renderModelList();
     ui.modelSearch.focus();
@@ -4681,6 +4842,31 @@ ui.modelToggle.addEventListener('click', () => {
 ui.modelSearch.addEventListener('input', () => {
   state.modelSearch = ui.modelSearch.value;
   renderModelList();
+  renderModelScope();
+});
+ui.modelCycle.addEventListener('click', () => post('cycleModel'));
+ui.modelScopeToggle.addEventListener('click', () => {
+  const open = ui.modelScopePanel.hidden;
+  ui.modelScopePanel.hidden = !open;
+  ui.modelList.hidden = open;
+  ui.modelScopeToggle.setAttribute('aria-expanded', String(open));
+  ui.modelScopeToggle.textContent = open ? 'Back to model list' : 'Model cycling scope';
+  if (open) renderModelScope();
+});
+ui.modelScopeAll.addEventListener('click', () => {
+  state.modelScopeIds = null;
+  state.modelScopeSource = 'session';
+  state.modelScopeStatus = 'All models are available in this session. Save to Pi settings to clear the saved scope.';
+  post('setModelScope', { modelIds: null });
+  renderModelScope();
+  updateControls();
+});
+ui.saveModelScope.addEventListener('click', () => {
+  state.modelScopeSaving = true;
+  state.modelScopeStatus = 'Saving model scope to Pi settings…';
+  renderModelScope();
+  updateControls();
+  post('saveModelScope', { modelIds: state.modelScopeIds });
 });
 el('refresh-models').addEventListener('click', () => post('refreshModels'));
 ui.connectProvider.addEventListener('click', () => post('connectProvider'));
@@ -4737,21 +4923,15 @@ ui.mcpEnabled.addEventListener('change', () => {
 ui.thinkingChoice.addEventListener('change', () => post('setThinkingLevel', { thinkingLevel: ui.thinkingChoice.value }));
 ui.toolsToggle.addEventListener('click', () => {
   const open = ui.toolsPopover.hidden;
+  closeComposerPopovers();
   ui.toolsPopover.hidden = !open;
-  ui.skillsPopover.hidden = true;
-  ui.modelPopover.hidden = true;
   ui.toolsToggle.setAttribute('aria-expanded', String(open));
-  ui.skillsToggle.setAttribute('aria-expanded', 'false');
-  ui.modelToggle.setAttribute('aria-expanded', 'false');
 });
 ui.skillsToggle.addEventListener('click', () => {
   const open = ui.skillsPopover.hidden;
+  closeComposerPopovers();
   ui.skillsPopover.hidden = !open;
-  ui.toolsPopover.hidden = true;
-  ui.modelPopover.hidden = true;
   ui.skillsToggle.setAttribute('aria-expanded', String(open));
-  ui.toolsToggle.setAttribute('aria-expanded', 'false');
-  ui.modelToggle.setAttribute('aria-expanded', 'false');
   if (open) post('listPackages');
 });
 document.querySelectorAll('[data-tool-preset]').forEach((button) => {

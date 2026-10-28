@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isPiPackageSource } from './package-source';
+import { resolveModelScopePatterns } from './model-scope';
 import { parsePromptSuggestions } from './prompt-suggestions';
 import {
   createAgentSession,
@@ -46,6 +47,7 @@ type WorkerInput = {
   providerId?: string;
   authType?: 'api_key' | 'oauth';
   modelId?: string;
+  modelIds?: unknown;
   thinkingLevel?: string;
   presetName?: string;
   toolNames?: string[];
@@ -67,6 +69,7 @@ type SessionLike = {
   sessionId?: string;
   sessionFile?: string;
   model?: { provider?: string; id?: string };
+  scopedModels?: Array<{ model: { provider: string; id: string }; thinkingLevel?: string }>;
   thinkingLevel?: string;
   modelRuntime?: {
     getAvailableSnapshot: () => Array<{ provider: string; id: string; name?: string; contextWindow?: number; input?: string[] }>;
@@ -141,6 +144,8 @@ type SessionLike = {
   };
   bindExtensions?: (bindings: Record<string, unknown>) => Promise<void>;
   setModel?: (model: unknown) => Promise<void>;
+  setScopedModels?: (models: Array<{ model: any; thinkingLevel?: string }>) => void;
+  cycleModel?: (direction?: 'forward' | 'backward') => Promise<unknown>;
   setThinkingLevel?: (level: any) => void;
   steer?: (text: string, images?: Array<{ type: 'image'; data: string; mimeType: string }>) => Promise<unknown>;
   followUp?: (text: string, images?: Array<{ type: 'image'; data: string; mimeType: string }>) => Promise<unknown>;
@@ -158,6 +163,7 @@ type SessionLike = {
 
 const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui' } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
+const modelScopeOverrides = new WeakMap<object, string[] | null>();
 const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbsolute(workerOptions.extensionRoot)
   ? workerOptions.extensionRoot
   : '';
@@ -2300,10 +2306,72 @@ function snapshot(): void {
   sendOptions();
 }
 
+function modelReference(model: { provider: string; id: string }): string {
+  return `${model.provider}/${model.id}`;
+}
+
+function getModelScopeState(current: SessionLike): { ids: string[] | null; source: 'session' | 'settings' | 'all' } {
+  const override = current as object;
+  if (modelScopeOverrides.has(override)) {
+    return { ids: modelScopeOverrides.get(override) ?? null, source: 'session' };
+  }
+  const activeModels = current.modelRuntime?.getAvailableSnapshot() ?? [];
+  const configuredPatterns = current.settingsManager?.getEnabledModels() ?? [];
+  if (configuredPatterns.length) {
+    const resolved = resolveModelScopePatterns(configuredPatterns, activeModels);
+    const ids = resolved.scopedModels.map((item) => modelReference(item.model));
+    for (const pattern of resolved.unmatched) if (!ids.includes(pattern)) ids.push(pattern);
+    return { ids: ids.length ? ids : null, source: 'settings' };
+  }
+  if (current.scopedModels?.length) {
+    return { ids: current.scopedModels.map((item) => modelReference(item.model)), source: 'session' };
+  }
+  return { ids: null, source: 'all' };
+}
+
+function applyModelScopeIds(current: SessionLike, ids: string[] | null): void {
+  if (!current.setScopedModels || !current.modelRuntime) return;
+  const available = current.modelRuntime.getAvailableSnapshot();
+  if (!ids || ids.length === 0) {
+    current.setScopedModels([]);
+    return;
+  }
+  const selected = new Set(ids);
+  const allAvailableSelected = ids.length === available.length
+    && available.every((model) => selected.has(modelReference(model)));
+  if (allAvailableSelected) {
+    current.setScopedModels([]);
+    return;
+  }
+  const resolvable = ids.filter((id) => available.some((model) => modelReference(model) === id));
+  const scope = resolveModelScopePatterns(resolvable, available).scopedModels;
+  current.setScopedModels(scope.map((item) => ({ model: item.model, thinkingLevel: item.thinkingLevel })));
+}
+
+function syncModelScope(current: SessionLike): void {
+  applyModelScopeIds(current, getModelScopeState(current).ids);
+}
+
+function validateModelScopeIds(current: SessionLike, value: unknown): string[] | null | undefined {
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.length > 2_000 || !current.modelRuntime) return undefined;
+  const availableIds = new Set(current.modelRuntime.getAvailableSnapshot().map(modelReference));
+  const existingPatterns = new Set(current.settingsManager?.getEnabledModels() ?? []);
+  const result: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== 'string' || candidate.length === 0 || candidate.length > 512 || /[\u0000-\u001f\u007f]/.test(candidate)) return undefined;
+    if (!availableIds.has(candidate) && !existingPatterns.has(candidate)) return undefined;
+    if (!result.includes(candidate)) result.push(candidate);
+  }
+  return result.length ? result : null;
+}
+
 function sendOptions(): void {
   if (!session) return;
   const currentModel = session.model;
-  const models = session.modelRuntime?.getAvailableSnapshot().map((model) => ({
+  const availableModels = session.modelRuntime?.getAvailableSnapshot() ?? [];
+  const modelScope = getModelScopeState(session);
+  const models = availableModels.map((model) => ({
     provider: model.provider,
     id: model.id,
     name: model.name ?? model.id,
@@ -2428,6 +2496,8 @@ function sendOptions(): void {
     settingsConfigPath: join(getAgentDir(), 'settings.json'),
     mcpConfigPath: join(getAgentDir(), 'mcp.json'),
     currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+    modelScopeIds: modelScope.ids,
+    modelScopeSource: modelScope.source,
     thinkingLevel: session.thinkingLevel,
     thinkingLevels: session.getAvailableThinkingLevels?.() ?? [],
     supportsThinking: session.supportsThinking?.() ?? false,
@@ -3336,6 +3406,7 @@ async function createSessionInternal(path?: string): Promise<boolean> {
     await resourceLoader.reload({ resolveProjectTrust: () => resolveProjectTrust(settingsManager) });
     const result = await createAgentSession({ cwd, sessionManager: manager, settingsManager, resourceLoader });
     createdSession = result.session as unknown as SessionLike;
+    syncModelScope(createdSession);
     packageManager = createdSession.settingsManager
       ? new DefaultPackageManager({ cwd, agentDir: getAgentDir(), settingsManager: createdSession.settingsManager })
       : undefined;
@@ -3388,6 +3459,7 @@ function refreshModelCatalogOnStartup(activeSession: SessionLike): void {
   modelCatalogStartupRefreshStarted = true;
   void activeSession.modelRuntime.refresh({ allowNetwork: true }).then((result) => {
     if (session !== activeSession) return;
+    syncModelScope(activeSession);
     if (result && typeof result === 'object' && 'errors' in result && result.errors instanceof Map && result.errors.size > 0) {
       send('notice', { message: 'Some configured model catalogs could not be refreshed automatically. Cached models remain available.' });
     }
@@ -3407,9 +3479,18 @@ function watchModelConfig(): void {
       if (filename && filename.toString() !== 'models.json') return;
       clearTimeout(modelRefreshTimer);
       modelRefreshTimer = setTimeout(() => {
-        if (!session?.modelRuntime?.refresh) return;
-        void session.modelRuntime.refresh({ allowNetwork: false }).then(() => sendOptions()).catch((error) => {
-          send('notice', { message: `Could not refresh Pi models: ${error instanceof Error ? error.message : String(error)}` });
+        const activeSession = session;
+        if (!activeSession?.modelRuntime?.refresh) return;
+        void activeSession.modelRuntime.refresh({ allowNetwork: false }).then(() => {
+          if (session !== activeSession) return;
+          syncModelScope(activeSession);
+          sendOptions();
+        }).catch((error) => {
+          if (session === activeSession) {
+            syncModelScope(activeSession);
+            sendOptions();
+            send('notice', { message: `Could not refresh Pi models: ${error instanceof Error ? error.message : String(error)}` });
+          }
         });
       }, 160);
     });
@@ -3708,10 +3789,57 @@ async function handle(input: WorkerInput): Promise<void> {
         snapshot();
         return;
       }
+      case 'cycleModel': {
+        if (!session || busy || !session.cycleModel) return;
+        const result = await session.cycleModel(input.action === 'backward' ? 'backward' : 'forward');
+        if (result) snapshot();
+        return;
+      }
+      case 'setModelScope': {
+        if (!session || busy) return;
+        const ids = validateModelScopeIds(session, input.modelIds);
+        if (ids === undefined) {
+          send('notice', { message: 'The model scope selection was invalid.', isError: true });
+          return;
+        }
+        modelScopeOverrides.set(session as object, ids);
+        applyModelScopeIds(session, ids);
+        sendOptions();
+        return;
+      }
+      case 'saveModelScope': {
+        if (!session || busy || !session.settingsManager || !session.modelRuntime) return;
+        const ids = validateModelScopeIds(session, input.modelIds);
+        if (ids === undefined) {
+          send('model-scope-saved', { success: false, message: 'The model scope selection was invalid.' });
+          return;
+        }
+        const available = session.modelRuntime.getAvailableSnapshot();
+        const selected = new Set(ids ?? []);
+        const allAvailableSelected = ids === null || (ids.length === available.length
+          && available.every((model) => selected.has(modelReference(model))));
+        const patterns = allAvailableSelected ? undefined : ids ?? undefined;
+        try {
+          if (session.settingsManager.drainErrors().length) {
+            send('notice', { message: 'A previous Pi settings write failed. Retrying the model-scope save.' });
+          }
+          session.settingsManager.setEnabledModels(patterns);
+          await session.settingsManager.flush();
+          if (session.settingsManager.drainErrors().length) throw new Error('settings write failed');
+          modelScopeOverrides.set(session as object, allAvailableSelected ? null : ids ?? null);
+          applyModelScopeIds(session, allAvailableSelected ? null : ids ?? null);
+          send('model-scope-saved', { success: true, message: allAvailableSelected ? 'All models will be available for cycling.' : 'Model scope saved to Pi settings.' });
+          sendOptions();
+        } catch {
+          send('model-scope-saved', { success: false, message: 'Pi could not save the model scope to settings.json.' });
+        }
+        return;
+      }
       case 'refreshModels': {
         if (!session?.modelRuntime?.refresh || busy) return;
         try {
           const result = await session.modelRuntime.refresh({ allowNetwork: true });
+          syncModelScope(session);
           if (result && typeof result === 'object' && 'errors' in result && result.errors instanceof Map && result.errors.size) {
             send('notice', { message: `Some model catalogs could not refresh: ${[...result.errors.keys()].slice(0, 8).join(', ')}.` });
           }

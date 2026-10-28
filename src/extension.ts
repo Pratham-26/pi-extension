@@ -5301,6 +5301,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           <div id="model-presets" class="model-presets" aria-label="Model presets"></div>
           <div class="composer-controls" aria-label="Session controls">
             <button id="model-toggle" class="control-button model-toggle" type="button" aria-expanded="false" aria-label="Choose model" title="Choose model" disabled>Choose model</button>
+            <button id="cycle-model" class="control-button model-cycle" type="button" aria-label="Cycle to next model" title="Cycle to next model" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button>
             <select id="thinking-choice" class="control-select thinking-select" aria-label="Reasoning level" title="Reasoning level" hidden disabled></select>
             <button id="tools-toggle" class="control-button" type="button" aria-expanded="false" disabled>Tools</button>
             <button id="skills-toggle" class="control-button" type="button" aria-expanded="false" disabled>Resources</button>
@@ -5308,6 +5309,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <section id="model-popover" class="control-popover model-popover" aria-label="Choose a model" hidden>
               <div class="model-search-row"><input id="model-search" class="session-search" type="search" aria-label="Search models" placeholder="Search models, providers, or vision"><button id="refresh-models" class="icon-button small" type="button" title="Refresh models; may contact providers and run configured API-key commands" aria-label="Refresh model catalog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg></button></div>
               <div class="provider-actions"><span id="provider-status" class="provider-status"></span><button id="connect-provider" class="text-button" type="button">Connect</button><button id="runtime-settings-toggle" class="text-button" type="button" aria-expanded="false">Runtime</button><button id="add-model-endpoint" class="text-button" type="button" title="Add a custom endpoint to Pi's model configuration">Add endpoint</button><button id="edit-models-config" class="text-button" type="button" title="Edit Pi's custom models and providers">Models</button><button id="edit-pi-settings" class="text-button" type="button" title="Open Pi's user settings">Pi settings</button></div>
+              <div class="model-scope-toolbar"><button id="model-scope-toggle" class="text-button" type="button" aria-expanded="false">Model cycling scope</button></div>
+              <section id="model-scope-panel" class="model-scope-panel" aria-label="Models available for cycling" hidden>
+                <div class="popover-heading"><strong>Models for cycling</strong><span id="model-scope-summary">All models are enabled.</span></div>
+                <div class="model-scope-actions"><button id="model-scope-all" class="text-button" type="button">All models</button><button id="save-model-scope" class="text-button" type="button">Save to Pi settings</button></div>
+                <div id="model-scope-list" class="option-list model-scope-list"></div>
+                <div id="model-scope-status" class="model-scope-status" role="status" aria-live="polite"></div>
+              </section>
               <section id="runtime-settings" class="runtime-settings" aria-label="Pi runtime settings" hidden>
                 <div class="popover-heading"><strong>Pi runtime settings</strong><span>Saved in global Pi settings</span></div>
                 <button id="choose-pi-home" class="text-button" type="button" title="Change the Pi configuration directory and restart Pi when idle">Choose Pi configuration folder</button>

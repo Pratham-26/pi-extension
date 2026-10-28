@@ -511,6 +511,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .control-button[aria-expanded="true"] { color: var(--text); border-color: var(--line); background: var(--surface-raised); }
 .control-button:disabled, .control-select:disabled { opacity: .55; cursor: default; }
 .delivery-mode { margin-left: auto; }
+.model-cycle { display: grid; flex: 0 0 24px; place-items: center; width: 24px; padding: 0; }
+.model-cycle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
 .control-popover {
   position: absolute;
   z-index: 8;
@@ -533,6 +535,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .model-option[aria-selected="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, transparent); }
 .model-option strong, .model-option small { overflow-wrap: anywhere; white-space: normal; }
 .model-popover .option-list { max-height: min(300px, 48vh); overflow: auto; }
+.model-scope-toolbar { display: flex; justify-content: flex-end; padding: 0 5px 4px; }
+.model-scope-panel { min-width: 0; }
+.model-scope-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 4px 5px; }
+.model-scope-list { max-height: min(240px, 38vh); overflow: auto; }
+.model-scope-row { display: flex; align-items: center; gap: 2px; min-width: 0; padding: 2px 3px; border-radius: 4px; }
+.model-scope-row:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.model-scope-choice { display: flex; flex: 1; align-items: center; gap: 7px; min-width: 0; padding: 4px 3px; cursor: pointer; }
+.model-scope-choice input { flex: 0 0 auto; margin: 0; accent-color: var(--accent); }
+.model-scope-choice span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.model-scope-choice strong, .model-scope-choice small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-scope-choice strong { font-size: 10px; font-weight: 550; }
+.model-scope-choice small { color: var(--muted); font-size: 9px; }
+.model-scope-move { flex: 0 0 22px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; }
+.model-scope-move:hover:not(:disabled) { color: var(--text); background: var(--surface-raised); }
+.model-scope-move:disabled { opacity: .35; cursor: default; }
+.model-scope-status { padding: 6px 5px 2px; color: var(--muted); font-size: 9px; line-height: 1.4; }
 .tools-popover { right: 34px; }
 .popover-heading { display: flex; flex-direction: column; gap: 2px; padding: 5px 6px 7px; }
 .popover-heading strong { font-size: 11px; font-weight: 600; }
