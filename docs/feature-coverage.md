@@ -33,9 +33,9 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 ## Sessions
 
-- [x] Create, list, search, rename, pin, color, reorder, reopen, clone, export, and delete workspace sessions.
-- [~] Fork from a user message, edit earlier text/context/image prompts into a new branch, and navigate the current branch history. Multi-tab session restore and cross-workspace search remain unavailable.
-- [~] Transcript search includes visible thinking and tool output; session search indexes names, messages, assistant thinking, tool calls, and tool outputs within the current workspace. Cross-workspace session search remains unavailable.
+- [x] Create, list, search, rename, pin, color, reorder, reopen, clone, export, and delete workspace sessions; opt-in search reaches sessions across Pi workspaces, and a foreign result opens in its own VS Code window after confirmation.
+- [~] Fork from a user message, edit earlier text/context/image prompts into a new branch, and navigate the current branch history. Multi-tab session restore remains unavailable.
+- [~] Transcript search includes visible thinking and tool output; session search indexes names, messages, assistant thinking, tool calls, and tool outputs in the current workspace by default, with an opt-in all-workspaces search. Foreign sessions load in the matching workspace so Pi applies that folder's tool paths and trust rules.
 - [~] Open the latest session when the chat view starts is optional; multiple independent chat editor tabs, persisted tab restore, and new chat beside a file are unavailable.
 - [x] Save a local title from the first non-command prompt without an extra provider request; configurable through `piChat.sessions.autoName`.
 - [ ] Git worktree sessions, setup commands, ignored-file copying, and safe worktree removal.
@@ -76,6 +76,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 ## Explicit scope and review notes
 
 - Voice dictation is excluded at the user's request.
+- All-workspace session search is opt-in; opening a result from another folder requires confirmation and starts that session in the folder's own VS Code window.
 - Remote phone access is out of scope.
 - Direct shell execution from the composer is unimplemented because automatic security review rejected adding that command-execution path.
 - Pi tool calls use the user's current Pi permissions; narrower tool sets are available in the extension.

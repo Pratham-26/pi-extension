@@ -7,6 +7,7 @@ const state = {
   sessionPath: '',
   sessions: [],
   sessionQuery: '',
+  sessionSearchAllWorkspaces: persistedWebviewState.sessionSearchAllWorkspaces === true,
   drafts: persistedWebviewState.drafts && typeof persistedWebviewState.drafts === 'object' ? persistedWebviewState.drafts : {},
   promptHistory: persistedWebviewState.promptHistory && typeof persistedWebviewState.promptHistory === 'object' ? persistedWebviewState.promptHistory : {},
   toolExpansion: Object.fromEntries(Object.entries(persistedWebviewState.toolExpansion || {})
@@ -134,7 +135,9 @@ const ui = {
   branchEmpty: el('branch-empty'),
   sessions: el('session-list'),
   sessionsEmpty: el('session-empty'),
+  sessionsResults: el('session-results-note'),
   sessionSearch: el('session-search'),
+  sessionSearchAll: el('session-search-all'),
   renameSession: el('rename-session'),
   railSessions: el('rail-sessions'),
   attachments: el('attachments'),
@@ -198,13 +201,14 @@ function syncFocusTranscriptToggle() {
 }
 
 syncFocusTranscriptToggle();
+ui.sessionSearchAll.checked = state.sessionSearchAllWorkspaces;
 
 function post(type, payload = {}) {
   vscode.postMessage({ type, ...payload });
 }
 
 function persistWebviewState() {
-  vscode.setState({ drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript });
+  vscode.setState({ drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces });
 }
 
 function isTranscriptMessageVisible(message) {
@@ -396,7 +400,9 @@ function renderSessions() {
   ui.railSessions.replaceChildren();
   const sessions = state.sessions;
   ui.sessionsEmpty.hidden = sessions.length > 0;
-  ui.sessionsEmpty.textContent = state.sessionQuery ? 'No sessions match this search.' : 'No saved sessions yet.';
+  ui.sessionsEmpty.textContent = state.sessionSearchAllWorkspaces
+    ? (state.sessionQuery ? 'No sessions match across Pi workspaces.' : 'No saved Pi sessions were found across workspaces.')
+    : (state.sessionQuery ? 'No sessions match this search.' : 'No saved sessions yet.');
 
   for (const session of sessions) {
     const entry = document.createElement('div');
@@ -404,7 +410,7 @@ function renderSessions() {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = `session-row${session.path === state.sessionPath ? ' active' : ''}`;
-    row.title = session.title;
+    row.title = session.workspacePath ? `${session.title}\n${session.workspacePath}` : session.title;
     const color = document.createElement('span');
     color.className = `session-color color-${['red', 'orange', 'yellow', 'green', 'blue', 'purple'].includes(session.color) ? session.color : 'default'}`;
     color.setAttribute('aria-hidden', 'true');
@@ -415,14 +421,26 @@ function renderSessions() {
     id.className = 'session-row-id';
     id.textContent = session.id ? session.id.slice(0, 8) : 'Pi session';
     row.append(color, title, id);
+    if (session.isCurrentWorkspace === false) {
+      const workspace = document.createElement('span');
+      workspace.className = 'session-row-workspace';
+      workspace.textContent = `In ${session.workspaceName || 'unknown workspace'}`;
+      workspace.title = session.workspacePath || 'Workspace path unavailable';
+      row.append(workspace);
+    }
     if (session.searchMatch === 'thinking-or-tool-activity') {
       const match = document.createElement('span');
       match.className = 'session-row-match';
       match.textContent = 'Matched thinking or tool activity';
+      if (session.isCurrentWorkspace === false) match.classList.add('has-workspace');
       row.append(match);
     }
     row.addEventListener('click', () => {
       closeHistory();
+      if (session.isCurrentWorkspace === false || (!session.workspacePath && state.sessionSearchAllWorkspaces)) {
+        post('openSession', { path: session.path });
+        return;
+      }
       state.switchingSession = true;
       setBusy(true, 'Opening session');
       post('openSession', { path: session.path });
@@ -485,7 +503,7 @@ function renderSessions() {
       setBusy(true, 'Opening session');
       post('openSession', { path: session.path });
     });
-    ui.railSessions.append(shortcut);
+    if (session.isCurrentWorkspace !== false) ui.railSessions.append(shortcut);
   }
 }
 
@@ -2917,6 +2935,16 @@ window.addEventListener('message', (event) => {
       break;
     case 'sessions':
       state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+      {
+        const total = Number.isSafeInteger(data.total) && data.total >= 0 ? data.total : state.sessions.length;
+        const allWorkspaces = data.allWorkspaces === true;
+        const scope = allWorkspaces ? ' across workspaces' : '';
+        const truncated = data.truncated === true;
+        ui.sessionsResults.hidden = total === 0;
+        ui.sessionsResults.textContent = total === 0 ? '' : truncated
+          ? `${total} matching sessions${scope}; showing the first ${state.sessions.length}.`
+          : `${total} matching session${total === 1 ? '' : 's'}${scope}.`;
+      }
       renderSessions();
       break;
     case 'snapshot':
@@ -3182,7 +3210,7 @@ el('history-toggle').addEventListener('click', () => {
   const open = ui.history.hidden;
   ui.history.hidden = !open;
   ui.historyToggle.setAttribute('aria-expanded', String(open));
-  if (open) post('listSessions', { query: state.sessionQuery });
+  if (open) post('listSessions', { query: state.sessionQuery, allWorkspaces: state.sessionSearchAllWorkspaces });
 });
 ui.gitReviewToggle.addEventListener('click', () => {
   const open = ui.gitReviewPanel.hidden;
@@ -3251,7 +3279,7 @@ ui.branchHistoryToggle.addEventListener('click', () => {
   ui.history.hidden = true;
   ui.historyToggle.setAttribute('aria-expanded', 'false');
 });
-el('refresh-sessions').addEventListener('click', () => post('listSessions', { query: state.sessionQuery }));
+el('refresh-sessions').addEventListener('click', () => post('listSessions', { query: state.sessionQuery, allWorkspaces: state.sessionSearchAllWorkspaces }));
 el('export-session').addEventListener('click', () => {
   if (state.hasSession) post('exportSession');
   else showNotice('Start or open a session before exporting.');
@@ -3259,7 +3287,12 @@ el('export-session').addEventListener('click', () => {
 ui.sessionSearch.addEventListener('input', () => {
   state.sessionQuery = ui.sessionSearch.value;
   clearTimeout(state.sessionSearchTimer);
-  state.sessionSearchTimer = setTimeout(() => post('listSessions', { query: state.sessionQuery }), 220);
+  state.sessionSearchTimer = setTimeout(() => post('listSessions', { query: state.sessionQuery, allWorkspaces: state.sessionSearchAllWorkspaces }), 220);
+});
+ui.sessionSearchAll.addEventListener('change', () => {
+  state.sessionSearchAllWorkspaces = ui.sessionSearchAll.checked;
+  persistWebviewState();
+  post('listSessions', { query: state.sessionQuery, allWorkspaces: state.sessionSearchAllWorkspaces });
 });
 ui.renameSession.addEventListener('click', () => {
   if (state.sessionPath) post('renameSession', { path: state.sessionPath, currentName: ui.title.title });
@@ -3497,4 +3530,4 @@ document.querySelectorAll('[data-prompt]').forEach((button) => {
   button.addEventListener('click', () => sendPrompt(button.getAttribute('data-prompt')));
 });
 
-post('ready');
+post('ready', { allWorkspaces: state.sessionSearchAllWorkspaces });

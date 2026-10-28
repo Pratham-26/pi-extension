@@ -22,6 +22,7 @@ type WorkerInput = {
   text?: string;
   path?: string;
   query?: string;
+  allWorkspaces?: boolean;
   name?: string;
   entryId?: string;
   entryIds?: unknown[];
@@ -166,6 +167,9 @@ let sessionExtensionsBound = false;
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
 let sessionQuery = '';
+let sessionSearchAllWorkspaces = false;
+let sessionListController: AbortController | undefined;
+const MAX_CROSS_WORKSPACE_SESSION_RESULTS = 500;
 const sessionSearchCache = new Map<string, { modified: number; text: string }>();
 let sessionSearchCacheChars = 0;
 const MAX_SESSION_SEARCH_CACHE_ENTRIES = 32;
@@ -869,6 +873,8 @@ function sendOptions(): void {
 }
 
 async function bindSession(next: SessionLike, extensionsBound = false): Promise<void> {
+  sessionListController?.abort();
+  sessionListController = undefined;
   providerAuthController?.abort();
   providerAuthController = undefined;
   if (pendingUiRequests.size) send('extension-ui-reset');
@@ -1054,12 +1060,20 @@ function sessionSupplementalSearchMatches(path: string, query: string): boolean 
   return matches;
 }
 
-async function listSessions(query = sessionQuery): Promise<void> {
+async function listSessions(query = sessionQuery, allWorkspaces = sessionSearchAllWorkspaces): Promise<void> {
+  sessionListController?.abort();
+  const controller = new AbortController();
+  sessionListController = controller;
   try {
     sessionQuery = query;
-    const sessions = await SessionManager.list(cwd);
+    sessionSearchAllWorkspaces = allWorkspaces;
+    const sessions = allWorkspaces
+      ? await SessionManager.listAll(undefined, undefined, controller.signal)
+      : await SessionManager.list(cwd, undefined, undefined, controller.signal);
+    if (controller.signal.aborted) return;
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const matchingSessions = sessions.flatMap((item: any) => {
+      if (controller.signal.aborted) return [];
       if (!normalizedQuery) return [{ item, supplementalMatch: false }];
       const primaryText = `${item.name ?? ''}\n${item.firstMessage ?? ''}\n${item.allMessagesText ?? ''}`.toLocaleLowerCase();
       const primaryMatch = primaryText.includes(normalizedQuery);
@@ -1067,18 +1081,30 @@ async function listSessions(query = sessionQuery): Promise<void> {
         && sessionSupplementalSearchMatches(item.path, normalizedQuery);
       return primaryMatch || supplementalMatch ? [{ item, supplementalMatch }] : [];
     });
+    if (controller.signal.aborted) return;
+    const visibleSessions = allWorkspaces
+      ? matchingSessions.slice(0, MAX_CROSS_WORKSPACE_SESSION_RESULTS)
+      : matchingSessions;
     send('sessions', {
-      sessionPaths: sessions.map((item: any) => String(item.path ?? '')),
-      sessions: matchingSessions.map(({ item, supplementalMatch }) => ({
+      allWorkspaces,
+      total: matchingSessions.length,
+      truncated: visibleSessions.length < matchingSessions.length,
+      sessionPaths: visibleSessions.map(({ item }) => String(item.path ?? '')),
+      sessions: visibleSessions.map(({ item, supplementalMatch }) => ({
         id: String(item.id ?? ''),
         path: String(item.path ?? ''),
+        cwd: typeof item.cwd === 'string' ? item.cwd.slice(0, 4096) : '',
         title: String(item.name ?? item.firstMessage ?? 'New chat').replace(/\s+/g, ' ').slice(0, 96),
         modified: item.modified instanceof Date ? item.modified.getTime() : 0,
         ...(supplementalMatch ? { searchMatch: 'thinking-or-tool-activity' } : {}),
       })),
     });
   } catch (error) {
-    send('runtime-error', { message: error instanceof Error ? error.message : 'Could not read Pi sessions.' });
+    if (!controller.signal.aborted) {
+      send('runtime-error', { message: error instanceof Error ? error.message : 'Could not read Pi sessions.' });
+    }
+  } finally {
+    if (sessionListController === controller) sessionListController = undefined;
   }
 }
 
@@ -1441,6 +1467,8 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'dispose': {
         if (disposing) return;
         disposing = true;
+        sessionListController?.abort();
+        sessionListController = undefined;
         providerAuthController?.abort();
         for (const resolve of pendingUiRequests.values()) resolve(undefined);
         pendingUiRequests.clear();
@@ -1464,7 +1492,10 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'listSessions':
-        await listSessions(typeof input.query === 'string' ? input.query : sessionQuery);
+        await listSessions(
+          typeof input.query === 'string' ? input.query : sessionQuery,
+          typeof input.allWorkspaces === 'boolean' ? input.allWorkspaces : sessionSearchAllWorkspaces,
+        );
         return;
       case 'getOptions':
         sendOptions();

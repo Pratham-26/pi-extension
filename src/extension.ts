@@ -80,6 +80,8 @@ type PiResourceChoice = vscode.QuickPickItem & {
 };
 
 const VIEW_ID = 'piChat.chatView';
+const PENDING_SESSION_HANDOFF_KEY = 'piChat.pendingSessionHandoff';
+const SESSION_HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;
 const MAX_ATTACHMENT_BYTES = 1024 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_CHARS = 40_000;
@@ -88,6 +90,29 @@ const MAX_GIT_DIFF_CHARS = 500_000;
 const MAX_GIT_DRAFT_CHARS = 30_000;
 const MAX_GIT_DRAFT_FILES = 24;
 const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
+
+type PendingSessionHandoff = {
+  sessionPath: string;
+  cwd: string;
+  createdAt: number;
+  token: string;
+};
+
+function isPendingSessionHandoff(value: unknown): value is PendingSessionHandoff {
+  if (!value || typeof value !== 'object') return false;
+  const handoff = value as Partial<PendingSessionHandoff>;
+  return typeof handoff.sessionPath === 'string'
+    && handoff.sessionPath.length <= 4096
+    && !/[\u0000-\u001f\u007f]/.test(handoff.sessionPath)
+    && path.isAbsolute(handoff.sessionPath)
+    && typeof handoff.cwd === 'string'
+    && handoff.cwd.length <= 4096
+    && !/[\u0000-\u001f\u007f]/.test(handoff.cwd)
+    && path.isAbsolute(handoff.cwd)
+    && Number.isSafeInteger(handoff.createdAt)
+    && typeof handoff.token === 'string'
+    && /^[a-f0-9]{32}$/.test(handoff.token);
+}
 
 function isValidBase64ImageData(data: string): boolean {
   if (!data || data.length % 4 !== 0) return false;
@@ -127,6 +152,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerWorkspace?: string;
   private webviewMessageSubscription?: vscode.Disposable;
   private sessionQuery = '';
+  private sessionSearchAllWorkspaces = false;
+  private sessionWorkspaceByPath = new Map<string, string>();
   private activeSessionPath = '';
   private openLatestSessionOnStart: boolean;
   private latestSessionOpenAttempted = false;
@@ -286,6 +313,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.pendingPiResourcePicker = undefined;
     this.workerWorkspace = undefined;
     this.knownSessionPaths.clear();
+    this.sessionWorkspaceByPath.clear();
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
@@ -312,7 +340,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const cwd = folder.uri.fsPath;
     if (this.worker && this.workerWorkspace === cwd) {
       this.post({ type: 'workspace', hasWorkspace: true, name: folder.name });
-      this.worker.postMessage({ type: 'listSessions' });
+      this.refreshSessions();
       return;
     }
 
@@ -324,6 +352,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.failPendingMcpSetting(previous);
     if (previous) this.stopWorker(previous);
     this.knownSessionPaths.clear();
+    this.sessionWorkspaceByPath.clear();
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
@@ -392,27 +421,56 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           ? message.sessionPaths
           : (message.sessions as Array<Record<string, unknown>>).map((item) => item.path);
         this.knownSessionPaths = new Set(allSessionPaths
-          .filter((value): value is string => typeof value === 'string')
+          .filter((value): value is string => typeof value === 'string' && value.length <= 4096)
           .map((value) => this.normalizeSessionPath(value)));
+        const sessionItems = message.sessions as Array<Record<string, unknown>>;
+        this.sessionWorkspaceByPath = new Map(sessionItems.flatMap((item): Array<[string, string]> => {
+          if (typeof item.path !== 'string' || item.path.length > 4096
+            || typeof item.cwd !== 'string' || !item.cwd || item.cwd.length > 4096
+            || /[\u0000-\u001f\u007f]/.test(item.cwd)) return [];
+          try {
+            return [[this.normalizeSessionPath(item.path), item.cwd]];
+          } catch {
+            return [];
+          }
+        }));
         const pins = this.context.globalState.get<Record<string, boolean>>('piChat.pinnedSessions', {});
         const colors = this.context.globalState.get<Record<string, string>>('piChat.sessionColors', {});
         const order = this.context.globalState.get<string[]>('piChat.sessionOrder', []);
         const orderIndex = new Map(order.map((path, index) => [path, index]));
-        const sessions: Array<Record<string, unknown>> = (message.sessions as Array<Record<string, unknown>>)
-          .map((item): Record<string, unknown> => ({
-            ...item,
-            pinned: Boolean(pins[String(item.path ?? '')]),
-            color: colors[String(item.path ?? '')] ?? 'default',
-          }))
+        const currentWorkspace = this.workerWorkspace ?? '';
+        const allWorkspaces = message.allWorkspaces === true;
+        const sessions: Array<Record<string, unknown>> = sessionItems
+          .map((item): Record<string, unknown> => {
+            const workspacePath = typeof item.cwd === 'string' && item.cwd.length <= 4096
+              && !/[\u0000-\u001f\u007f]/.test(item.cwd) ? item.cwd : '';
+            let isCurrentWorkspace = !allWorkspaces && !workspacePath;
+            if (workspacePath && currentWorkspace) {
+              try {
+                isCurrentWorkspace = this.normalizeSessionPath(workspacePath) === this.normalizeSessionPath(currentWorkspace);
+              } catch {
+                isCurrentWorkspace = false;
+              }
+            }
+            return {
+              ...item,
+              workspacePath,
+              workspaceName: workspacePath ? path.basename(workspacePath).slice(0, 128) : 'Unknown workspace',
+              isCurrentWorkspace,
+              pinned: Boolean(pins[String(item.path ?? '')]),
+              color: colors[String(item.path ?? '')] ?? 'default',
+            };
+          })
           .sort((a, b) => Number(b['pinned']) - Number(a['pinned'])
             || (orderIndex.get(String(a['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(String(b['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER)
             || Number(b['modified'] ?? 0) - Number(a['modified'] ?? 0));
+        this.consumePendingSessionHandoff(worker);
         this.post({ ...message, sessions });
         if (this.openLatestSessionOnStart && !this.latestSessionOpenAttempted) {
           this.latestSessionOpenAttempted = true;
           if (!this.sessionInteractionStarted && !this.activeSessionPath) {
             const latest = sessions
-              .filter((item) => this.isKnownSessionPath(item['path']))
+              .filter((item) => item['isCurrentWorkspace'] === true && this.isKnownSessionPath(item['path']))
               .reduce<Record<string, unknown> | undefined>((current, item) =>
                 !current || Number(item['modified'] ?? 0) > Number(current['modified'] ?? 0) ? item : current, undefined);
             if (latest && typeof latest['path'] === 'string') {
@@ -507,8 +565,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.setPinnedActiveFile(false);
         return;
       case 'ready':
+        this.sessionSearchAllWorkspaces = message.allWorkspaces === true;
         await this.ensureRuntime();
-        this.worker?.postMessage({ type: 'listSessions' });
+        this.refreshSessions();
         this.worker?.postMessage({ type: 'listPackages' });
         await this.refreshGitChanges();
         this.publishPinnedActiveFile();
@@ -544,7 +603,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'listSessions':
         this.sessionQuery = typeof message.query === 'string' ? message.query.slice(0, 250) : this.sessionQuery;
-        this.worker?.postMessage({ type: 'listSessions', query: this.sessionQuery });
+        this.sessionSearchAllWorkspaces = message.allWorkspaces === true;
+        this.refreshSessions();
         return;
       case 'toggleSessionPin': {
         if (!this.isKnownSessionPath(message.path)) return;
@@ -553,7 +613,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (next[message.path]) delete next[message.path];
         else next[message.path] = true;
         await this.context.globalState.update('piChat.pinnedSessions', next);
-        this.worker?.postMessage({ type: 'listSessions', query: this.sessionQuery });
+        this.refreshSessions();
         return;
       }
       case 'colorSession': {
@@ -574,7 +634,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (selected.value === 'default') delete next[message.path];
         else next[message.path] = selected.value;
         await this.context.globalState.update('piChat.sessionColors', next);
-        this.worker?.postMessage({ type: 'listSessions', query: this.sessionQuery });
+        this.refreshSessions();
         return;
       }
       case 'reorderSessions': {
@@ -584,7 +644,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const visible = new Set(proposed);
         const order = [...proposed, ...prior.filter((item) => this.isKnownSessionPath(item) && !visible.has(item))];
         await this.context.globalState.update('piChat.sessionOrder', order);
-        this.worker?.postMessage({ type: 'listSessions', query: this.sessionQuery });
+        this.refreshSessions();
         return;
       }
       case 'renameSession': {
@@ -632,13 +692,30 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         await vscode.workspace.fs.delete(vscode.Uri.file(message.path));
-        this.worker?.postMessage({ type: 'listSessions', query: this.sessionQuery });
+        this.refreshSessions();
         return;
       }
       case 'openSession':
         this.sessionInteractionStarted = true;
-        if (this.isKnownSessionPath(message.path)) this.worker?.postMessage({ type: 'openSession', path: message.path });
-        else this.post({ type: 'notice', message: 'That session is not in the current workspace session list.', isError: true });
+        if (!this.isKnownSessionPath(message.path)) {
+          this.post({ type: 'notice', message: 'That session is no longer in the session list. Refresh history and try again.', isError: true });
+          return;
+        }
+        try {
+          const targetCwd = this.sessionWorkspaceByPath.get(this.normalizeSessionPath(message.path));
+          if (targetCwd && this.workerWorkspace
+            && this.normalizeSessionPath(targetCwd) !== this.normalizeSessionPath(this.workerWorkspace)) {
+            await this.openSessionInWorkspace(message.path, targetCwd);
+            return;
+          }
+          if (!targetCwd && this.sessionSearchAllWorkspaces) {
+            this.post({ type: 'notice', message: 'This older Pi session does not record its workspace path, so it cannot be opened safely from global search.', isError: true });
+            return;
+          }
+          this.worker?.postMessage({ type: 'openSession', path: message.path });
+        } catch {
+          this.post({ type: 'notice', message: 'Could not open this Pi session. Refresh history and try again.', isError: true });
+        }
         return;
       case 'stop':
         this.worker?.postMessage({ type: 'stop' });
@@ -2310,6 +2387,132 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private refreshSessions(): void {
+    this.worker?.postMessage({
+      type: 'listSessions',
+      query: this.sessionQuery,
+      allWorkspaces: this.sessionSearchAllWorkspaces,
+    });
+  }
+
+  private async openSessionInWorkspace(sessionPath: string, cwd: string): Promise<void> {
+    if (!path.isAbsolute(cwd) || cwd.length > 4096 || /[\u0000-\u001f\u007f]/.test(cwd)) {
+      this.post({ type: 'notice', message: 'This session has an invalid workspace path and cannot be opened.', isError: true });
+      return;
+    }
+    const workspaceUri = vscode.Uri.file(cwd);
+    try {
+      const stats = await vscode.workspace.fs.stat(workspaceUri);
+      if ((stats.type & vscode.FileType.Directory) === 0) {
+        this.post({ type: 'notice', message: 'This session workspace folder no longer exists.', isError: true });
+        return;
+      }
+    } catch {
+      this.post({ type: 'notice', message: 'This session workspace folder cannot be accessed.', isError: true });
+      return;
+    }
+
+    const answer = await vscode.window.showWarningMessage(
+      `Open this Pi session in a new VS Code window?\n${cwd}\nThe folder's VS Code settings, tasks, and extensions may load there. Pi will still apply its workspace trust checks.`,
+      { modal: true },
+      'Open new window',
+    );
+    if (answer !== 'Open new window') return;
+    if (!this.isKnownSessionPath(sessionPath)
+      || this.sessionWorkspaceByPath.get(this.normalizeSessionPath(sessionPath)) !== cwd) {
+      this.post({ type: 'notice', message: 'The session changed while confirmation was open. Refresh history and try again.', isError: true });
+      return;
+    }
+
+    const prior = this.context.globalState.get<unknown>(PENDING_SESSION_HANDOFF_KEY);
+    const priorAge = isPendingSessionHandoff(prior) ? Date.now() - prior.createdAt : Number.POSITIVE_INFINITY;
+    if (isPendingSessionHandoff(prior) && priorAge >= 0 && priorAge <= SESSION_HANDOFF_MAX_AGE_MS) {
+      this.post({ type: 'notice', message: 'Another session is already opening in a VS Code workspace. Finish that switch before starting another.', isError: true });
+      return;
+    }
+    if (prior !== undefined) await this.context.globalState.update(PENDING_SESSION_HANDOFF_KEY, undefined);
+
+    const handoff: PendingSessionHandoff = {
+      sessionPath,
+      cwd,
+      createdAt: Date.now(),
+      token: randomBytes(16).toString('hex'),
+    };
+    await this.context.globalState.update(PENDING_SESSION_HANDOFF_KEY, handoff);
+    try {
+      const opened = await vscode.commands.executeCommand<boolean>('vscode.openFolder', workspaceUri, { forceNewWindow: true });
+      if (opened === false) {
+        await this.clearSessionHandoff(handoff.token);
+        this.post({ type: 'notice', message: 'VS Code did not open the session workspace.', isError: true });
+      }
+    } catch {
+      await this.clearSessionHandoff(handoff.token);
+      this.post({ type: 'notice', message: 'Could not open the session workspace in a new VS Code window.', isError: true });
+    }
+  }
+
+  private consumePendingSessionHandoff(worker: Worker): void {
+    const candidate = this.context.globalState.get<unknown>(PENDING_SESSION_HANDOFF_KEY);
+    if (candidate === undefined) return;
+    if (!isPendingSessionHandoff(candidate)) {
+      void this.clearInvalidSessionHandoff(candidate);
+      return;
+    }
+    const handoff = candidate;
+    const age = Date.now() - handoff.createdAt;
+    if (age < 0 || age > SESSION_HANDOFF_MAX_AGE_MS) {
+      void this.clearSessionHandoff(handoff.token);
+      return;
+    }
+    if (typeof this.workerWorkspace !== 'string') return;
+    try {
+      if (this.normalizeSessionPath(handoff.cwd) !== this.normalizeSessionPath(this.workerWorkspace)) return;
+    } catch {
+      void this.clearSessionHandoff(handoff.token);
+      return;
+    }
+    if (this.worker !== worker) return;
+    if (!this.isKnownSessionPath(handoff.sessionPath)) {
+      void this.clearSessionHandoff(handoff.token);
+      this.post({ type: 'notice', message: 'The requested Pi session is no longer available in this workspace.', isError: true });
+      return;
+    }
+
+    this.sessionInteractionStarted = true;
+    void (async () => {
+      await this.clearSessionHandoff(handoff.token);
+      if (this.worker === worker && this.isKnownSessionPath(handoff.sessionPath)) {
+        worker.postMessage({ type: 'openSession', path: handoff.sessionPath });
+      }
+    })().catch(() => this.post({ type: 'notice', message: 'Could not restore the selected Pi session.', isError: true }));
+  }
+
+  private async clearSessionHandoff(token: string): Promise<void> {
+    if (!/^[a-f0-9]{32}$/.test(token)) return;
+    const current = this.context.globalState.get<PendingSessionHandoff>(PENDING_SESSION_HANDOFF_KEY);
+    if (current && typeof current.token === 'string' && current.token === token) {
+      await this.context.globalState.update(PENDING_SESSION_HANDOFF_KEY, undefined);
+    }
+  }
+
+  private async clearInvalidSessionHandoff(candidate: unknown): Promise<void> {
+    const current = this.context.globalState.get<unknown>(PENDING_SESSION_HANDOFF_KEY);
+    if (current === candidate) {
+      await this.context.globalState.update(PENDING_SESSION_HANDOFF_KEY, undefined);
+      return;
+    }
+    if (!current || typeof current !== 'object') return;
+    if (!candidate || typeof candidate !== 'object') return;
+    const expected = candidate as Record<string, unknown>;
+    const actual = current as Record<string, unknown>;
+    if (actual.sessionPath === expected.sessionPath
+      && actual.cwd === expected.cwd
+      && actual.createdAt === expected.createdAt
+      && actual.token === expected.token) {
+      await this.context.globalState.update(PENDING_SESSION_HANDOFF_KEY, undefined);
+    }
+  }
+
   private composePrompt(text: string, attachments: Attachment[]): string {
     const safeAttachments = attachments.filter(
       (item): item is Attachment => Boolean(item && typeof item.context === 'string' && typeof item.path === 'string'),
@@ -2533,7 +2736,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
       <aside id="history-panel" class="history-panel" aria-label="Recent sessions" hidden>
         <div class="history-heading"><span>Recent sessions</span><button id="close-history" class="icon-button small" type="button" title="Close" aria-label="Close recent sessions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-        <input id="session-search" class="session-search" type="search" aria-label="Search sessions" placeholder="Search chats, thinking, and tool activity">
+        <div class="session-search-row">
+          <input id="session-search" class="session-search" type="search" aria-label="Search sessions" placeholder="Search chats, thinking, and tool activity">
+          <label class="session-search-scope" title="Search Pi session history from every workspace on this machine"><input id="session-search-all" type="checkbox"><span>All workspaces</span></label>
+        </div>
+        <div id="session-results-note" class="session-results-note" aria-live="polite" hidden></div>
         <div id="session-list" class="session-list"></div>
         <div id="session-empty" class="session-empty" hidden>No matching sessions.</div>
       </aside>
