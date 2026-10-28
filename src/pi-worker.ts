@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isPiPackageSource } from './package-source';
+import { parsePromptSuggestions } from './prompt-suggestions';
 import {
   createAgentSession,
   createCodemodeExtension,
@@ -3012,36 +3013,6 @@ async function manageConfiguredPackage(input: WorkerInput): Promise<void> {
     snapshot();
     sendOptions();
   }
-}
-
-function parsePromptSuggestions(value: string): string[] {
-  const source = value.slice(0, 8_000).trim();
-  const jsonStart = source.indexOf('[');
-  const jsonEnd = source.lastIndexOf(']');
-  let candidates: unknown[] = [];
-  if (jsonStart >= 0 && jsonEnd > jsonStart) {
-    try {
-      const parsed = JSON.parse(source.slice(jsonStart, jsonEnd + 1));
-      if (Array.isArray(parsed)) candidates = parsed;
-    } catch {
-      // Fall back to bounded line parsing when the model did not return valid JSON.
-    }
-  }
-  if (candidates.length === 0) candidates = source.split(/\r?\n/);
-  const suggestions: string[] = [];
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string') continue;
-    const cleaned = candidate
-      .replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '')
-      .replace(/^['"“”]+|['"“”]+$/g, '')
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (cleaned.length < 8 || cleaned.length > 240 || suggestions.some((item) => item.toLowerCase() === cleaned.toLowerCase())) continue;
-    suggestions.push(cleaned);
-    if (suggestions.length === 3) break;
-  }
-  return suggestions;
 }
 
 async function suggestFollowUps(input: WorkerInput): Promise<void> {
