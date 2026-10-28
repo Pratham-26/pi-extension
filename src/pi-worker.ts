@@ -32,6 +32,8 @@ type WorkerInput = {
   commandName?: string;
   argumentPrefix?: string;
   requestId?: string;
+  toolCallId?: string;
+  sessionPath?: string;
   enabled?: boolean;
   expectedEnabled?: boolean;
   value?: unknown;
@@ -229,6 +231,8 @@ let piThemeModulePromise: Promise<PiThemeModule | undefined> | undefined;
 let piThemeModule: PiThemeModule | undefined;
 const toolRendererStates = new Map<string, ToolRendererState>();
 const MAX_TOOL_RENDERER_STATES = 160;
+const lazyToolRendererRequests = new Set<string>();
+const MAX_LAZY_TOOL_RENDER_REQUESTS = 64;
 let defaultTools: string[] = [];
 let sessionExtensionsBound = false;
 let disabledSkills = new Set<string>();
@@ -938,6 +942,50 @@ function renderPiToolResult(
   }
 }
 
+function renderSavedToolCall(input: WorkerInput): void {
+  const toolCallId = typeof input.toolCallId === 'string' ? input.toolCallId : '';
+  if (!toolCallId || toolCallId.length > 256 || /[\u0000-\u001f\u007f]/.test(toolCallId)) return;
+  const current = session;
+  if (!current || typeof input.sessionPath !== 'string' || input.sessionPath.length > 4096
+    || /[\u0000-\u001f\u007f]/.test(input.sessionPath) || input.sessionPath !== current.sessionFile) return;
+  if (lazyToolRendererRequests.has(toolCallId) || lazyToolRendererRequests.size >= MAX_LAZY_TOOL_RENDER_REQUESTS) return;
+  lazyToolRendererRequests.add(toolCallId);
+
+  const entries = current.sessionManager?.buildContextEntries();
+  if (!entries) return;
+  let call: { name: string; args: unknown } | undefined;
+  let result: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown } | undefined;
+  for (const entry of entries) {
+    const message = entry.message;
+    if (entry.type !== 'message' || !message) continue;
+    if (message.role === 'assistant' && Array.isArray(message.content)) {
+      for (const part of message.content as Array<Record<string, unknown>>) {
+        if (part.type !== 'toolCall' || part.id !== toolCallId) continue;
+        call = {
+          name: typeof part.name === 'string' ? part.name.slice(0, 128) : 'tool',
+          args: boundedToolValue(part.arguments ?? {}),
+        };
+      }
+    } else if (message.role === 'toolResult' && message.toolCallId === toolCallId) {
+      result = message;
+    }
+  }
+  if (!call || !result) return;
+
+  const theme = getCurrentToolRendererTheme(current);
+  const rendererCall = renderPiToolCall(current, toolCallId, call.name, call.args, theme);
+  const rendererResult = renderPiToolResult(current, toolCallId, call.name, call.args, result, theme, {
+    isPartial: false,
+    isError: result.isError === true,
+  });
+  send('tool-renderer', {
+    toolCallId,
+    sessionPath: current.sessionFile,
+    ...(rendererCall ? { rendererCall } : {}),
+    ...(rendererResult ? { rendererResult } : {}),
+  });
+}
+
 function boundedUiText(value: unknown, maxLength: number): string {
   try {
     return String(value ?? '').slice(0, maxLength);
@@ -1375,6 +1423,7 @@ function snapshot(): void {
         result: toolOutput(entry.message),
         details: toolDetails(entry.message),
         isError: entry.message.isError === true,
+        rendererDeferred: Boolean(call && !renderableToolCallIds.has(toolCallId)),
         ...(rendererCall ? { rendererCall } : {}),
         ...(rendererResult ? { rendererResult } : {}),
         ...(imageCount ? { imageContent: entry.message.content, imageCount, hasImages: true } : {}),
@@ -1591,6 +1640,7 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   streamingMarkdownOverflow = false;
   lastStreamingMarkdownTransformAt = 0;
   toolRendererStates.clear();
+  lazyToolRendererRequests.clear();
   await loadToolRendererTheme(next);
   sessionExtensionsBound = extensionsBound;
   busy = false;
@@ -2627,6 +2677,9 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       case 'suggestFollowUps':
         await suggestFollowUps(input);
+        return;
+      case 'renderSavedToolCall':
+        renderSavedToolCall(input);
         return;
       case 'cancelPromptSuggestions':
         if (typeof input.requestId === 'string' && activePromptSuggestion?.requestId === input.requestId) {

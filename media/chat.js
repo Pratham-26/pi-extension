@@ -1587,6 +1587,14 @@ function updateToolRendererCard(card, message, statusText) {
   }
 }
 
+function requestDeferredToolRenderer(message) {
+  if (message.rendererDeferred !== true || message.lazyRendererRequested === true) return;
+  const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId.slice(0, 256) : '';
+  if (!toolCallId) return;
+  message.lazyRendererRequested = true;
+  post('renderSavedToolCall', { toolCallId, sessionPath: state.sessionPath });
+}
+
 function createHistoricalToolCard(message) {
   const detail = document.createElement('details');
   detail.className = `tool-card historical-tool-card${message.isError ? ' tool-error' : ''}`;
@@ -1594,11 +1602,15 @@ function createHistoricalToolCard(message) {
   detail.open = toolExpansionPreference(toolName, Boolean(message.isError));
   detail.dataset.toolId = String(message.toolCallId || '').slice(0, 256);
   detail.dataset.toolName = toolName;
+  detail.addEventListener('toggle', () => {
+    if (detail.open) requestDeferredToolRenderer(message);
+  });
   const summary = document.createElement('summary');
   detail.append(summary);
   updateToolRendererCard(detail, message, `${message.isError ? 'Failed' : 'Finished'} ${toolName}`);
   renderToolImages(detail, message);
   appendStructuredToolDetails(detail, message.details);
+  if (detail.open) requestDeferredToolRenderer(message);
   return detail;
 }
 
@@ -3605,6 +3617,18 @@ window.addEventListener('message', (event) => {
           card.open = toolExpansionPreference(toolName, Boolean(data.isError));
         }
       }
+      break;
+    }
+    case 'tool-renderer': {
+      const toolId = String(data.toolCallId || '').slice(0, 256);
+      if (data.sessionPath !== state.sessionPath || !toolId) break;
+      const toolMessage = [...state.messages].reverse().find((message) => message.role === 'tool' && message.toolCallId === toolId);
+      if (!toolMessage) break;
+      toolMessage.rendererDeferred = false;
+      toolMessage.rendererCall = Array.isArray(data.rendererCall) ? data.rendererCall : undefined;
+      toolMessage.rendererResult = data.rendererResult && typeof data.rendererResult === 'object' ? data.rendererResult : undefined;
+      const card = toolMessage.node instanceof HTMLElement ? toolMessage.node : [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === toolId);
+      if (card) updateToolRendererCard(card, toolMessage, `${toolMessage.isError ? 'Failed' : 'Finished'} ${String(toolMessage.toolName || 'tool').slice(0, 128)}`);
       break;
     }
     case 'run-started':

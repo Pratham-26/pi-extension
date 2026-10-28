@@ -1611,6 +1611,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'completeExtensionCommand':
         this.worker?.postMessage(message);
         return;
+      case 'renderSavedToolCall':
+        if (typeof message.toolCallId === 'string' && message.toolCallId.length <= 256
+          && !/[\u0000-\u001f\u007f]/.test(message.toolCallId)
+          && typeof message.sessionPath === 'string' && message.sessionPath.length <= 4096
+          && !/[\u0000-\u001f\u007f]/.test(message.sessionPath)) {
+          this.worker?.postMessage({ type: 'renderSavedToolCall', toolCallId: message.toolCallId, sessionPath: message.sessionPath });
+        }
+        return;
       case 'refreshModels': {
         const answer = await vscode.window.showWarningMessage(
           'Refresh configured model catalogs? Pi may contact provider endpoints and run API-key commands configured in its model settings.',
