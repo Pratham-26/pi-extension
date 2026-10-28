@@ -416,6 +416,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.notifications.sound')) activeProvider.onNotificationSoundConfigurationChanged();
         if (event.affectsConfiguration('piChat.models.autoRefresh')) activeProvider.onModelRefreshConfigurationChanged();
         if (event.affectsConfiguration('piChat.queue.defaultAction')) activeProvider.onQueueDefaultActionConfigurationChanged();
+        if (event.affectsConfiguration('piChat.appearance')) activeProvider.onAppearanceConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -605,6 +606,19 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private postQueueDefaultAction(): void {
     const value = vscode.workspace.getConfiguration('piChat.queue').get<unknown>('defaultAction', 'followUp');
     this.post({ type: 'queue-default-action', action: value === 'steer' ? 'steer' : 'followUp' });
+  }
+
+  onAppearanceConfigurationChanged(): void {
+    const appearance = vscode.workspace.getConfiguration('piChat.appearance');
+    const fontSize = appearance.get<number>('fontSize', 0);
+    this.post({
+      type: 'appearance-settings',
+      userMessagesOnRight: appearance.get<boolean>('userMessagesOnRight', true),
+      tintUserMessages: appearance.get<boolean>('tintUserMessages', true),
+      strongerContrast: appearance.get<boolean>('strongerContrast', false),
+      fontSize: Number.isInteger(fontSize) && fontSize >= 10 && fontSize <= 24 ? fontSize : 0,
+      smoothScrolling: appearance.get<boolean>('smoothScrolling', true),
+    });
   }
 
   async newSession(): Promise<void> {
@@ -1792,6 +1806,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.post({ type: 'saved-drafts', drafts: draftStore.normalizeStore(this.context.globalState.get<unknown>('piChat.savedDrafts')) });
         this.post({ type: 'extension-widget-pins', keys: this.getPinnedExtensionWidgetKeys() });
         this.postExtensionStatusPreferences();
+        this.onAppearanceConfigurationChanged();
         await this.ensureRuntime();
         this.refreshSessions();
         this.worker?.postMessage({ type: 'listPackages' });

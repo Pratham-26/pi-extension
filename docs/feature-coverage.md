@@ -16,6 +16,10 @@ This checklist tracks implemented and pending product capabilities as of 29 Octo
 - [~] In-app Pi controls for automatic retry, automatic compaction, cache warming, and Pi startup network mode; Pi's configuration folder can be changed with a machine-scoped setting and folder picker. A per-workspace picker enables or excludes up to 500 Pi-discovered `AGENTS.md` context files and applies changes through a confirmed resource reload. Manage up to 32 uppercase custom runtime variables through VS Code SecretStorage (8,192 characters total); values are hidden during entry, excluded from diagnostics, and passed to Pi, its tools, and loaded extensions only after a manual runtime restart. Process-loader and runtime-control names are blocked. An OS sandbox remains unavailable.
 - [~] Settings open the extension's searchable VS Code settings and Pi's `settings.json`. In-chat Pi controls cover queue delivery modes, thinking visibility, cache-miss notices, sharing destination, model defaults, automatic compaction/retry, startup networking, cache warming, and Pi install/update telemetry; remaining Pi-specific settings must be edited in the file.
 
+## Appearance and accessibility
+
+- [x] Align and tint user messages, increase secondary-text and separator contrast, set the chat base font size or inherit VS Code's size, and enable smooth transcript navigation while respecting the operating system's reduced-motion preference.
+
 ## Chat and transcript
 
 - [x] Stream Pi replies; stop a run; show live tool start, update, and result cards.

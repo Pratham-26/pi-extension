@@ -7,6 +7,7 @@ const state = {
   workspaceName: '',
   notificationSoundEnabled: false,
   autoRefreshModelsEnabled: false,
+  appearance: { smoothScrolling: true },
   sessionPath: typeof persistedWebviewState.sessionPath === 'string'
     && persistedWebviewState.sessionPath.length <= 4096
     && !/[\u0000-\u001f\u007f]/.test(persistedWebviewState.sessionPath)
@@ -671,6 +672,26 @@ function updateWorkspace(name, hasWorkspace) {
     ui.notice.hidden = true;
   }
   updateControls();
+}
+
+function applyAppearanceSettings(data) {
+  const root = document.documentElement;
+  root.classList.toggle('user-messages-left', data.userMessagesOnRight === false);
+  root.classList.toggle('untinted-user-messages', data.tintUserMessages === false);
+  root.classList.toggle('stronger-contrast', data.strongerContrast === true);
+  const fontSize = Number(data.fontSize);
+  if (Number.isInteger(fontSize) && fontSize >= 10 && fontSize <= 24) {
+    root.style.setProperty('--pi-chat-font-size', `${fontSize}px`);
+  } else {
+    root.style.removeProperty('--pi-chat-font-size');
+  }
+  state.appearance.smoothScrolling = data.smoothScrolling !== false;
+}
+
+function scrollTranscriptTarget(target, block = 'center') {
+  if (!(target instanceof Element)) return;
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  target.scrollIntoView({ block, behavior: state.appearance.smoothScrolling && !reducedMotion ? 'smooth' : 'auto' });
 }
 
 function updateControls() {
@@ -2552,7 +2573,7 @@ function updateChatSearch(moveToCurrent = false) {
     if (toolGroup instanceof HTMLDetailsElement) toolGroup.open = true;
     const toolCard = row?.closest('.tool-card');
     if (toolCard instanceof HTMLDetailsElement) toolCard.open = true;
-    row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    scrollTranscriptTarget(row);
   }
 }
 
@@ -2687,7 +2708,7 @@ function jumpToQuotedMessage(entryId) {
     showNotice('The quoted message is not visible in this transcript.');
     return;
   }
-  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  scrollTranscriptTarget(row);
   row.classList.add('quote-reference-target');
   setTimeout(() => row.classList.remove('quote-reference-target'), 1800);
 }
@@ -3213,7 +3234,7 @@ function renderBookmarks() {
         .find((item) => item.dataset.entryId === message.entryId);
       ui.bookmarkPanel.hidden = true;
       ui.bookmarkToggle.setAttribute('aria-expanded', 'false');
-      row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      scrollTranscriptTarget(row);
       if (row) {
         row.classList.add('bookmark-flash');
         setTimeout(() => row.classList.remove('bookmark-flash'), 1400);
@@ -4710,6 +4731,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'workspace':
       updateWorkspace(data.name, data.hasWorkspace);
+      break;
+    case 'appearance-settings':
+      applyAppearanceSettings(data);
       break;
     case 'dismiss-composer-popovers':
       closeComposerPopovers();

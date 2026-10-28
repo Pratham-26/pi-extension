@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.108",
+  "version": "0.1.109",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -261,6 +261,38 @@
           "default": false,
           "scope": "machine",
           "description": "Open successful tool cards by default in the Pi Chat transcript. Errors remain expanded."
+        },
+        "piChat.appearance.userMessagesOnRight": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Align your messages to the right side of the Pi Chat transcript."
+        },
+        "piChat.appearance.tintUserMessages": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Give your Pi Chat messages a subtle accent tint."
+        },
+        "piChat.appearance.strongerContrast": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Increase contrast for secondary text and separators in Pi Chat."
+        },
+        "piChat.appearance.fontSize": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24,
+          "default": 0,
+          "scope": "window",
+          "description": "Set the Pi Chat base font size in pixels. Use 0 to follow VS Code; explicit values from 10 to 24 are applied."
+        },
+        "piChat.appearance.smoothScrolling": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Use smooth scrolling when navigating the Pi Chat transcript."
         },
         "piChat.models.autoRefresh": {
           "type": "boolean",

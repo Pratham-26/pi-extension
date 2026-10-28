@@ -22,7 +22,7 @@ html, body {
   color: var(--text);
   background: var(--surface);
   font-family: var(--vscode-font-family, sans-serif);
-  font-size: var(--vscode-font-size, 13px);
+  font-size: var(--pi-chat-font-size, var(--vscode-font-size, 13px));
 }
 
 body { min-width: 0; }
@@ -407,7 +407,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .message-row.search-current { outline: 2px solid var(--focus); outline-offset: 4px; border-radius: 3px; }
 .message-row.quote-reference-target { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 5px; transition: outline-color 180ms ease; }
 .message-row.bookmark-flash { background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 5px; transition: background 1400ms ease-out; }
+:root.stronger-contrast {
+  --muted: color-mix(in srgb, var(--text) 84%, var(--surface));
+  --line: color-mix(in srgb, var(--text) 30%, transparent);
+}
 .message-row.user { align-items: flex-end; }
+:root.user-messages-left .message-row.user { align-items: flex-start; }
+.message-row.user .message-actions { justify-content: flex-end; }
+:root.user-messages-left .message-row.user .message-actions { justify-content: flex-start; }
 .message-row.custom-message .message-role, .message-row.custom-entry .message-role { color: var(--accent); }
 .message-role { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.03em; }
 .message-content { min-width: 0; max-width: 72ch; overflow-wrap: anywhere; line-height: 1.58; }
@@ -421,9 +428,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 9px 9px 3px 9px;
-  background: var(--surface-raised);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised));
   white-space: pre-wrap;
 }
+:root.untinted-user-messages .message-row.user .message-content { background: var(--surface-raised); }
+:root.user-messages-left .message-row.user .message-content { border-radius: 9px 9px 9px 3px; }
 .message-image-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 6px; max-width: min(100%, 480px); margin-top: 8px; }
 .message-transcript-image { display: block; width: 100%; max-height: 300px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-raised); object-fit: contain; }
 .message-image-summary, .message-image-unavailable { margin-top: 5px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; }
