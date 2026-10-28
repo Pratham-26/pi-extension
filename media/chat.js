@@ -5798,15 +5798,17 @@ function dismissComposerPopoversFromOutside(event) {
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
   const target = event.target;
   const isInside = (element) => {
-    if (eventPath.includes(element) || (target instanceof Node && element.contains(target))) return true;
-
     // Webview events can be retargeted at an embedding boundary. The DOM path
-    // then names an outer host instead of the popup that visually received the
-    // pointer, so use its coordinates as a second source of truth.
-    if (!event.isTrusted || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
-    const bounds = element.getBoundingClientRect();
-    return event.clientX >= bounds.left && event.clientX <= bounds.right
-      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+    // can also retain the original target during pointer capture. For trusted
+    // pointer input, its final position is the reliable outside-click signal.
+    const hasPointerPosition = event.type.startsWith('pointer') || event.type === 'mousedown'
+      || (event.type === 'click' && event.detail > 0);
+    if (event.isTrusted && hasPointerPosition && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+      const bounds = element.getBoundingClientRect();
+      return event.clientX >= bounds.left && event.clientX <= bounds.right
+        && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+    }
+    return eventPath.includes(element) || (target instanceof Node && element.contains(target));
   };
   if (openPopovers.some(([popover, toggle]) => isInside(popover) || isInside(toggle))) return;
   if (draftPanelOpen && (isInside(ui.draftsPanel) || isInside(ui.draftsToggle))) return;
