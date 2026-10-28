@@ -6120,10 +6120,15 @@ function dismissComposerPopoversFromOutside(event) {
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
   const target = event.target;
   const isInside = (element) => {
-    // Webview events can be retargeted at an embedding boundary, and pointer
-    // capture can keep the original element in the DOM path after the pointer
-    // has moved away. Hit-test the final viewport position before trusting that
-    // path so a click outside always dismisses the menu.
+    // Trust the actual DOM event path for interactions inside this webview.
+    // Coordinates can be translated by VS Code's embedding layer, so testing
+    // them first may incorrectly classify an outside click as inside a popup.
+    if (target instanceof Node && document.documentElement.contains(target)) {
+      return eventPath.includes(element) || element.contains(target);
+    }
+
+    // When VS Code retargets an event at the webview boundary, the target may
+    // not belong to this document. Use viewport hit-testing only for that case.
     const hasPointerPosition = event.type.startsWith('pointer') || event.type === 'mousedown'
       || (event.type === 'click' && event.detail > 0);
     if (hasPointerPosition && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
@@ -6133,7 +6138,7 @@ function dismissComposerPopoversFromOutside(event) {
       return event.clientX >= bounds.left && event.clientX <= bounds.right
         && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
     }
-    return eventPath.includes(element) || (target instanceof Node && element.contains(target));
+    return eventPath.includes(element);
   };
   if (openPopovers.some(([popover, toggle]) => isInside(popover) || isInside(toggle))) return;
   if (draftPanelOpen && (isInside(ui.draftsPanel) || isInside(ui.draftsToggle))) return;
