@@ -1616,6 +1616,24 @@ function renderTurnFileSummaries() {
     const count = document.createElement('span');
     count.textContent = `${summary.totalFiles} ${summary.totalFiles === 1 ? 'file' : 'files'}`;
     heading.append(title, count);
+    if (typeof summary.undoId === 'string' && /^[a-f0-9]{32}$/.test(summary.undoId)) {
+      section.dataset.undoId = summary.undoId;
+    }
+    if (typeof summary.undoId === 'string' && /^[a-f0-9]{32}$/.test(summary.undoId)) {
+      const undo = document.createElement('button');
+      undo.type = 'button';
+      undo.className = 'text-button turn-file-undo';
+      undo.textContent = 'Take edits back';
+      undo.title = 'Restore the changed files to their state before this run';
+      undo.setAttribute('aria-label', `Take back changes to ${summary.totalFiles} files from the last run`);
+      undo.addEventListener('click', () => {
+        if (undo.disabled) return;
+        undo.disabled = true;
+        undo.textContent = 'Checking…';
+        post('undoTurnFileChanges', { undoId: summary.undoId });
+      });
+      heading.append(undo);
+    }
     section.append(heading);
 
     for (const file of summary.files) {
@@ -4911,8 +4929,32 @@ window.addEventListener('message', (event) => {
         totalFiles,
         omittedFiles,
         truncated: data.truncated === true,
+        undoId: typeof data.undoId === 'string' && /^[a-f0-9]{32}$/.test(data.undoId) ? data.undoId : '',
       }].slice(-20);
       renderMessages();
+      break;
+    }
+    case 'turn-file-undo-clear': {
+      if (typeof data.undoId !== 'string') break;
+      let changed = false;
+      state.turnFileSummaries = state.turnFileSummaries.map((summary) => {
+        if (summary.undoId !== data.undoId) return summary;
+        changed = true;
+        return { ...summary, undoId: '' };
+      });
+      if (changed) renderMessages();
+      break;
+    }
+    case 'turn-file-undo-result': {
+      if (typeof data.undoId !== 'string') break;
+      if (data.cancelled === true) {
+        document.querySelectorAll('.turn-file-undo').forEach((button) => {
+          if (button instanceof HTMLButtonElement && button.closest('.turn-file-summary')?.dataset.undoId === data.undoId) {
+            button.disabled = false;
+            button.textContent = 'Take edits back';
+          }
+        });
+      }
       break;
     }
     case 'git-review-open':
@@ -5755,8 +5797,17 @@ function dismissComposerPopoversFromOutside(event) {
   if (!openPopovers.length && !draftPanelOpen) return;
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
   const target = event.target;
-  const isInside = (element) => eventPath.includes(element)
-    || (target instanceof Node && element.contains(target));
+  const isInside = (element) => {
+    if (eventPath.includes(element) || (target instanceof Node && element.contains(target))) return true;
+
+    // Webview events can be retargeted at an embedding boundary. The DOM path
+    // then names an outer host instead of the popup that visually received the
+    // pointer, so use its coordinates as a second source of truth.
+    if (!event.isTrusted || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
+    const bounds = element.getBoundingClientRect();
+    return event.clientX >= bounds.left && event.clientX <= bounds.right
+      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+  };
   if (openPopovers.some(([popover, toggle]) => isInside(popover) || isInside(toggle))) return;
   if (draftPanelOpen && (isInside(ui.draftsPanel) || isInside(ui.draftsToggle))) return;
   if (openPopovers.length) closeComposerPopovers();

@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.118",
+  "version": "0.1.119",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -523,6 +523,7 @@
     "smoke:package-recommendations": "esbuild src/package-recommendations.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/package-recommendations.cjs && node scripts/smoke-package-recommendations.mjs",
     "smoke:notification-hooks": "esbuild src/notification-hook.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/notification-hook.cjs && node scripts/smoke-notification-hooks.mjs",
     "smoke:turn-summary": "esbuild src/turn-file-summary.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/turn-file-summary.cjs && node scripts/smoke-turn-file-summary.cjs",
+    "smoke:turn-undo": "esbuild src/turn-file-undo.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/turn-file-undo.cjs && node scripts/smoke-turn-file-undo.mjs",
     "package": "npm run compile && vsce package"
   },
   "dependencies": {

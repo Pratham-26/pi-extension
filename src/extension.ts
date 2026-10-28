@@ -27,6 +27,13 @@ import {
   MAX_TURN_SUMMARY_FILES,
   redactTurnFileDiff,
 } from './turn-file-summary';
+import {
+  createTurnUndoAction,
+  restoreTurnUndoContentSafely,
+  turnUndoSnapshotMatches,
+  type TurnUndoAction,
+  type TurnUndoSnapshot,
+} from './turn-file-undo';
 import { appendDiagnosticLog, DIAGNOSTIC_LOG_FILENAME, type DiagnosticCategory } from './diagnostic-log';
 import {
   copyIgnoredFileSafely,
@@ -117,6 +124,7 @@ type TurnFileSnapshot = {
   ctimeMs?: number;
   dev?: number;
   ino?: number;
+  mode?: number;
   bytesRead: number;
 };
 
@@ -162,6 +170,32 @@ type TurnFileSummaryEntry = {
   canOpen?: boolean;
   untracked?: boolean;
 };
+
+type TurnFileSummaryResult = {
+  files: TurnFileSummaryEntry[];
+  totalFiles: number;
+  omittedFiles: number;
+  truncated: boolean;
+  undoActions?: TurnUndoAction[];
+  undoRepositoryPath?: string;
+  undoWorkspaceRealPath?: string;
+  undoHeadCommit?: string;
+};
+
+type TurnFileUndoRecord = {
+  undoId: string;
+  worker: Worker;
+  workspace: vscode.WorkspaceFolder;
+  workspacePath: string;
+  workspaceRealPath: string;
+  repositoryPath: string;
+  sessionPath: string;
+  headCommit?: string;
+  actions: TurnUndoAction[];
+  createdAt: number;
+};
+
+type ResolvedTurnUndoTarget = { uri: vscode.Uri; fsPath: string; exists: boolean };
 
 type GitApiLike = {
   git?: { path?: string };
@@ -226,6 +260,7 @@ const MAX_GIT_DRAFT_FILES = 24;
 const MAX_MODEL_PRESETS = 32;
 const VALID_PRESET_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const MAX_TURN_BASELINE_WAIT_MS = 4_000;
+const TURN_FILE_UNDO_TTL_MS = 10 * 60 * 1000;
 const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
 const MAX_RUNNING_SESSION_RECORD_BYTES = 8_192;
 const MAX_RUNNING_SESSION_RECORDS = 200;
@@ -521,6 +556,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerPromptResourceSettingsKey = '';
   private runtimeBusy = false;
   private turnFileCapture?: TurnFileCapture;
+  private turnFileUndo?: TurnFileUndoRecord;
+  private turnFileUndoPending?: string;
+  private turnFileUndoTimer?: NodeJS.Timeout;
   private queuedWorkCount = 0;
   private runtimeActivity = 'Working in Pi';
   private sessionListForRunningStatus: Array<Record<string, unknown>> = [];
@@ -1631,6 +1669,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'run-finished') void this.refreshGitChanges();
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
+        if (this.activeSessionPath && this.normalizeSessionPath(this.activeSessionPath) !== this.normalizeSessionPath(message.sessionFile)) {
+          this.clearTurnFileUndo();
+        }
         const capture = this.turnFileCapture;
         if (capture?.worker === worker) {
           if (!capture.sessionPath) capture.sessionPath = message.sessionFile;
@@ -1974,6 +2015,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openGitDiff':
         await this.openGitDiff(message.path);
+        return;
+      case 'undoTurnFileChanges':
+        await this.undoTurnFileChanges(message.undoId);
         return;
       case 'quoteGitDiffSelection':
         this.quoteGitDiffSelection();
@@ -3074,6 +3118,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private reserveTurnFileCapture(worker: Worker): TurnFileCapture | undefined {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace || worker !== this.worker || this.workerWorkspace !== workspace.uri.fsPath) return undefined;
+    this.clearTurnFileUndo();
     const workspacePath = this.normalizeSessionPath(workspace.uri.fsPath);
     const existing = this.turnFileCapture;
     if (existing?.worker === worker && existing.workspacePath === workspacePath
@@ -3107,6 +3152,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   private clearTurnFileCapture(worker?: Worker): void {
     if (!worker || this.turnFileCapture?.worker === worker) this.turnFileCapture = undefined;
+    if (!worker || this.turnFileUndo?.worker === worker) this.clearTurnFileUndo();
+  }
+
+  private clearTurnFileUndo(undoId?: string): void {
+    const undo = this.turnFileUndo;
+    if (undoId && undo?.undoId !== undoId) return;
+    this.turnFileUndo = undefined;
+    if (this.turnFileUndoTimer) clearTimeout(this.turnFileUndoTimer);
+    this.turnFileUndoTimer = undefined;
+    if (undo) this.post({ type: 'turn-file-undo-clear', undoId: undo.undoId });
   }
 
   private finishTurnFileCapture(worker: Worker): void {
@@ -3117,7 +3172,28 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (!summary || this.worker !== worker) return;
       const sessionPath = capture.sessionPath || this.activeSessionPath;
       if (!sessionPath || (capture.sessionPath && this.activeSessionPath && capture.sessionPath !== this.activeSessionPath)) return;
-      this.post({ type: 'turn-file-summary', sessionPath, ...summary });
+      const { undoActions, undoRepositoryPath, undoWorkspaceRealPath, undoHeadCommit, ...visibleSummary } = summary;
+      let undoId: string | undefined;
+      if (undoActions?.length && undoActions.length === summary.totalFiles
+        && summary.files.length === summary.totalFiles && summary.omittedFiles === 0
+        && undoRepositoryPath && undoWorkspaceRealPath) {
+        undoId = randomBytes(16).toString('hex');
+        this.turnFileUndo = {
+          undoId,
+          worker,
+          workspace: capture.workspace,
+          workspacePath: capture.workspacePath,
+          workspaceRealPath: undoWorkspaceRealPath,
+          repositoryPath: undoRepositoryPath,
+          sessionPath,
+          headCommit: undoHeadCommit,
+          actions: undoActions,
+          createdAt: Date.now(),
+        };
+        this.turnFileUndoTimer = setTimeout(() => this.clearTurnFileUndo(undoId), TURN_FILE_UNDO_TTL_MS);
+        this.turnFileUndoTimer.unref?.();
+      }
+      this.post({ type: 'turn-file-summary', sessionPath, ...visibleSummary, ...(undoId ? { undoId } : {}) });
     }).catch(() => undefined);
   }
 
@@ -3214,6 +3290,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       ctimeMs: numeric(stats?.ctimeMs),
       dev: numeric(stats?.dev),
       ino: numeric(stats?.ino),
+      mode: numeric(stats?.mode),
       bytesRead: 0,
     });
     if (uri.scheme !== 'file' || !isSafeTurnFilePath(relativePath) || !isSafeRepositoryRelativePath(repositoryPath)) {
@@ -3255,6 +3332,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       ctimeMs: numeric(safeStats.ctimeMs),
       dev: numeric(safeStats.dev),
       ino: numeric(safeStats.ino),
+      mode: numeric(safeStats.mode),
     });
     if (isSensitiveTurnFilePath(relativePath)) return details(unavailable('Preview omitted for a sensitive file path.'));
     if (safeStats.size > MAX_TURN_FILE_BYTES) return details(unavailable('The file exceeds the 256 KB preview limit.'));
@@ -3290,7 +3368,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (bytes.includes(0)) return details(unavailable('Preview omitted for binary content.'));
       let content: string;
       try {
-        content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
       } catch {
         return details(unavailable('Preview omitted for non-UTF-8 content.'));
       }
@@ -3319,12 +3397,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       : before.omittedReason === after.omittedReason;
   }
 
-  private async createTurnFileSummary(capture: TurnFileCapture): Promise<{
-    files: TurnFileSummaryEntry[];
-    totalFiles: number;
-    omittedFiles: number;
-    truncated: boolean;
-  } | undefined> {
+  private async createTurnFileSummary(capture: TurnFileCapture): Promise<TurnFileSummaryResult | undefined> {
     const baseline = await capture.baseline;
     if (!baseline || this.worker !== capture.worker
       || this.workerWorkspace !== capture.workspace.uri.fsPath
@@ -3347,6 +3420,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     let totalDiffChars = 0;
     let snapshotBytes = 0;
     const files: TurnFileSummaryEntry[] = [];
+    const undoActions: TurnUndoAction[] = [];
     const headChanged = Boolean(baseline.headCommit && repository.state.HEAD?.commit
       && baseline.headCommit !== repository.state.HEAD.commit);
 
@@ -3382,6 +3456,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         canOpen: Boolean(after),
         untracked: after?.untracked === true,
       };
+      const undoAction = createTurnUndoAction({
+        before,
+        after,
+        afterSnapshot,
+        baselineHead: baseline.headCommit,
+        currentHead: repository.state.HEAD?.commit,
+        baselineTruncated: baseline.truncated,
+        currentTruncated: listing.truncated,
+      });
+      if (undoAction) undoActions.push(undoAction);
 
       if (isSensitiveTurnFilePath(current.path)) {
         item.previewUnavailable = 'Preview omitted for a sensitive file path.';
@@ -3453,7 +3537,248 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
     if (!totalFiles && !omittedFiles) return undefined;
-    return { files, totalFiles, omittedFiles, truncated };
+    const undoIsComplete = totalFiles > 0 && undoActions.length === totalFiles
+      && files.length === totalFiles && omittedFiles === 0;
+    return {
+      files,
+      totalFiles,
+      omittedFiles,
+      truncated,
+      ...(undoIsComplete ? {
+        undoActions,
+        undoRepositoryPath: baseline.repositoryPath,
+        undoWorkspaceRealPath: roots.workspace,
+        undoHeadCommit: baseline.headCommit,
+      } : {}),
+    };
+  }
+
+  private async undoTurnFileChanges(rawUndoId: unknown): Promise<void> {
+    const undoId = typeof rawUndoId === 'string' && /^[a-f0-9]{32}$/.test(rawUndoId) ? rawUndoId : '';
+    const record = this.turnFileUndo;
+    if (!undoId || !record || record.undoId !== undoId) {
+      if (undoId) this.post({ type: 'turn-file-undo-clear', undoId });
+      this.post({ type: 'notice', message: 'This run’s undo is no longer available. Start a new run to capture a fresh restore point.', isError: true });
+      return;
+    }
+    if (Date.now() - record.createdAt > TURN_FILE_UNDO_TTL_MS) {
+      this.clearTurnFileUndo(undoId);
+      this.post({ type: 'notice', message: 'This run’s undo has expired. Start a new run to capture a fresh restore point.', isError: true });
+      return;
+    }
+    if (this.turnFileUndoPending === undoId) return;
+    this.turnFileUndoPending = undoId;
+
+    let attempted = 0;
+    try {
+      let context = await this.getTurnUndoContext(record);
+      for (const action of record.actions) await this.validateTurnUndoAction(record, context.repository, context.roots, action);
+      const existingCount = record.actions.filter((action) => action.kind !== 'trash-created').length;
+      const createdCount = record.actions.length - existingCount;
+      const listedPaths = record.actions.slice(0, 6).map((action) => action.path).join('\n');
+      const additionalCount = Math.max(0, record.actions.length - 6);
+      const pathList = `${listedPaths}${additionalCount ? `\n…and ${additionalCount} more` : ''}`;
+      const answer = await vscode.window.showWarningMessage(
+        `Take back changes from the last run?\n\n${existingCount} existing ${existingCount === 1 ? 'file will be restored' : 'files will be restored'} to their pre-run contents. ${createdCount ? `${createdCount} new ${createdCount === 1 ? 'file will be' : 'files will be'} removed; VS Code will request the system Trash or Recycle Bin when supported, but some file systems may delete permanently.` : ''}\n\n${pathList}`,
+        { modal: true },
+        'Take edits back',
+      );
+      if (answer !== 'Take edits back') {
+        this.post({ type: 'turn-file-undo-result', undoId, cancelled: true });
+        return;
+      }
+      if (this.turnFileUndo !== record) throw new Error('Undo record expired.');
+
+      context = await this.getTurnUndoContext(record);
+      for (const action of record.actions) await this.validateTurnUndoAction(record, context.repository, context.roots, action);
+      for (const action of record.actions) {
+        context = await this.getTurnUndoContext(record);
+        const target = await this.validateTurnUndoAction(record, context.repository, context.roots, action);
+        attempted += 1;
+        if (action.kind === 'restore-content') {
+          await this.writeTurnUndoContent(action, context.roots);
+        } else if (action.kind === 'restore-head') {
+          if (!context.repository.restore || !action.headCommit) throw new Error('Git restore is unavailable.');
+          await context.repository.restore([action.repositoryPath], { staged: false, ref: action.headCommit });
+        } else {
+          await vscode.workspace.fs.delete(target.uri, { useTrash: true });
+        }
+      }
+      this.clearTurnFileUndo(undoId);
+      const description = `${record.actions.length} file${record.actions.length === 1 ? '' : 's'}`;
+      this.post({ type: 'notice', message: `Took back the last run’s changes to ${description}.` });
+      await this.refreshGitChanges();
+    } catch {
+      this.clearTurnFileUndo(undoId);
+      this.post({
+        type: 'notice',
+        message: attempted
+          ? 'Undo stopped during a file operation. Review the workspace and system Trash for any partial changes.'
+          : 'Undo is no longer safe because the workspace, Git state, or files changed. No files were modified.',
+        isError: true,
+      });
+    } finally {
+      if (this.turnFileUndoPending === undoId) this.turnFileUndoPending = undefined;
+    }
+  }
+
+  private async getTurnUndoContext(record: TurnFileUndoRecord): Promise<{
+    workspace: vscode.WorkspaceFolder;
+    repository: GitRepositoryLike;
+    roots: TurnFileReadRoots;
+  }> {
+    if (this.turnFileUndo !== record || Date.now() - record.createdAt > TURN_FILE_UNDO_TTL_MS
+      || this.worker !== record.worker || !this.workerWorkspace
+      || this.normalizeSessionPath(this.workerWorkspace) !== record.workspacePath
+      || !this.activeSessionPath
+      || this.normalizeSessionPath(this.activeSessionPath) !== this.normalizeSessionPath(record.sessionPath)
+      || this.runtimeBusy || this.queuedWorkCount > 0) throw new Error('The Pi workspace is not idle.');
+
+    await this.runningSessionOperation;
+    const workspaceKey = this.runningWorkspaceKey(record.workspacePath);
+    const runningRecords = await this.readRunningSessionRecords(true);
+    if (!workspaceKey || !runningRecords
+      || runningRecords.some((item) => !item.workspaceKey || item.workspaceKey === workspaceKey)) {
+      throw new Error('Another Pi session is running in this workspace.');
+    }
+
+    const workspace = vscode.workspace.workspaceFolders?.find((folder) =>
+      this.normalizeSessionPath(folder.uri.fsPath) === record.workspacePath);
+    if (!workspace) throw new Error('The workspace changed.');
+    const workspaceRealPath = await realpath(workspace.uri.fsPath);
+    if (this.normalizeSessionPath(workspaceRealPath) !== this.normalizeSessionPath(record.workspaceRealPath)) {
+      throw new Error('The workspace path changed.');
+    }
+    const handle = await this.getGitRepository(workspace);
+    if (!handle) throw new Error('The Git repository is unavailable.');
+    const repositoryPath = await realpath(handle.repository.rootUri.fsPath);
+    if (this.normalizeSessionPath(repositoryPath) !== this.normalizeSessionPath(record.repositoryPath)) {
+      throw new Error('The Git repository changed.');
+    }
+    await handle.repository.status?.();
+    if (handle.repository.state.HEAD?.commit !== record.headCommit) throw new Error('The Git baseline changed.');
+    return { workspace, repository: handle.repository, roots: { repository: repositoryPath, workspace: workspaceRealPath } };
+  }
+
+  private async validateTurnUndoAction(
+    record: TurnFileUndoRecord,
+    repository: GitRepositoryLike,
+    roots: TurnFileReadRoots,
+    action: TurnUndoAction,
+  ): Promise<ResolvedTurnUndoTarget> {
+    const target = await this.resolveTurnUndoTarget(record.workspace, roots, action);
+    if (!target) throw new Error('A changed path is no longer safe.');
+    const snapshot = await this.readTurnFileSnapshot(
+      target.uri, action.path, action.repositoryPath, roots, MAX_TURN_FILE_BYTES,
+    );
+    if (!turnUndoSnapshotMatches(snapshot as TurnUndoSnapshot, action.expected)) {
+      throw new Error('A changed file no longer matches the captured run output.');
+    }
+    if (await this.isTurnUndoDocumentDirty(target.fsPath)) throw new Error('A changed file has unsaved editor contents.');
+
+    const status = this.getTurnUndoGitStatus(repository, action.repositoryPath);
+    if (status.staged || status.conflict) throw new Error('A changed file is staged or conflicted.');
+    if (action.kind === 'restore-head' && (!status.modified || status.untracked)) {
+      throw new Error('A tracked file is no longer an unstaged worktree change.');
+    }
+    if (action.kind === 'trash-created' && !status.modified && !status.untracked) {
+      throw new Error('A new file is no longer a Git-listed change.');
+    }
+    return target;
+  }
+
+  private async resolveTurnUndoTarget(
+    workspace: vscode.WorkspaceFolder,
+    roots: TurnFileReadRoots,
+    action: TurnUndoAction,
+  ): Promise<ResolvedTurnUndoTarget | undefined> {
+    if (!isSafeTurnFilePath(action.path) || !isSafeRepositoryRelativePath(action.repositoryPath)
+      || isSensitiveTurnFilePath(action.path)) return undefined;
+    const workspacePath = roots.workspace;
+    const filePath = path.resolve(workspacePath, ...action.path.split('/'));
+    if (!isPathInside(workspacePath, filePath) || !isPathInside(roots.repository, filePath)) return undefined;
+    const repositoryRelative = this.relativePathFrom(vscode.Uri.file(roots.repository), vscode.Uri.file(filePath));
+    const normalizeRelative = (value: string) => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
+    if (!repositoryRelative || normalizeRelative(repositoryRelative) !== normalizeRelative(action.repositoryPath)) return undefined;
+
+    const parts = action.path.split('/');
+    let parent = workspacePath;
+    for (const part of parts.slice(0, -1)) {
+      parent = path.join(parent, part);
+      try {
+        const stats = await lstat(parent);
+        if (!stats.isDirectory() || stats.isSymbolicLink()) return undefined;
+        const resolved = await realpath(parent);
+        if (this.normalizeSessionPath(resolved) !== this.normalizeSessionPath(parent)
+          || !isPathInside(workspacePath, resolved)) return undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    const leaf = path.join(parent, parts.at(-1)!);
+    try {
+      const stats = await lstat(leaf);
+      if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink > 1) return undefined;
+      const resolved = await realpath(leaf);
+      if (this.normalizeSessionPath(resolved) !== this.normalizeSessionPath(leaf)
+        || !isPathInside(workspacePath, resolved) || !isPathInside(roots.repository, resolved)) return undefined;
+      return { uri: vscode.Uri.file(leaf), fsPath: leaf, exists: true };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !action.expected.exists) {
+        return { uri: vscode.Uri.file(leaf), fsPath: leaf, exists: false };
+      }
+      return undefined;
+    }
+  }
+
+  private getTurnUndoGitStatus(repository: GitRepositoryLike, repositoryPath: string): {
+    staged: boolean;
+    modified: boolean;
+    untracked: boolean;
+    conflict: boolean;
+  } {
+    const matches = (changes: GitChangeRecord[] | undefined) => (changes ?? []).some((change) => {
+      const uri = change.uri ?? change.resourceUri;
+      const relative = uri ? this.relativePathFrom(repository.rootUri, uri) : undefined;
+      if (!relative) return false;
+      const normalizeRelative = (value: string) => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
+      return normalizeRelative(relative) === normalizeRelative(repositoryPath);
+    });
+    return {
+      staged: matches(repository.state.indexChanges),
+      modified: matches(repository.state.workingTreeChanges),
+      untracked: matches(repository.state.untrackedChanges),
+      conflict: matches(repository.state.mergeChanges),
+    };
+  }
+
+  private async isTurnUndoDocumentDirty(filePath: string): Promise<boolean> {
+    for (const document of vscode.workspace.textDocuments) {
+      if (!document.isDirty || document.uri.scheme !== 'file') continue;
+      try {
+        if (this.normalizeSessionPath(document.uri.fsPath) === this.normalizeSessionPath(filePath)
+          || this.normalizeSessionPath(await realpath(document.uri.fsPath)) === this.normalizeSessionPath(filePath)) return true;
+      } catch {
+        if (this.workerWorkspace && isPathInside(this.workerWorkspace, path.resolve(document.uri.fsPath))) return true;
+      }
+    }
+    return false;
+  }
+
+  private async writeTurnUndoContent(
+    action: TurnUndoAction,
+    roots: TurnFileReadRoots,
+  ): Promise<void> {
+    if (action.kind !== 'restore-content' || action.beforeContent === undefined) throw new Error('The restore content is unavailable.');
+    await restoreTurnUndoContentSafely({
+      workspaceRoot: roots.workspace,
+      repositoryRoot: roots.repository,
+      path: action.path,
+      repositoryPath: action.repositoryPath,
+      expected: action.expected,
+      beforeContent: action.beforeContent,
+      beforeMode: action.beforeMode,
+    });
   }
 
   private async refreshGitChanges(): Promise<void> {
@@ -5974,13 +6299,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }).catch(() => undefined);
   }
 
-  private async readRunningSessionRecords(): Promise<RunningSessionRecord[]> {
+  private async readRunningSessionRecords(): Promise<RunningSessionRecord[]>;
+  private async readRunningSessionRecords(strict: true): Promise<RunningSessionRecord[] | undefined>;
+  private async readRunningSessionRecords(strict = false): Promise<RunningSessionRecord[] | undefined> {
     let names: string[];
     try {
       const directoryStats = await lstat(this.runningSessionsDirectory);
-      if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) return [];
+      if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) return strict ? undefined : [];
       names = [];
       const directory = await opendir(this.runningSessionsDirectory);
+      let capped = false;
       try {
         let scanned = 0;
         while (scanned < MAX_RUNNING_SESSION_RECORDS * 5 && names.length < MAX_RUNNING_SESSION_RECORDS) {
@@ -5989,11 +6317,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           scanned += 1;
           if (/^[a-f0-9]{32}\.json$/.test(entry.name)) names.push(entry.name);
         }
+        capped = scanned >= MAX_RUNNING_SESSION_RECORDS * 5 || names.length >= MAX_RUNNING_SESSION_RECORDS;
       } finally {
         await directory.close();
       }
+      if (strict && capped) return undefined;
     } catch {
-      return [];
+      return strict ? undefined : [];
     }
 
     const records: RunningSessionRecord[] = [];
@@ -6002,8 +6332,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       const filePath = path.join(this.runningSessionsDirectory, name);
       try {
         const fileStats = await lstat(filePath);
-        if (!fileStats.isFile() || fileStats.isSymbolicLink()) continue;
-        if (fileStats.size > MAX_RUNNING_SESSION_RECORD_BYTES) continue;
+        if (!fileStats.isFile() || fileStats.isSymbolicLink()) {
+          if (strict) return undefined;
+          continue;
+        }
+        if (fileStats.size > MAX_RUNNING_SESSION_RECORD_BYTES) {
+          if (strict) return undefined;
+          continue;
+        }
         if (now - fileStats.mtimeMs > RUNNING_SESSION_RECORD_TTL_MS) {
           try { await unlink(filePath); } catch { /* A stale lease is harmless if it cannot be removed. */ }
           continue;
@@ -6012,7 +6348,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         let text: string;
         try {
           const openedStats = await handle.stat();
-          if (!openedStats.isFile() || openedStats.size > MAX_RUNNING_SESSION_RECORD_BYTES) continue;
+          if (!openedStats.isFile() || openedStats.size > MAX_RUNNING_SESSION_RECORD_BYTES
+            || openedStats.dev !== fileStats.dev || openedStats.ino !== fileStats.ino) {
+            if (strict) return undefined;
+            continue;
+          }
           text = await handle.readFile({ encoding: 'utf8' });
         } finally {
           await handle.close();
@@ -6022,7 +6362,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           || (value.workspaceKey !== undefined && (typeof value.workspaceKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.workspaceKey)))
           || typeof value.activity !== 'string' || this.safeRunningActivity(value.activity) !== value.activity
           || !Number.isSafeInteger(value.updatedAt) || Number(value.updatedAt) > now + 2000
-          || now - Number(value.updatedAt) > RUNNING_SESSION_RECORD_TTL_MS) continue;
+          || now - Number(value.updatedAt) > RUNNING_SESSION_RECORD_TTL_MS) {
+          if (strict) return undefined;
+          continue;
+        }
         records.push({
           version: 1,
           sessionKey: value.sessionKey,
@@ -6032,6 +6375,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         });
       } catch {
         // A partially-written or malformed local status record is ignored.
+        if (strict) return undefined;
       }
     }
     return records;

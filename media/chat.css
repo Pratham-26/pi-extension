@@ -180,6 +180,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .turn-file-summary-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; margin-bottom: 3px; }
 .turn-file-summary-heading strong { font-size: 11px; font-weight: 600; }
 .turn-file-summary-heading span, .turn-file-summary-type { color: var(--muted); font-size: 9px; }
+.turn-file-undo { flex: 0 0 auto; margin-inline-start: auto; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 9px; }
+.turn-file-undo:hover:not(:disabled) { color: var(--text); border-color: var(--focus); }
+.turn-file-undo:disabled { opacity: .6; cursor: wait; }
 .turn-file-summary-row { display: grid; gap: 3px; min-width: 0; padding: 6px 0; border-top: 1px solid var(--line); }
 .turn-file-summary-file-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; min-width: 0; }
 .turn-file-summary-path { min-width: 0; overflow-wrap: anywhere; color: var(--text); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; }
