@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.101",
+  "version": "0.1.102",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -315,6 +315,7 @@
     "typecheck": "tsc --noEmit",
     "smoke:drafts": "npm run compile:draft-store && node scripts/smoke-drafts.mjs",
     "smoke:worker": "node scripts/smoke-worker.mjs",
+    "smoke:runtime-settings": "npm run compile:worker && node scripts/smoke-runtime-settings.mjs",
     "smoke:sessions": "node scripts/smoke-session-order.mjs",
     "smoke:prompts": "node scripts/smoke-prompt-suggestions.mjs",
     "package": "npm run compile && vsce package"

@@ -2061,10 +2061,17 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'updatePiSetting': {
         const worker = this.worker;
         if (!worker) return;
-        const valid = (message.setting === 'autoCompaction' || message.setting === 'autoRetry')
-          ? typeof message.value === 'boolean'
-          : message.setting === 'cacheWarming'
-            && (message.value === 'off' || message.value === 'streaming' || message.value === 'idle');
+        const valid = ((message.setting === 'autoCompaction' || message.setting === 'autoRetry'
+          || message.setting === 'hideThinkingBlock' || message.setting === 'showCacheMissNotices')
+          && typeof message.value === 'boolean')
+          || (message.setting === 'cacheWarming'
+            && (message.value === 'off' || message.value === 'streaming' || message.value === 'idle'))
+          || (message.setting === 'steeringMode'
+            && (message.value === 'all' || message.value === 'one-at-a-time'))
+          || (message.setting === 'followUpMode'
+            && (message.value === 'all' || message.value === 'one-at-a-time'))
+          || (message.setting === 'sessionShareDestination'
+            && (message.value === 'auto' || message.value === 'gist' || message.value === 'radius'));
         if (!valid) {
           worker.postMessage({ type: 'getOptions' });
           return;
@@ -5504,6 +5511,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <label class="runtime-setting cache-warming-setting" for="offline-mode"><span>Startup network mode</span><select id="offline-mode"><option value="inherit">Use Pi environment</option><option value="offline">Offline startup</option><option value="online">Allow startup checks</option></select></label>
                 <p class="runtime-settings-note">Offline mode disables automatic startup network operations. Model requests still need a connection. Restart Pi to apply changes.</p>
                 <p class="runtime-settings-note">These choices affect Pi sessions using your global settings. Cache warming sends extra provider requests and may cost money.</p>
+                <div class="popover-heading extension-command-heading"><strong>Conversation behavior</strong><span>Global Pi defaults</span></div>
+                <label class="runtime-setting" for="steering-mode"><span>Queued steering messages</span><select id="steering-mode"><option value="one-at-a-time">One at a time</option><option value="all">All at once</option></select></label>
+                <label class="runtime-setting" for="follow-up-mode"><span>Queued follow-ups</span><select id="follow-up-mode"><option value="one-at-a-time">One at a time</option><option value="all">All at once</option></select></label>
+                <label class="runtime-setting"><input id="hide-thinking-blocks" type="checkbox"><span>Hide thinking blocks in chat</span></label>
+                <label class="runtime-setting"><input id="show-cache-miss-notices" type="checkbox"><span>Show Pi cache-miss notices</span></label>
+                <label class="runtime-setting" for="session-share-destination"><span>Pi /share destination</span><select id="session-share-destination"><option value="auto">Automatic</option><option value="gist">GitHub Gist</option><option value="radius">Radius</option></select></label>
+                <p class="runtime-settings-note">Project-level <code>.pi/settings.json</code> values can override global defaults. Selecting a destination does not share a session; running Pi’s <code>/share</code> command sends its content there.</p>
                 <div class="popover-heading extension-command-heading"><strong>Context files</strong><span>Discovered AGENTS.md instructions</span></div>
                 <button id="manage-context-files" class="text-button" type="button" title="Choose discovered Pi context files for this workspace">Choose context files</button>
                 <p class="runtime-settings-note">The selection is saved per workspace and applies to future prompts. Applying it reloads Pi resources; enabled extensions may run during reload.</p>

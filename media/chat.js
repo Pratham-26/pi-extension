@@ -60,7 +60,17 @@ const state = {
   commandCompletionSequence: 0,
   mcpEnabled: false,
   mcpSettingPending: false,
-  runtimeSettings: { autoCompaction: false, autoRetry: false, cacheWarming: 'off', offlineMode: 'inherit' },
+  runtimeSettings: {
+    autoCompaction: false,
+    autoRetry: false,
+    cacheWarming: 'off',
+    offlineMode: 'inherit',
+    steeringMode: 'one-at-a-time',
+    followUpMode: 'one-at-a-time',
+    hideThinkingBlock: false,
+    showCacheMissNotices: false,
+    sessionShareDestination: 'auto',
+  },
   models: [],
   modelSearch: '',
   modelScopeIds: null,
@@ -234,6 +244,11 @@ const ui = {
   autoRetry: el('auto-retry'),
   cacheWarming: el('cache-warming'),
   offlineMode: el('offline-mode'),
+  steeringMode: el('steering-mode'),
+  followUpMode: el('follow-up-mode'),
+  hideThinkingBlocks: el('hide-thinking-blocks'),
+  showCacheMissNotices: el('show-cache-miss-notices'),
+  sessionShareDestination: el('session-share-destination'),
   autoRefreshModels: el('auto-refresh-models'),
   notificationSound: el('notification-sound'),
   testNotificationSound: el('test-notification-sound'),
@@ -704,6 +719,11 @@ function updateControls() {
   ui.autoRetry.disabled = !state.hasSession || state.busy;
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
   ui.offlineMode.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
+  ui.steeringMode.disabled = !state.hasSession || state.busy;
+  ui.followUpMode.disabled = !state.hasSession || state.busy;
+  ui.hideThinkingBlocks.disabled = !state.hasSession || state.busy;
+  ui.showCacheMissNotices.disabled = !state.hasSession || state.busy;
+  ui.sessionShareDestination.disabled = !state.hasSession || state.busy;
   ui.autoRefreshModels.checked = state.autoRefreshModelsEnabled;
   ui.notificationSound.checked = state.notificationSoundEnabled;
   ui.testNotificationSound.disabled = !state.notificationSoundEnabled;
@@ -1612,7 +1632,8 @@ function renderMessages(shouldFollow = true) {
       row.append(context);
     }
 
-    if (message.role === 'assistant' && typeof message.thinking === 'string' && message.thinking) {
+    if (message.role === 'assistant' && typeof message.thinking === 'string' && message.thinking
+      && !state.runtimeSettings.hideThinkingBlock) {
       const thinking = document.createElement('details');
       thinking.className = 'thinking-block';
       const thinkingKey = `${state.sessionPath}:${messageIndex}`;
@@ -2775,16 +2796,30 @@ function renderModelChoices(data) {
     ? { provider: data.defaultModel.provider, id: data.defaultModel.id }
     : undefined;
   const runtimeSettings = data.runtimeSettings || {};
+  const wasHidingThinking = state.runtimeSettings.hideThinkingBlock;
   state.runtimeSettings = {
     autoCompaction: runtimeSettings.autoCompaction === true,
     autoRetry: runtimeSettings.autoRetry === true,
     cacheWarming: ['off', 'streaming', 'idle'].includes(runtimeSettings.cacheWarming) ? runtimeSettings.cacheWarming : 'off',
     offlineMode: ['inherit', 'offline', 'online'].includes(runtimeSettings.offlineMode) ? runtimeSettings.offlineMode : 'inherit',
+    steeringMode: runtimeSettings.steeringMode === 'all' ? 'all' : 'one-at-a-time',
+    followUpMode: runtimeSettings.followUpMode === 'all' ? 'all' : 'one-at-a-time',
+    hideThinkingBlock: runtimeSettings.hideThinkingBlock === true,
+    showCacheMissNotices: runtimeSettings.showCacheMissNotices === true,
+    sessionShareDestination: ['auto', 'gist', 'radius'].includes(runtimeSettings.sessionShareDestination)
+      ? runtimeSettings.sessionShareDestination
+      : 'auto',
   };
   ui.autoCompaction.checked = state.runtimeSettings.autoCompaction;
   ui.autoRetry.checked = state.runtimeSettings.autoRetry;
   ui.cacheWarming.value = state.runtimeSettings.cacheWarming;
   ui.offlineMode.value = state.runtimeSettings.offlineMode;
+  ui.steeringMode.value = state.runtimeSettings.steeringMode;
+  ui.followUpMode.value = state.runtimeSettings.followUpMode;
+  ui.hideThinkingBlocks.checked = state.runtimeSettings.hideThinkingBlock;
+  ui.showCacheMissNotices.checked = state.runtimeSettings.showCacheMissNotices;
+  ui.sessionShareDestination.value = state.runtimeSettings.sessionShareDestination;
+  if (wasHidingThinking !== state.runtimeSettings.hideThinkingBlock) renderMessages();
   state.mcpEnabled = data.mcpEnabled === true;
   if (!state.mcpSettingPending) ui.mcpEnabled.checked = state.mcpEnabled;
   state.presets = Array.isArray(data.presets) ? data.presets : state.presets;
@@ -5463,6 +5498,26 @@ ui.autoRetry.addEventListener('change', () => {
 ui.cacheWarming.addEventListener('change', () => {
   ui.cacheWarming.disabled = true;
   post('updatePiSetting', { setting: 'cacheWarming', value: ui.cacheWarming.value });
+});
+ui.steeringMode.addEventListener('change', () => {
+  ui.steeringMode.disabled = true;
+  post('updatePiSetting', { setting: 'steeringMode', value: ui.steeringMode.value });
+});
+ui.followUpMode.addEventListener('change', () => {
+  ui.followUpMode.disabled = true;
+  post('updatePiSetting', { setting: 'followUpMode', value: ui.followUpMode.value });
+});
+ui.hideThinkingBlocks.addEventListener('change', () => {
+  ui.hideThinkingBlocks.disabled = true;
+  post('updatePiSetting', { setting: 'hideThinkingBlock', value: ui.hideThinkingBlocks.checked });
+});
+ui.showCacheMissNotices.addEventListener('change', () => {
+  ui.showCacheMissNotices.disabled = true;
+  post('updatePiSetting', { setting: 'showCacheMissNotices', value: ui.showCacheMissNotices.checked });
+});
+ui.sessionShareDestination.addEventListener('change', () => {
+  ui.sessionShareDestination.disabled = true;
+  post('updatePiSetting', { setting: 'sessionShareDestination', value: ui.sessionShareDestination.value });
 });
 ui.offlineMode.addEventListener('change', () => {
   ui.offlineMode.disabled = true;

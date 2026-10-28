@@ -125,6 +125,8 @@ type SessionLike = {
   autoRetryEnabled?: boolean;
   setAutoRetryEnabled?: (enabled: boolean) => void;
   setCacheWarmingMode?: (mode: 'off' | 'streaming' | 'idle') => void;
+  setSteeringMode?: (mode: 'all' | 'one-at-a-time') => void;
+  setFollowUpMode?: (mode: 'all' | 'one-at-a-time') => void;
   settingsManager?: SettingsManager;
   getUserMessagesForForking?: () => Array<{ entryId: string; text: string }>;
   navigateTree?: (targetId: string, options?: { summarize?: boolean }) => Promise<{ editorText?: string; cancelled: boolean }>;
@@ -2612,6 +2614,7 @@ function sendOptions(): void {
   const modelScope = getModelScopeState(session);
   const defaultProvider = session.settingsManager?.getDefaultProvider();
   const defaultModelId = session.settingsManager?.getDefaultModel();
+  const globalSettings = session.settingsManager?.getGlobalSettings();
   const models = availableModels.map((model) => ({
     provider: model.provider,
     id: model.id,
@@ -2725,9 +2728,16 @@ function sendOptions(): void {
         ? [provider.id]
         : []),
     runtimeSettings: {
-      autoCompaction: Boolean(session.autoCompactionEnabled),
-      autoRetry: Boolean(session.autoRetryEnabled),
+      autoCompaction: typeof globalSettings?.compaction?.enabled === 'boolean' ? globalSettings.compaction.enabled : true,
+      autoRetry: typeof globalSettings?.retry?.enabled === 'boolean' ? globalSettings.retry.enabled : true,
       cacheWarming: session.settingsManager?.getCacheWarmingMode?.() ?? 'off',
+      steeringMode: globalSettings?.steeringMode === 'all' ? 'all' : 'one-at-a-time',
+      followUpMode: globalSettings?.followUpMode === 'all' ? 'all' : 'one-at-a-time',
+      hideThinkingBlock: globalSettings?.hideThinkingBlock === true,
+      showCacheMissNotices: globalSettings?.showCacheMissNotices === true,
+      sessionShareDestination: globalSettings?.sessionShareDestination === 'gist' || globalSettings?.sessionShareDestination === 'radius'
+        ? globalSettings.sessionShareDestination
+        : 'auto',
     },
     providers: providers.filter((provider) => provider.supportsApiKey || provider.supportsOAuth),
     contextFiles,
@@ -4208,8 +4218,30 @@ async function handle(input: WorkerInput): Promise<void> {
           && (input.value === 'off' || input.value === 'streaming' || input.value === 'idle')
           && session.setCacheWarmingMode) {
           session.setCacheWarmingMode(input.value);
+        } else if (input.setting === 'steeringMode'
+          && (input.value === 'all' || input.value === 'one-at-a-time') && session.setSteeringMode) {
+          session.setSteeringMode(input.value);
+        } else if (input.setting === 'followUpMode'
+          && (input.value === 'all' || input.value === 'one-at-a-time') && session.setFollowUpMode) {
+          session.setFollowUpMode(input.value);
+        } else if (input.setting === 'hideThinkingBlock' && typeof input.value === 'boolean'
+          && session.settingsManager?.setHideThinkingBlock) {
+          session.settingsManager.setHideThinkingBlock(input.value);
+        } else if (input.setting === 'showCacheMissNotices' && typeof input.value === 'boolean'
+          && session.settingsManager?.setShowCacheMissNotices) {
+          session.settingsManager.setShowCacheMissNotices(input.value);
+        } else if (input.setting === 'sessionShareDestination'
+          && (input.value === 'auto' || input.value === 'gist' || input.value === 'radius')
+          && session.settingsManager?.setSessionShareDestination) {
+          session.settingsManager.setSessionShareDestination(input.value);
         } else {
           send('notice', { message: 'That Pi runtime setting is unavailable or invalid.', isError: true });
+          sendOptions();
+          return;
+        }
+        await session.settingsManager?.flush();
+        if ((session.settingsManager?.drainErrors().length ?? 0) > 0) {
+          send('notice', { message: 'Pi could not save that runtime setting to global settings.', isError: true });
           sendOptions();
           return;
         }
