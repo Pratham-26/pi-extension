@@ -527,6 +527,49 @@ button:focus-visible, textarea:focus-visible {
 .tool-card summary { padding: 6px 8px; color: var(--muted); font-size: 10px; cursor: pointer; }
 .tool-card[open] summary { color: var(--text); border-bottom: 1px solid var(--line); }
 .tool-card.tool-error summary { color: var(--danger); }
+.tool-renderer-output { max-height: 220px; color: var(--vscode-editor-foreground, var(--text)); }
+.tool-renderer-line { display: block; min-height: 1em; }
+.tool-renderer-summary { display: inline; margin-inline-start: 8px; color: var(--vscode-descriptionForeground, var(--muted)); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; font-weight: 400; white-space: pre-wrap; }
+.tool-renderer-fallback { margin: 0 8px 8px; border-top: 1px solid var(--line); }
+.tool-renderer-fallback summary { padding: 5px 0; }
+.pi-tui-bold { font-weight: 650; }
+.pi-tui-dim { opacity: .75; }
+.pi-tui-italic { font-style: italic; }
+.pi-tui-underline { text-decoration: underline; text-underline-offset: 2px; }
+.pi-tui-strike { text-decoration: line-through; }
+.pi-tui-inverse { color: var(--vscode-terminal-background, var(--vscode-editor-background)); background-color: var(--vscode-terminal-foreground, var(--vscode-editor-foreground)); }
+.pi-tui-fg-0 { color: var(--vscode-terminal-ansiBlack, var(--vscode-editor-foreground)); }
+.pi-tui-fg-1 { color: var(--vscode-terminal-ansiRed, var(--vscode-editorError-foreground)); }
+.pi-tui-fg-2 { color: var(--vscode-terminal-ansiGreen, var(--vscode-testing-iconPassed)); }
+.pi-tui-fg-3 { color: var(--vscode-terminal-ansiYellow, var(--vscode-editorWarning-foreground)); }
+.pi-tui-fg-4 { color: var(--vscode-terminal-ansiBlue, var(--vscode-textLink-foreground)); }
+.pi-tui-fg-5 { color: var(--vscode-terminal-ansiMagenta, var(--vscode-symbolIcon-functionForeground)); }
+.pi-tui-fg-6 { color: var(--vscode-terminal-ansiCyan, var(--vscode-debugTokenExpression-name)); }
+.pi-tui-fg-7 { color: var(--vscode-terminal-ansiWhite, var(--vscode-editor-foreground)); }
+.pi-tui-fg-bright-0 { color: var(--vscode-terminal-ansiBrightBlack, var(--vscode-descriptionForeground)); }
+.pi-tui-fg-bright-1 { color: var(--vscode-terminal-ansiBrightRed, var(--vscode-editorError-foreground)); }
+.pi-tui-fg-bright-2 { color: var(--vscode-terminal-ansiBrightGreen, var(--vscode-testing-iconPassed)); }
+.pi-tui-fg-bright-3 { color: var(--vscode-terminal-ansiBrightYellow, var(--vscode-editorWarning-foreground)); }
+.pi-tui-fg-bright-4 { color: var(--vscode-terminal-ansiBrightBlue, var(--vscode-textLink-foreground)); }
+.pi-tui-fg-bright-5 { color: var(--vscode-terminal-ansiBrightMagenta, var(--vscode-symbolIcon-functionForeground)); }
+.pi-tui-fg-bright-6 { color: var(--vscode-terminal-ansiBrightCyan, var(--vscode-debugTokenExpression-name)); }
+.pi-tui-fg-bright-7 { color: var(--vscode-terminal-ansiBrightWhite, var(--vscode-editor-foreground)); }
+.pi-tui-bg-0 { background-color: var(--vscode-terminal-ansiBlack, transparent); }
+.pi-tui-bg-1 { background-color: var(--vscode-terminal-ansiRed, transparent); }
+.pi-tui-bg-2 { background-color: var(--vscode-terminal-ansiGreen, transparent); }
+.pi-tui-bg-3 { background-color: var(--vscode-terminal-ansiYellow, transparent); }
+.pi-tui-bg-4 { background-color: var(--vscode-terminal-ansiBlue, transparent); }
+.pi-tui-bg-5 { background-color: var(--vscode-terminal-ansiMagenta, transparent); }
+.pi-tui-bg-6 { background-color: var(--vscode-terminal-ansiCyan, transparent); }
+.pi-tui-bg-7 { background-color: var(--vscode-terminal-ansiWhite, transparent); }
+.pi-tui-bg-bright-0 { background-color: var(--vscode-terminal-ansiBrightBlack, transparent); }
+.pi-tui-bg-bright-1 { background-color: var(--vscode-terminal-ansiBrightRed, transparent); }
+.pi-tui-bg-bright-2 { background-color: var(--vscode-terminal-ansiBrightGreen, transparent); }
+.pi-tui-bg-bright-3 { background-color: var(--vscode-terminal-ansiBrightYellow, transparent); }
+.pi-tui-bg-bright-4 { background-color: var(--vscode-terminal-ansiBrightBlue, transparent); }
+.pi-tui-bg-bright-5 { background-color: var(--vscode-terminal-ansiBrightMagenta, transparent); }
+.pi-tui-bg-bright-6 { background-color: var(--vscode-terminal-ansiBrightCyan, transparent); }
+.pi-tui-bg-bright-7 { background-color: var(--vscode-terminal-ansiBrightWhite, transparent); }
 .tool-exploration-group { width: min(100%, 68ch); margin: 7px auto; }
 .tool-exploration-group > summary { padding: 5px 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; cursor: pointer; }
 .tool-exploration-group[open] > summary { color: var(--text); }

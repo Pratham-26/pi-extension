@@ -1457,6 +1457,108 @@ function renderMessages(shouldFollow = true) {
   updateControls();
 }
 
+const SAFE_TUI_STYLES = new Set([
+  'bold', 'dim', 'italic', 'underline', 'inverse', 'strike',
+  ...Array.from({ length: 8 }, (_, index) => `fg-${index}`),
+  ...Array.from({ length: 8 }, (_, index) => `fg-bright-${index}`),
+  ...Array.from({ length: 8 }, (_, index) => `bg-${index}`),
+  ...Array.from({ length: 8 }, (_, index) => `bg-bright-${index}`),
+]);
+
+function appendTuiSegments(parent, line) {
+  if (!Array.isArray(line)) return;
+  for (const segment of line.slice(0, 256)) {
+    if (!segment || typeof segment.text !== 'string') continue;
+    const text = segment.text.replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) => character === '\t' ? '  ' : '').slice(0, 2000);
+    if (!text) continue;
+    const span = document.createElement('span');
+    const styles = Array.isArray(segment.styles)
+      ? segment.styles.slice(0, 16).filter((style) => typeof style === 'string' && SAFE_TUI_STYLES.has(style))
+      : [];
+    if (styles.length) span.className = styles.map((style) => `pi-tui-${style}`).join(' ');
+    span.textContent = text;
+    parent.append(span);
+  }
+}
+
+function createTuiOutput(lines, className) {
+  if (!Array.isArray(lines) || !lines.length) return undefined;
+  const output = document.createElement('pre');
+  output.className = `tool-output tool-renderer-output ${className}`;
+  for (const line of lines.slice(0, 120)) {
+    const row = document.createElement('span');
+    row.className = 'tool-renderer-line';
+    appendTuiSegments(row, line);
+    output.append(row);
+  }
+  return output;
+}
+
+function createTuiPreview(lines) {
+  if (!Array.isArray(lines) || !lines.length) return undefined;
+  const preview = document.createElement('span');
+  preview.className = 'tool-renderer-summary';
+  appendTuiSegments(preview, lines[0]);
+  return preview;
+}
+
+function createRawToolDisclosure(title, text, className) {
+  if (!text) return undefined;
+  const disclosure = document.createElement('details');
+  disclosure.className = `tool-renderer-fallback ${className}`;
+  const summary = document.createElement('summary');
+  summary.textContent = title;
+  const output = document.createElement('pre');
+  output.className = 'tool-output';
+  output.textContent = text;
+  disclosure.append(summary, output);
+  return disclosure;
+}
+
+function updateToolRendererCard(card, message, statusText) {
+  card.querySelectorAll('.tool-renderer-call, .tool-renderer-result, .tool-renderer-fallback, .tool-renderer-preview, .tool-arguments, .tool-result-output')
+    .forEach((node) => node.remove());
+  const summary = card.querySelector('summary');
+  if (!(summary instanceof HTMLElement)) return;
+  summary.replaceChildren(document.createTextNode(statusText));
+
+  const callOutput = createTuiOutput(message.rendererCall, 'tool-renderer-call');
+  if (callOutput) {
+    summary.after(callOutput);
+    const rawArgs = typeof message.argsPreview === 'string' ? message.argsPreview.slice(0, 12000) : '';
+    const disclosure = createRawToolDisclosure('Arguments', rawArgs && rawArgs !== '{}' ? rawArgs : '', 'tool-renderer-arguments');
+    if (disclosure) callOutput.after(disclosure);
+  } else {
+    const argsPreview = typeof message.argsPreview === 'string' ? message.argsPreview.slice(0, 12000) : '';
+    if (argsPreview && argsPreview !== '{}') {
+      const args = document.createElement('pre');
+      args.className = 'tool-output tool-arguments';
+      args.textContent = `Arguments\n${argsPreview}`;
+      summary.after(args);
+    }
+  }
+
+  let resultText = String(message.result || '').slice(-12000);
+  if (message.hasImages) resultText = resultText.split('\n').filter((line) => line.trim() !== '[image output]').join('\n').trim();
+  const rendererResult = message.rendererResult && typeof message.rendererResult === 'object' ? message.rendererResult : undefined;
+  const collapsedOutput = rendererResult ? createTuiPreview(rendererResult.collapsed) : undefined;
+  const expandedOutput = rendererResult ? createTuiOutput(rendererResult.expanded, 'tool-renderer-result') : undefined;
+  if (collapsedOutput) summary.append(collapsedOutput);
+  if (expandedOutput) card.append(expandedOutput);
+  if (resultText) {
+    const disclosure = rendererResult && expandedOutput
+      ? createRawToolDisclosure('Raw result', resultText, 'tool-renderer-raw')
+      : undefined;
+    if (disclosure) card.append(disclosure);
+    else {
+      const output = document.createElement('pre');
+      output.className = 'tool-output tool-result-output';
+      output.textContent = resultText;
+      card.append(output);
+    }
+  }
+}
+
 function createHistoricalToolCard(message) {
   const detail = document.createElement('details');
   detail.className = `tool-card historical-tool-card${message.isError ? ' tool-error' : ''}`;
@@ -1465,23 +1567,8 @@ function createHistoricalToolCard(message) {
   detail.dataset.toolId = String(message.toolCallId || '').slice(0, 256);
   detail.dataset.toolName = toolName;
   const summary = document.createElement('summary');
-  summary.textContent = `${message.isError ? 'Failed' : 'Finished'} ${toolName}`;
   detail.append(summary);
-  const argsPreview = typeof message.argsPreview === 'string' ? message.argsPreview.slice(0, 12000) : '';
-  if (argsPreview && argsPreview !== '{}') {
-    const args = document.createElement('pre');
-    args.className = 'tool-output tool-arguments';
-    args.textContent = `Arguments\n${argsPreview}`;
-    detail.append(args);
-  }
-  let resultText = String(message.result || '').slice(-12000);
-  if (message.hasImages) resultText = resultText.split('\n').filter((line) => line.trim() !== '[image output]').join('\n').trim();
-  if (resultText) {
-    const output = document.createElement('pre');
-    output.className = 'tool-output tool-result-output';
-    output.textContent = resultText;
-    detail.append(output);
-  }
+  updateToolRendererCard(detail, message, `${message.isError ? 'Failed' : 'Finished'} ${toolName}`);
   renderToolImages(detail, message);
   appendStructuredToolDetails(detail, message.details);
   return detail;
@@ -3346,11 +3433,7 @@ window.addEventListener('message', (event) => {
       detail.dataset.toolId = String(data.id || '');
       detail.dataset.toolName = toolName;
       const summary = document.createElement('summary');
-      summary.textContent = `Running ${toolName}`;
-      const output = document.createElement('pre');
-      output.className = 'tool-output tool-arguments';
-      output.textContent = typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}';
-      detail.append(summary, output);
+      detail.append(summary);
       const toolMessage = {
         role: 'tool',
         toolCallId: String(data.id || '').slice(0, 256),
@@ -3359,8 +3442,11 @@ window.addEventListener('message', (event) => {
         result: '',
         details: undefined,
         isError: false,
+        rendererCall: Array.isArray(data.rendererCall) ? data.rendererCall : undefined,
+        rendererResult: undefined,
         node: detail,
       };
+      updateToolRendererCard(detail, toolMessage, `Running ${toolName}`);
       state.messages.push(toolMessage);
       const currentTools = state.toolMessagesBySession.get(state.sessionPath) || [];
       currentTools.push(toolMessage);
@@ -3381,6 +3467,12 @@ window.addEventListener('message', (event) => {
       if (toolMessage) {
         toolMessage.result = text.slice(-12000);
         toolMessage.details = data.details;
+        if (Object.prototype.hasOwnProperty.call(data, 'rendererResult')) {
+          toolMessage.rendererResult = data.rendererResult && typeof data.rendererResult === 'object' ? data.rendererResult : undefined;
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'rendererCall')) {
+          toolMessage.rendererCall = Array.isArray(data.rendererCall) ? data.rendererCall : undefined;
+        }
         if (data.type === 'tool-end') {
           toolMessage.hasImages = data.hasImages === true;
           toolMessage.imageCount = Number.isFinite(Number(data.imageCount)) ? Math.max(0, Math.trunc(Number(data.imageCount))) : 0;
@@ -3391,27 +3483,31 @@ window.addEventListener('message', (event) => {
         }
       }
       if (card) {
-        let output = card.querySelector('.tool-result-output');
-        if (text) {
-          if (!output) {
-            output = document.createElement('pre');
-            output.className = 'tool-output tool-result-output';
-            card.append(output);
-          }
-          output.textContent = text.slice(-12000);
-        } else output?.remove();
-        if (data.type === 'tool-end') renderToolImages(card, toolMessage || data);
+        const currentTool = toolMessage || {
+          role: 'tool',
+          toolCallId: toolId,
+          toolName: String(data.name || card.dataset.toolName || 'tool').slice(0, 128),
+          argsPreview: '',
+          result: text.slice(-12000),
+          details: data.details,
+          isError: Boolean(data.isError),
+          rendererCall: Array.isArray(data.rendererCall) ? data.rendererCall : undefined,
+          rendererResult: data.rendererResult && typeof data.rendererResult === 'object' ? data.rendererResult : undefined,
+        };
+        if (data.type === 'tool-end') {
+          currentTool.isError = Boolean(data.isError);
+          currentTool.toolName = String(data.name || card.dataset.toolName || 'tool').slice(0, 128);
+        }
+        updateToolRendererCard(card, currentTool, data.type === 'tool-end'
+          ? `${data.isError ? 'Failed' : 'Finished'} ${currentTool.toolName}`
+          : `Running ${currentTool.toolName}`);
+        if (data.type === 'tool-end') renderToolImages(card, currentTool);
         appendStructuredToolDetails(card, data.details, data.type === 'tool-update');
         if (data.type === 'tool-end') {
           card.classList.toggle('tool-error', Boolean(data.isError));
           const toolName = String(data.name || card.dataset.toolName || 'tool').slice(0, 128);
           card.dataset.toolName = toolName;
-          card.querySelector('summary').textContent = `${data.isError ? 'Failed' : 'Finished'} ${toolName}`;
           card.open = toolExpansionPreference(toolName, Boolean(data.isError));
-          if (toolMessage) {
-            toolMessage.toolName = toolName;
-            toolMessage.isError = Boolean(data.isError);
-          }
         }
       }
       break;

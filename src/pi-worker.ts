@@ -90,6 +90,7 @@ type SessionLike = {
   getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
   getSessionStats?: () => { tokens: { total: number }; cost: number };
   getAllTools?: () => Array<{ name: string; description?: string; namespace?: { name?: string } }>;
+  getToolDefinition?: (name: string) => unknown;
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
   sessionManager?: {
@@ -123,6 +124,10 @@ type SessionLike = {
       description?: string;
       getArgumentCompletions?: (prefix: string) => unknown;
     }>;
+    resolveToolRenderers?: (name: string, base: () => unknown) => {
+      renderCall?: (args: unknown, theme: unknown, context: unknown) => unknown;
+      renderResult?: (result: unknown, options: { expanded: boolean; isPartial: boolean }, theme: unknown, context: unknown) => unknown;
+    } | undefined;
   };
   bindExtensions?: (bindings: Record<string, unknown>) => Promise<void>;
   setModel?: (model: unknown) => Promise<void>;
@@ -186,6 +191,32 @@ let authenticatingProvider = false;
 let providerAuthController: AbortController | undefined;
 let activePromptSuggestion: { requestId: string; entryId: string; controller: AbortController; session: SessionLike } | undefined;
 let lastPromptSuggestionAt = 0;
+type SafeTuiSegment = { text: string; styles: string[] };
+type SafeTuiLine = SafeTuiSegment[];
+type RenderedToolResult = { collapsed: SafeTuiLine[]; expanded: SafeTuiLine[] };
+type ToolRendererState = {
+  args: unknown;
+  uiState: Record<string, unknown>;
+  callComponent?: unknown;
+  resultComponent?: unknown;
+  callLines?: SafeTuiLine[];
+  resultLines?: RenderedToolResult;
+  callRendered: boolean;
+  finalResultRendered?: boolean;
+  lastUpdateAt: number;
+};
+type PiThemeModule = {
+  theme?: unknown;
+  getThemeByName?: (name: string) => unknown;
+};
+type PiToolRenderers = {
+  renderCall?: (args: unknown, theme: unknown, context: unknown) => unknown;
+  renderResult?: (result: unknown, options: { expanded: boolean; isPartial: boolean }, theme: unknown, context: unknown) => unknown;
+};
+let piThemeModulePromise: Promise<PiThemeModule | undefined> | undefined;
+let piThemeModule: PiThemeModule | undefined;
+const toolRendererStates = new Map<string, ToolRendererState>();
+const MAX_TOOL_RENDERER_STATES = 160;
 let defaultTools: string[] = [];
 let sessionExtensionsBound = false;
 let disabledSkills = new Set<string>();
@@ -495,6 +526,297 @@ function toolArgsPreview(args: unknown): string {
   }
 }
 
+const MAX_TUI_RENDER_CHARS = 12_000;
+const MAX_TUI_RENDER_LINES = 120;
+const TUI_ANSI_PALETTE: Array<[number, number, number]> = [
+  [0, 0, 0], [205, 49, 49], [13, 188, 121], [229, 229, 16],
+  [36, 114, 200], [188, 63, 188], [17, 168, 205], [229, 229, 229],
+  [102, 102, 102], [241, 76, 76], [35, 209, 139], [245, 245, 67],
+  [59, 142, 234], [214, 112, 214], [41, 184, 219], [255, 255, 255],
+];
+
+function resetAnsiColor(styles: Set<string>, prefix: 'fg-' | 'bg-'): void {
+  for (const style of styles) if (style.startsWith(prefix)) styles.delete(style);
+}
+
+function closestAnsiColor(red: number, green: number, blue: number): string {
+  let closest = 0;
+  let distance = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < TUI_ANSI_PALETTE.length; index += 1) {
+    const color = TUI_ANSI_PALETTE[index];
+    const candidate = (red - color[0]) ** 2 + (green - color[1]) ** 2 + (blue - color[2]) ** 2;
+    if (candidate < distance) {
+      distance = candidate;
+      closest = index;
+    }
+  }
+  return closest < 8 ? String(closest) : `bright-${closest - 8}`;
+}
+
+function ansi256Color(index: number): string {
+  if (index < 16) return index < 8 ? String(index) : `bright-${index - 8}`;
+  if (index >= 232) {
+    const value = Math.max(0, Math.min(255, 8 + (index - 232) * 10));
+    return closestAnsiColor(value, value, value);
+  }
+  const colorIndex = Math.max(0, Math.min(215, index - 16));
+  const levels = [0, 95, 135, 175, 215, 255];
+  return closestAnsiColor(
+    levels[Math.floor(colorIndex / 36)],
+    levels[Math.floor(colorIndex / 6) % 6],
+    levels[colorIndex % 6],
+  );
+}
+
+function applyAnsiSgr(styles: Set<string>, sequence: string): void {
+  const codes = sequence ? sequence.split(';').map((part) => Number(part || 0)) : [0];
+  for (let index = 0; index < codes.length; index += 1) {
+    const code = codes[index];
+    if (code === 0) styles.clear();
+    else if (code === 1) styles.add('bold');
+    else if (code === 2) styles.add('dim');
+    else if (code === 3) styles.add('italic');
+    else if (code === 4) styles.add('underline');
+    else if (code === 7) styles.add('inverse');
+    else if (code === 9) styles.add('strike');
+    else if (code === 22) { styles.delete('bold'); styles.delete('dim'); }
+    else if (code === 23) styles.delete('italic');
+    else if (code === 24) styles.delete('underline');
+    else if (code === 27) styles.delete('inverse');
+    else if (code === 29) styles.delete('strike');
+    else if (code >= 30 && code <= 37) { resetAnsiColor(styles, 'fg-'); styles.add(`fg-${code - 30}`); }
+    else if (code >= 90 && code <= 97) { resetAnsiColor(styles, 'fg-'); styles.add(`fg-bright-${code - 90}`); }
+    else if (code === 39) resetAnsiColor(styles, 'fg-');
+    else if (code >= 40 && code <= 47) { resetAnsiColor(styles, 'bg-'); styles.add(`bg-${code - 40}`); }
+    else if (code >= 100 && code <= 107) { resetAnsiColor(styles, 'bg-'); styles.add(`bg-bright-${code - 100}`); }
+    else if (code === 49) resetAnsiColor(styles, 'bg-');
+    else if (code === 38 || code === 48) {
+      const prefix = code === 38 ? 'fg-' : 'bg-';
+      const mode = codes[index + 1];
+      let color: string | undefined;
+      if (mode === 5 && Number.isFinite(codes[index + 2])) {
+        color = ansi256Color(Math.max(0, Math.min(255, codes[index + 2])));
+        index += 2;
+      } else if (mode === 2 && [codes[index + 2], codes[index + 3], codes[index + 4]].every(Number.isFinite)) {
+        color = closestAnsiColor(...[codes[index + 2], codes[index + 3], codes[index + 4]].map((value) => Math.max(0, Math.min(255, value))) as [number, number, number]);
+        index += 4;
+      }
+      if (color) { resetAnsiColor(styles, prefix); styles.add(`${prefix}${color}`); }
+    }
+  }
+}
+
+function safeTuiLine(value: string, total: { chars: number }): SafeTuiLine {
+  const line: SafeTuiLine = [];
+  const styles = new Set<string>();
+  const sgrOrControl = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
+  const append = (source: string) => {
+    if (total.chars >= MAX_TUI_RENDER_CHARS) return;
+    const available = Math.min(2_000 - line.reduce((sum, segment) => sum + segment.text.length, 0), MAX_TUI_RENDER_CHARS - total.chars);
+    if (available <= 0) return;
+    const text = source.slice(0, available).replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) => character === '\t' ? '  ' : '');
+    if (!text) return;
+    const classList = [...styles].sort();
+    const previous = line[line.length - 1];
+    if (previous && previous.styles.join(' ') === classList.join(' ')) previous.text += text;
+    else line.push({ text, styles: classList });
+    total.chars += text.length;
+  };
+  let cursor = 0;
+  for (const match of value.matchAll(sgrOrControl)) {
+    const token = match[0];
+    const start = match.index ?? cursor;
+    append(value.slice(cursor, start));
+    if (token.startsWith('\u001b[') && token.endsWith('m')) {
+      const params = token.slice(2, -1);
+      if (/^[\d;]*$/.test(params)) applyAnsiSgr(styles, params);
+    }
+    cursor = start + token.length;
+  }
+  append(value.slice(cursor));
+  return line;
+}
+
+function safeTuiLines(component: unknown): SafeTuiLine[] | undefined {
+  if (!component || typeof component !== 'object' || typeof (component as { render?: unknown }).render !== 'function') return undefined;
+  try {
+    const rendered = (component as { render: (width: number) => unknown }).render(80);
+    const sourceLines = Array.isArray(rendered) ? rendered : typeof rendered === 'string' ? rendered.split('\n') : [];
+    const total = { chars: 0 };
+    const lines: SafeTuiLine[] = [];
+    for (const value of sourceLines.slice(0, MAX_TUI_RENDER_LINES)) {
+      if (typeof value !== 'string') continue;
+      lines.push(safeTuiLine(value, total));
+      if (total.chars >= MAX_TUI_RENDER_CHARS) break;
+    }
+    if (sourceLines.length > lines.length && lines.length) {
+      lines.push([{ text: '[renderer output truncated]', styles: [] }]);
+    }
+    return lines;
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadToolRendererTheme(current: SessionLike): Promise<unknown> {
+  if (!piThemeModulePromise) {
+    const themePath = extensionRoot
+      ? join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'modes', 'interactive', 'theme', 'theme.js')
+      : '';
+    piThemeModulePromise = themePath && existsSync(themePath)
+      ? import(pathToFileURL(themePath).href).then((module) => {
+        piThemeModule = module as PiThemeModule;
+        return piThemeModule;
+      }).catch(() => undefined)
+      : Promise.resolve(undefined);
+  }
+  await piThemeModulePromise;
+  return getCurrentToolRendererTheme(current);
+}
+
+function getCurrentToolRendererTheme(current: SessionLike): unknown {
+  const module = piThemeModule;
+  if (!module) return undefined;
+  try {
+    const selected = current.settingsManager?.getTheme();
+    if (selected && module.getThemeByName) return module.getThemeByName(selected) ?? module.theme;
+  } catch {
+    // Fall back to Pi's default theme if a user theme cannot be loaded.
+  }
+  return module.theme;
+}
+
+function toolRendererFor(current: SessionLike, toolName: string): PiToolRenderers | undefined {
+  try {
+    return current.extensionRunner?.resolveToolRenderers?.(toolName, () => current.getToolDefinition?.(toolName));
+  } catch {
+    return undefined;
+  }
+}
+
+function toolRendererState(toolCallId: string, args: unknown): ToolRendererState {
+  let current = toolRendererStates.get(toolCallId);
+  if (current) return current;
+  let safeArgs: unknown;
+  try {
+    safeArgs = boundedToolValue(args ?? {});
+  } catch {
+    safeArgs = '[tool arguments unavailable]';
+  }
+  current = { args: safeArgs, uiState: {}, callRendered: false, lastUpdateAt: 0 };
+  toolRendererStates.set(toolCallId, current);
+  while (toolRendererStates.size > MAX_TOOL_RENDERER_STATES) {
+    const oldest = toolRendererStates.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    toolRendererStates.delete(oldest);
+  }
+  return current;
+}
+
+function toolRendererContext(
+  toolCallId: string,
+  rendererState: ToolRendererState,
+  slot: 'call' | 'result',
+  options: { isPartial: boolean; expanded: boolean; isError: boolean; durationMs?: number },
+): Record<string, unknown> {
+  return {
+    args: rendererState.args,
+    toolCallId,
+    invalidate: () => undefined,
+    lastComponent: slot === 'call' ? rendererState.callComponent : rendererState.resultComponent,
+    state: rendererState.uiState,
+    cwd,
+    executionStarted: true,
+    argsComplete: true,
+    isPartial: options.isPartial,
+    expanded: options.expanded,
+    showImages: false,
+    isError: options.isError,
+    durationMs: options.durationMs,
+    outputPad: 1,
+  };
+}
+
+function renderPiToolCall(current: SessionLike, toolCallId: string, toolName: string, args: unknown, renderTheme: unknown): SafeTuiLine[] | undefined {
+  const rendererState = toolRendererState(toolCallId, args);
+  if (rendererState.callRendered) return rendererState.callLines;
+  rendererState.callRendered = true;
+  const renderer = toolRendererFor(current, toolName);
+  if (!renderer?.renderCall) return undefined;
+  try {
+    const component = renderer.renderCall(rendererState.args, renderTheme, toolRendererContext(toolCallId, rendererState, 'call', {
+      isPartial: true, expanded: false, isError: false,
+    }));
+    rendererState.callComponent = component;
+    rendererState.callLines = safeTuiLines(component);
+    return rendererState.callLines;
+  } catch {
+    return undefined;
+  }
+}
+
+function boundedToolRendererResult(value: unknown): { content: Array<Record<string, unknown>>; details?: unknown; isError: boolean } {
+  try {
+    if (!value || typeof value !== 'object') return { content: [], isError: false };
+    const result = value as Record<string, unknown>;
+    const content = Array.isArray(result.content) ? result.content.slice(0, 100).flatMap((part): Array<Record<string, unknown>> => {
+      if (!part || typeof part !== 'object' || Array.isArray(part)) return [];
+      const block = part as Record<string, unknown>;
+      if (block.type === 'text' && typeof block.text === 'string') return [{ type: 'text', text: block.text.slice(0, 4_000) }];
+      if (block.type === 'image') return [];
+      return [{ type: typeof block.type === 'string' ? block.type.slice(0, 64) : 'data', value: boundedToolValue(block) }];
+    }) : [];
+    const details = result.details === undefined
+      ? undefined
+      : boundedStructuredToolValue(result.details, { remaining: 8_000 });
+    return { content, ...(details === undefined ? {} : { details }), isError: result.isError === true };
+  } catch {
+    return { content: [], isError: true };
+  }
+}
+
+function renderPiToolResult(
+  current: SessionLike,
+  toolCallId: string,
+  toolName: string,
+  args: unknown,
+  value: unknown,
+  renderTheme: unknown,
+  options: { isPartial: boolean; isError: boolean; durationMs?: number },
+): RenderedToolResult | undefined {
+  const rendererState = toolRendererState(toolCallId, args);
+  if (!options.isPartial && rendererState.finalResultRendered) return rendererState.resultLines;
+  if (options.isPartial && Date.now() - rendererState.lastUpdateAt < 100) return rendererState.resultLines;
+  rendererState.lastUpdateAt = Date.now();
+  const renderer = toolRendererFor(current, toolName);
+  if (!renderer?.renderResult) return undefined;
+  const safeResult = boundedToolRendererResult(value);
+  safeResult.isError = options.isError;
+  try {
+    const collapsedComponent = renderer.renderResult(
+      safeResult,
+      { expanded: false, isPartial: options.isPartial },
+      renderTheme,
+      toolRendererContext(toolCallId, rendererState, 'result', { ...options, expanded: false }),
+    );
+    rendererState.resultComponent = collapsedComponent;
+    const collapsed = safeTuiLines(collapsedComponent) ?? [];
+    const expandedComponent = renderer.renderResult(
+      safeResult,
+      { expanded: true, isPartial: options.isPartial },
+      renderTheme,
+      toolRendererContext(toolCallId, rendererState, 'result', { ...options, expanded: true }),
+    );
+    rendererState.resultComponent = expandedComponent;
+    const expanded = safeTuiLines(expandedComponent) ?? [];
+    rendererState.resultLines = { collapsed, expanded };
+    if (!options.isPartial) rendererState.finalResultRendered = true;
+    return rendererState.resultLines;
+  } catch {
+    return undefined;
+  }
+}
+
 function boundedUiText(value: unknown, maxLength: number): string {
   try {
     return String(value ?? '').slice(0, maxLength);
@@ -729,25 +1051,28 @@ function getSessionBookmarks(): string[] {
 }
 
 function snapshot(): void {
-  if (!session) return;
-  const model = session.model;
-  const usageStats = session.getSessionStats?.();
-  const branchEntries = session.sessionManager?.buildContextEntries() ?? [];
+  const activeSession = session;
+  if (!activeSession) return;
+  const model = activeSession.model;
+  const usageStats = activeSession.getSessionStats?.();
+  const branchEntries = activeSession.sessionManager?.buildContextEntries() ?? [];
   const contextEdits = new Map<string, { content?: unknown } | null>();
   for (const entry of branchEntries) {
     if (entry.type === 'context_edit' && typeof entry.targetId === 'string') contextEdits.set(entry.targetId, entry.replacement ?? null);
   }
-  const toolCalls = new Map<string, { name: string; argsPreview: string }>();
+  const toolCalls = new Map<string, { name: string; args: unknown; argsPreview: string }>();
   for (const entry of branchEntries) {
     if (entry.type !== 'message' || entry.message?.role !== 'assistant' || !Array.isArray(entry.message.content)) continue;
     for (const part of entry.message.content as Array<Record<string, unknown>>) {
       if (part.type !== 'toolCall' || typeof part.id !== 'string' || !part.id || part.id.length > 256) continue;
       toolCalls.set(part.id, {
         name: typeof part.name === 'string' ? part.name.slice(0, 128) : 'tool',
+        args: boundedToolValue(part.arguments ?? {}),
         argsPreview: toolArgsPreview(part.arguments),
       });
     }
   }
+  const renderableToolCallIds = new Set([...toolCalls.keys()].slice(-50));
   type SnapshotMessage = { role: string; text?: string; imageContent?: unknown; [key: string]: unknown };
   const userAssistantSnapshot = (
     display: NonNullable<ReturnType<typeof toUiMessage>>,
@@ -763,17 +1088,29 @@ function snapshot(): void {
     if (entry.message.role === 'toolResult') {
       const toolCallId = typeof entry.message.toolCallId === 'string' ? entry.message.toolCallId.slice(0, 256) : '';
       const call = toolCalls.get(toolCallId);
+      const toolName = typeof entry.message.toolName === 'string' ? entry.message.toolName.slice(0, 128) : call?.name ?? 'tool';
       const imageCount = Array.isArray(entry.message.content)
         ? entry.message.content.filter((part: any) => part?.type === 'image').length
         : 0;
+      const rendererCall = call && renderableToolCallIds.has(toolCallId)
+        ? renderPiToolCall(activeSession, toolCallId, toolName, call.args, getCurrentToolRendererTheme(activeSession))
+        : undefined;
+      const rendererResult = call && renderableToolCallIds.has(toolCallId)
+        ? renderPiToolResult(activeSession, toolCallId, toolName, call.args, entry.message, getCurrentToolRendererTheme(activeSession), {
+          isPartial: false,
+          isError: entry.message.isError === true,
+        })
+        : undefined;
       return [{
         role: 'tool',
         toolCallId,
-        toolName: typeof entry.message.toolName === 'string' ? entry.message.toolName.slice(0, 128) : call?.name ?? 'tool',
+        toolName,
         argsPreview: call?.argsPreview ?? '{}',
         result: toolOutput(entry.message),
         details: toolDetails(entry.message),
         isError: entry.message.isError === true,
+        ...(rendererCall ? { rendererCall } : {}),
+        ...(rendererResult ? { rendererResult } : {}),
         ...(imageCount ? { imageContent: entry.message.content, imageCount, hasImages: true } : {}),
       }];
     }
@@ -794,13 +1131,13 @@ function snapshot(): void {
   });
   addBoundedTranscriptImages(messages);
   send('snapshot', {
-    sessionId: session.sessionId,
-    sessionFile: session.sessionFile,
-    title: session.sessionName || messages.find((message) => message.role === 'user')?.text || 'New chat',
+    sessionId: activeSession.sessionId,
+    sessionFile: activeSession.sessionFile,
+    title: activeSession.sessionName || messages.find((message) => message.role === 'user')?.text || 'New chat',
     model: model?.id ? `${model.provider ?? ''} ${model.id}`.trim() : undefined,
     messages,
     busy,
-    contextUsage: session.getContextUsage?.(),
+    contextUsage: activeSession.getContextUsage?.(),
     sessionStats: usageStats ? { tokens: { total: usageStats.tokens.total }, cost: usageStats.cost } : undefined,
     bookmarks: getSessionBookmarks(),
   });
@@ -965,6 +1302,8 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   unsubscribe?.();
   session?.dispose();
   session = next;
+  toolRendererStates.clear();
+  await loadToolRendererTheme(next);
   sessionExtensionsBound = extensionsBound;
   busy = false;
   compacting = false;
@@ -997,26 +1336,44 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
       }
     } else if (event.type === 'tool_execution_start') {
       const toolName = String(event.toolName ?? 'tool').slice(0, 128);
+      const toolCallId = String(event.toolCallId ?? `${Date.now()}`).slice(0, 256);
+      const rendererCall = renderPiToolCall(next, toolCallId, toolName, event.args, getCurrentToolRendererTheme(next));
       send('tool-start', {
-        id: String(event.toolCallId ?? `${Date.now()}`).slice(0, 256),
+        id: toolCallId,
         name: toolName,
         argsPreview: toolArgsPreview(event.args),
+        rendererCall: rendererCall ?? null,
       });
       send('activity', { message: `Running ${toolName}` });
     } else if (event.type === 'tool_execution_update') {
+      const toolCallId = String(event.toolCallId ?? '').slice(0, 256);
+      const toolName = String(event.toolName ?? 'tool').slice(0, 128);
+      const rendererResult = renderPiToolResult(next, toolCallId, toolName, event.args, event.partialResult, getCurrentToolRendererTheme(next), {
+        isPartial: true,
+        isError: event.partialResult?.isError === true,
+      });
       send('tool-update', {
-        id: String(event.toolCallId ?? '').slice(0, 256),
-        name: String(event.toolName ?? 'tool').slice(0, 128),
+        id: toolCallId,
+        name: toolName,
         result: toolOutput(event.partialResult),
         details: toolDetails(event.partialResult),
+        rendererResult: rendererResult ?? null,
       });
     } else if (event.type === 'tool_execution_end') {
+      const toolCallId = String(event.toolCallId ?? '').slice(0, 256);
+      const toolName = String(event.toolName ?? 'tool').slice(0, 128);
+      const rendererResult = renderPiToolResult(next, toolCallId, toolName, undefined, event.result, getCurrentToolRendererTheme(next), {
+        isPartial: false,
+        isError: Boolean(event.isError),
+        durationMs: typeof event.durationMs === 'number' ? event.durationMs : undefined,
+      });
       send('tool-end', {
-        id: String(event.toolCallId ?? '').slice(0, 256),
-        name: String(event.toolName ?? 'tool').slice(0, 128),
+        id: toolCallId,
+        name: toolName,
         result: toolOutput(event.result),
         details: toolDetails(event.result),
         isError: Boolean(event.isError),
+        rendererResult: rendererResult ?? null,
         ...boundedTranscriptImageFields(event.result?.content),
       });
     } else if (event.type === 'thinking_level_changed' || event.type === 'model_change') {
