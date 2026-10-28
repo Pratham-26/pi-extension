@@ -79,6 +79,9 @@ const state = {
   toolMessagesBySession: new Map(),
   thinkingExpansion: new Map(),
   extensionWidgets: new Map(),
+  extensionWidgetFocusRequestId: '',
+  extensionWidgetPressedKeys: new Map(),
+  extensionWidgetLastPointerAt: 0,
   extensionChrome: { header: [], footer: [] },
   extensionStatuses: new Map(),
   extensionRequest: undefined,
@@ -3109,23 +3112,139 @@ function replaceQueue(next) {
   post('replaceQueue', state.queue);
 }
 
+function extensionWidgetMouseFromEvent(event, output, type, lines) {
+  const mouse = extensionCustomMouseFromEvent(event, output, type);
+  if (!mouse) return undefined;
+  mouse.height = Math.max(1, Math.min(120, lines?.length || 24));
+  return mouse;
+}
+
+function handleExtensionWidgetKeyboard(event, eventType) {
+  const output = event.target instanceof Element ? event.target.closest('.extension-widget-renderer-output') : undefined;
+  if (!output || document.activeElement !== output) {
+    if (eventType === 3) state.extensionWidgetPressedKeys.delete(event.code);
+    return;
+  }
+  const requestId = output.dataset.requestId || '';
+  const widget = [...state.extensionWidgets.values()].find((entry) => entry.requestId === requestId && entry.interactive);
+  if (!widget || !/^pi-widget-\d{1,12}$/.test(requestId) || event.isComposing || event.key === 'Process' || event.key === 'Dead') return;
+  if (eventType === 3) {
+    const pressed = state.extensionWidgetPressedKeys.get(event.code);
+    if (!pressed) return;
+    state.extensionWidgetPressedKeys.delete(event.code);
+    const sequence = extensionCustomKeyboardSequence(pressed, 3, widget.wantsKeyRelease);
+    if (sequence) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      post('extensionWidgetInput', { requestId, data: sequence });
+    }
+    return;
+  }
+  const sequence = extensionCustomKeyboardSequence(event, 1, widget.wantsKeyRelease);
+  if (!sequence) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (widget.wantsKeyRelease && (state.extensionWidgetPressedKeys.has(event.code) || state.extensionWidgetPressedKeys.size < 128)) {
+    state.extensionWidgetPressedKeys.set(event.code, {
+      key: event.key,
+      code: event.code,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+    });
+  }
+  post('extensionWidgetInput', { requestId, data: sequence });
+}
+
 function renderExtensionWidgets() {
+  const focusedOutput = document.activeElement instanceof Element
+    ? document.activeElement.closest('.extension-widget-renderer-output')
+    : undefined;
+  const preserveFocusId = focusedOutput?.dataset.requestId || state.extensionWidgetFocusRequestId;
   ui.extensionWidgetsAbove.replaceChildren();
   ui.extensionWidgetsBelow.replaceChildren();
   for (const [key, widget] of state.extensionWidgets) {
     const details = document.createElement('details');
     details.className = 'extension-widget';
-    details.open = widget.options?.alwaysVisible !== false;
+    details.open = widget.options?.alwaysVisible !== false || (widget.interactive && widget.requestId === preserveFocusId);
     const summary = document.createElement('summary');
     summary.textContent = widget.options?.title || key;
     const content = document.createElement('div');
     content.className = 'extension-widget-content';
-    const rendered = createTuiOutput(widget.lines, 'extension-widget-renderer-output');
+    let rendered = createTuiOutput(widget.lines, 'extension-widget-renderer-output');
+    if (widget.interactive) {
+      if (!rendered) {
+        rendered = document.createElement('pre');
+        rendered.className = 'tool-output tool-renderer-output extension-widget-renderer-output';
+        rendered.textContent = 'This extension widget has no display output.';
+      }
+      rendered.tabIndex = 0;
+      rendered.dataset.requestId = widget.requestId;
+      rendered.setAttribute('role', 'region');
+      rendered.setAttribute('aria-label', `Interactive Pi extension widget: ${String(widget.options?.title || key).slice(0, 128)}`);
+      rendered.addEventListener('pointerdown', (event) => {
+        const mouse = extensionWidgetMouseFromEvent(event, rendered, 'press', widget.lines);
+        if (!mouse) return;
+        details.open = true;
+        event.preventDefault();
+        state.extensionWidgetFocusRequestId = widget.requestId;
+        try { rendered.setPointerCapture(event.pointerId); } catch { /* Pointer capture is optional in the webview. */ }
+        rendered.focus({ preventScroll: true });
+        post('extensionWidgetInput', { requestId: widget.requestId, mouse });
+      });
+      rendered.addEventListener('pointerup', (event) => {
+        const mouse = extensionWidgetMouseFromEvent(event, rendered, 'release', widget.lines);
+        if (mouse) post('extensionWidgetInput', { requestId: widget.requestId, mouse });
+      });
+      rendered.addEventListener('pointercancel', (event) => {
+        const mouse = extensionWidgetMouseFromEvent(event, rendered, 'release', widget.lines);
+        if (mouse) post('extensionWidgetInput', { requestId: widget.requestId, mouse });
+      });
+      rendered.addEventListener('contextmenu', (event) => event.preventDefault());
+      rendered.addEventListener('pointermove', (event) => {
+        const now = Date.now();
+        if (now - state.extensionWidgetLastPointerAt < 40) return;
+        state.extensionWidgetLastPointerAt = now;
+        const mouse = extensionWidgetMouseFromEvent(event, rendered, event.buttons ? 'drag' : 'move', widget.lines);
+        if (mouse) post('extensionWidgetInput', { requestId: widget.requestId, mouse });
+      });
+      rendered.addEventListener('click', (event) => {
+        const mouse = extensionWidgetMouseFromEvent(event, rendered, 'click', widget.lines);
+        if (!mouse) return;
+        mouse.clickCount = Math.max(1, Math.min(3, Number(event.detail) || 1));
+        post('extensionWidgetInput', { requestId: widget.requestId, mouse });
+      });
+      rendered.addEventListener('wheel', (event) => {
+        const mouse = extensionWidgetMouseFromEvent(event, rendered, 'wheel', widget.lines);
+        if (!mouse) return;
+        event.preventDefault();
+        mouse.wheelDelta = Math.max(-20, Math.min(20, Math.trunc(event.deltaY / 40) || Math.sign(event.deltaY)));
+        post('extensionWidgetInput', { requestId: widget.requestId, mouse });
+      }, { passive: false });
+      rendered.addEventListener('paste', (event) => {
+        const text = event.clipboardData?.getData('text/plain') || '';
+        if (!text) return;
+        event.preventDefault();
+        post('extensionWidgetInput', { requestId: widget.requestId, data: text.slice(0, 50_000), paste: true });
+      });
+    }
     if (rendered) content.append(rendered);
     else content.textContent = widget.content.join('\n');
     details.append(summary, content);
     const target = widget.options?.placement === 'belowEditor' ? ui.extensionWidgetsBelow : ui.extensionWidgetsAbove;
     target.append(details);
+  }
+  if (preserveFocusId) {
+    const output = [...document.querySelectorAll('.extension-widget-renderer-output')]
+      .find((node) => node.dataset.requestId === preserveFocusId);
+    if (output) {
+      state.extensionWidgetFocusRequestId = preserveFocusId;
+      output.focus({ preventScroll: true });
+    } else {
+      state.extensionWidgetFocusRequestId = '';
+      state.extensionWidgetPressedKeys.clear();
+    }
   }
 }
 
@@ -3901,19 +4020,37 @@ window.addEventListener('message', (event) => {
       renderExtensionStatuses();
       break;
     case 'extension-widget':
-      state.extensionWidgets.set(String(data.key || 'extension').slice(0, 128), {
-        content: Array.isArray(data.content) ? data.content.map(String) : [String(data.content || '')],
-        lines: Array.isArray(data.lines) ? data.lines.slice(0, 120) : undefined,
-        options: data.options && typeof data.options === 'object' ? data.options : {},
+      if (typeof data.key !== 'string' || !data.key || data.key.length > 128 || /[\u0000-\u001f\u007f]/.test(data.key)) break;
+      if (data.interactive === true && (typeof data.requestId !== 'string' || !/^pi-widget-\d{1,12}$/.test(data.requestId))) break;
+      state.extensionWidgets.set(data.key, {
+        content: Array.isArray(data.content) ? data.content.slice(0, 120).map((line) => String(line).slice(0, 2_000)) : [String(data.content || '').slice(0, 2_000)],
+        lines: Array.isArray(data.lines) ? boundedExtensionCustomLines(data.lines) : undefined,
+        options: data.options && typeof data.options === 'object' && !Array.isArray(data.options) ? {
+          title: typeof data.options.title === 'string' ? data.options.title.slice(0, 128) : data.key,
+          placement: data.options.placement === 'belowEditor' ? 'belowEditor' : 'aboveEditor',
+          alwaysVisible: data.options.alwaysVisible !== false,
+        } : {},
+        interactive: data.interactive === true,
+        requestId: data.interactive === true ? data.requestId : '',
+        wantsKeyRelease: data.wantsKeyRelease === true,
       });
       renderExtensionWidgets();
       break;
     case 'extension-widgets-reset':
       state.extensionWidgets.clear();
+      state.extensionWidgetFocusRequestId = '';
+      state.extensionWidgetPressedKeys.clear();
       renderExtensionWidgets();
       break;
     case 'extension-widget-remove':
-      state.extensionWidgets.delete(String(data.key || ''));
+      if (typeof data.key === 'string') {
+        const removed = state.extensionWidgets.get(data.key);
+        if (removed?.requestId === state.extensionWidgetFocusRequestId) {
+          state.extensionWidgetFocusRequestId = '';
+          state.extensionWidgetPressedKeys.clear();
+        }
+        state.extensionWidgets.delete(data.key);
+      }
       renderExtensionWidgets();
       break;
     case 'extension-status':
@@ -4321,6 +4458,8 @@ document.addEventListener('keydown', (event) => handleExtensionCustomKeyboard(ev
 document.addEventListener('keyup', (event) => handleExtensionCustomKeyboard(event, 3), true);
 document.addEventListener('keydown', (event) => handleExtensionEditorKeyboard(event, 1), true);
 document.addEventListener('keyup', (event) => handleExtensionEditorKeyboard(event, 3), true);
+document.addEventListener('keydown', (event) => handleExtensionWidgetKeyboard(event, 1), true);
+document.addEventListener('keyup', (event) => handleExtensionWidgetKeyboard(event, 3), true);
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !ui.promptTemplateLayer.hidden) closePromptTemplateForm();
   if (event.key === 'Escape' && !ui.dialogLayer.hidden) finishExtensionDialog(undefined);

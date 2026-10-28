@@ -36,6 +36,7 @@ type WorkerInput = {
   sessionPath?: string;
   gitBranch?: string | null;
   data?: unknown;
+  paste?: boolean;
   mouse?: unknown;
   enabled?: boolean;
   expectedEnabled?: boolean;
@@ -88,7 +89,7 @@ type SessionLike = {
     getExtensions?: () => { errors?: Array<{ path?: string; error?: string }>; warnings?: Array<{ path?: string; warning?: string }> };
     getSkills: () => { skills: Array<{ name: string; description?: string; disableModelInvocation?: boolean }>; diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
     getPrompts: () => { prompts: Array<{ name: string; description?: string; argumentHint?: string; content?: string; filePath?: string }>; diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
-    getThemes?: () => { diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
+    getThemes?: () => { themes?: unknown[]; diagnostics?: Array<{ type?: string; path?: string; message?: string }> };
   };
   getAvailableThinkingLevels?: () => string[];
   supportsThinking?: () => boolean;
@@ -154,13 +155,14 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; disabledContextFiles?: unknown; extensionRoot?: string } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; disabledContextFiles?: unknown; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui' } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
 const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbsolute(workerOptions.extensionRoot)
   ? workerOptions.extensionRoot
   : '';
 let mcpEnabled = workerOptions?.mcpEnabled === true;
 let autoNameSessions = workerOptions?.autoNameSessions !== false;
+const extensionUiMode: 'rpc' | 'tui' = workerOptions?.extensionUiMode === 'tui' ? 'tui' : 'rpc';
 function parseContextFilePaths(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length > 2000) return undefined;
   const paths: string[] = [];
@@ -248,6 +250,17 @@ type PendingExtensionCustom = {
   inputCount: number;
   requestSent: boolean;
 };
+type ActiveExtensionWidget = {
+  key: string;
+  requestId: string;
+  session: SessionLike;
+  component: ExtensionCustomComponent;
+  options: Record<string, unknown>;
+  renderTimer?: ReturnType<typeof setTimeout>;
+  lastRenderAt: number;
+  inputWindowStartedAt: number;
+  inputCount: number;
+};
 type ToolRendererState = {
   args: unknown;
   uiState: Record<string, unknown>;
@@ -263,6 +276,8 @@ type PiThemeModule = {
   theme?: unknown;
   getThemeByName?: (name: string) => unknown;
   getEditorTheme?: () => unknown;
+  initTheme?: (name?: string, enableWatcher?: boolean) => void;
+  setRegisteredThemes?: (themes: unknown[]) => void;
 };
 type PiKeybindingsModule = {
   KeybindingsManager?: { create?: (agentDir?: string) => unknown };
@@ -295,6 +310,8 @@ const MAX_PENDING_UI_REQUESTS = 64;
 const MAX_EXTENSION_UI_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_EXTENSION_WIDGETS = 32;
 const extensionWidgetKeys = new Set<string>();
+const extensionWidgetComponents = new Map<string, ActiveExtensionWidget>();
+const extensionTerminalInputListeners = new Set<(data: string) => { consume?: boolean; data?: string } | undefined>();
 const MAX_EXTENSION_STATUSES = 32;
 const extensionStatusValues = new Map<string, string>();
 const pendingExtensionCustom = new Map<string, PendingExtensionCustom>();
@@ -769,6 +786,13 @@ async function loadToolRendererTheme(current: SessionLike): Promise<unknown> {
       : Promise.resolve(undefined);
   }
   await piThemeModulePromise;
+  try {
+    piThemeModule?.setRegisteredThemes?.(current.resourceLoader?.getThemes?.().themes ?? []);
+    piThemeModule?.initTheme?.(current.settingsManager?.getTheme(), false);
+  } catch {
+    // Fall back to the Pi system theme if a custom theme cannot be initialized.
+    try { piThemeModule?.initTheme?.('system', false); } catch { /* Rendering can continue without theme helpers. */ }
+  }
   return getCurrentToolRendererTheme(current);
 }
 
@@ -1443,6 +1467,138 @@ function safeExtensionWidgetOptions(value: unknown, key: string): Record<string,
   };
 }
 
+function disposeExtensionWidgetComponent(key: string): void {
+  const widget = extensionWidgetComponents.get(key);
+  if (!widget) return;
+  extensionWidgetComponents.delete(key);
+  if (widget.renderTimer) clearTimeout(widget.renderTimer);
+  try { widget.component.dispose?.(); } catch { /* Keep other extension widgets available if cleanup fails. */ }
+}
+
+function disposeExtensionWidgetComponents(): void {
+  for (const key of extensionWidgetComponents.keys()) disposeExtensionWidgetComponent(key);
+  extensionTerminalInputListeners.clear();
+}
+
+function renderExtensionWidgetComponent(widget: ActiveExtensionWidget): void {
+  if (widget.session !== session || extensionWidgetComponents.get(widget.key) !== widget) return;
+  try {
+    send('extension-widget', {
+      key: widget.key,
+      requestId: widget.requestId,
+      interactive: true,
+      lines: renderSafePiComponent(widget.component),
+      wantsKeyRelease: widget.component.wantsKeyRelease === true,
+      options: widget.options,
+    });
+    widget.lastRenderAt = Date.now();
+  } catch {
+    disposeExtensionWidgetComponent(widget.key);
+    send('extension-widget-remove', { key: widget.key });
+    send('extension-ui-notice', { message: 'A Pi extension widget could not be rendered.', level: 'warning' });
+  }
+}
+
+function scheduleExtensionWidgetRender(widget: ActiveExtensionWidget): void {
+  if (widget.session !== session || extensionWidgetComponents.get(widget.key) !== widget || widget.renderTimer) return;
+  const wait = Math.max(0, 40 - (Date.now() - widget.lastRenderAt));
+  widget.renderTimer = setTimeout(() => {
+    widget.renderTimer = undefined;
+    renderExtensionWidgetComponent(widget);
+  }, wait);
+}
+
+function setExtensionWidgetComponent(
+  key: string,
+  factory: (tui: any, theme: unknown) => unknown,
+  current: SessionLike,
+  options: Record<string, unknown>,
+): void {
+  disposeExtensionWidgetComponent(key);
+  const requestId = `pi-widget-${++uiRequestSequence}`;
+  const tui = createStaticTuiContext();
+  let widget: ActiveExtensionWidget | undefined;
+  const requestRender = () => { if (widget) scheduleExtensionWidgetRender(widget); };
+  tui.requestRender = requestRender;
+  tui.renderNow = requestRender;
+  tui.stop = () => undefined;
+  tui.start = () => undefined;
+  tui.terminal = { columns: 80, rows: 24, width: 80, height: 24 };
+  try {
+    const value = factory(tui, getCurrentToolRendererTheme(current));
+    if (!value || typeof value !== 'object' || typeof (value as Record<string, unknown>).render !== 'function') {
+      try { (value as { dispose?: () => void } | undefined)?.dispose?.(); } catch { /* Ignore invalid widget cleanup failures. */ }
+      send('extension-widget-remove', { key });
+      send('extension-ui-notice', { message: 'A Pi extension widget did not provide a renderable component.', level: 'warning' });
+      return;
+    }
+    widget = {
+      key,
+      requestId,
+      session: current,
+      component: value as ExtensionCustomComponent,
+      options,
+      lastRenderAt: 0,
+      inputWindowStartedAt: 0,
+      inputCount: 0,
+    };
+    extensionWidgetComponents.set(key, widget);
+    renderExtensionWidgetComponent(widget);
+  } catch {
+    send('extension-widget-remove', { key });
+    send('extension-ui-notice', { message: 'A Pi extension widget could not be initialized.', level: 'warning' });
+  }
+}
+
+function handleExtensionWidgetInput(input: WorkerInput): void {
+  const requestId = typeof input.requestId === 'string' && /^pi-widget-\d{1,12}$/.test(input.requestId)
+    ? input.requestId
+    : '';
+  const widget = [...extensionWidgetComponents.values()].find((candidate) => candidate.requestId === requestId);
+  if (!widget || widget.session !== session) return;
+  const now = Date.now();
+  if (now - widget.inputWindowStartedAt >= 1000) {
+    widget.inputWindowStartedAt = now;
+    widget.inputCount = 0;
+  }
+  widget.inputCount += 1;
+  if (widget.inputCount > MAX_EXTENSION_CUSTOM_INPUTS_PER_SECOND) return;
+
+  if (input.mouse !== undefined) {
+    const mouse = validExtensionCustomMouse(input.mouse);
+    if (!mouse || !widget.component.handleMouse) return;
+    try {
+      widget.component.handleMouse(mouse);
+      widget.component.invalidate?.();
+      scheduleExtensionWidgetRender(widget);
+    } catch {
+      send('extension-ui-notice', { message: 'A Pi extension widget rejected pointer input.', level: 'warning' });
+    }
+    return;
+  }
+
+  const isPaste = input.paste === true;
+  if (typeof input.data !== 'string' || input.data.length === 0
+    || (isPaste ? input.data.length > 50_000 : !validExtensionCustomInput(input.data))) return;
+  let data = isPaste ? input.data.replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) => character === '\n' || character === '\r' || character === '\t' ? character : '') : input.data;
+  try {
+    for (const listener of extensionTerminalInputListeners) {
+      const result = listener(data);
+      if (result?.consume) {
+        widget.component.invalidate?.();
+        scheduleExtensionWidgetRender(widget);
+        return;
+      }
+      if (typeof result?.data === 'string' && result.data.length <= 50_000) data = result.data;
+    }
+    widget.component.handleInput?.(data);
+    widget.component.invalidate?.();
+    scheduleExtensionWidgetRender(widget);
+  } catch {
+    send('extension-ui-notice', { message: 'A Pi extension widget rejected keyboard input.', level: 'warning' });
+  }
+}
+
 function toolRendererState(toolCallId: string, args: unknown): ToolRendererState {
   let current = toolRendererStates.get(toolCallId);
   if (current) return current;
@@ -1757,7 +1913,7 @@ function requestProviderAuthPrompt(prompt: any): Promise<unknown> {
   });
 }
 
-function installExtensionUi(current: SessionLike): void {
+function createExtensionUi(current: SessionLike): Record<string, unknown> {
   const ui = {
     select: (title: string, options: string[], dialogOptions?: { signal?: AbortSignal; timeout?: number }) => requestExtensionUi('select', title, { options }, dialogOptions),
     confirm: (title: string, message: string, dialogOptions?: { signal?: AbortSignal; timeout?: number }) => requestExtensionUi('confirm', title, { message }, dialogOptions).then(Boolean),
@@ -1787,6 +1943,7 @@ function installExtensionUi(current: SessionLike): void {
       const safeKey = typeof key === 'string' ? key.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 128) : '';
       if (!safeKey) return;
       if (content === undefined) {
+        disposeExtensionWidgetComponent(safeKey);
         extensionWidgetKeys.delete(safeKey);
         send('extension-widget-remove', { key: safeKey });
         return;
@@ -1798,13 +1955,12 @@ function installExtensionUi(current: SessionLike): void {
       extensionWidgetKeys.add(safeKey);
       const safeOptions = safeExtensionWidgetOptions(options, safeKey);
       if (Array.isArray(content)) {
+        disposeExtensionWidgetComponent(safeKey);
         const total = { chars: 0 };
         const lines = content.slice(0, MAX_TUI_RENDER_LINES).map((line) => safeTuiLine(boundedUiText(line, 2_000), total));
         send('extension-widget', { key: safeKey, lines, options: safeOptions });
       } else if (typeof content === 'function') {
-        const lines = renderPiWidgetComponent(current, content);
-        if (lines?.length) send('extension-widget', { key: safeKey, lines, options: safeOptions });
-        else send('extension-ui-notice', { message: 'A Pi extension widget could not be rendered in the sidebar.', level: 'warning' });
+        setExtensionWidgetComponent(safeKey, content, current, safeOptions);
       }
     },
     setEditorText: (text: string) => setExtensionEditorText(text),
@@ -1823,7 +1979,12 @@ function installExtensionUi(current: SessionLike): void {
       }
     },
     getEditorText: () => getExtensionEditorText(),
-    onTerminalInput: () => () => undefined,
+    onTerminalInput: (handler: unknown) => {
+      if (typeof handler !== 'function') return () => undefined;
+      const listener = handler as (data: string) => { consume?: boolean; data?: string } | undefined;
+      extensionTerminalInputListeners.add(listener);
+      return () => extensionTerminalInputListeners.delete(listener);
+    },
     custom: async (factory: unknown, options?: unknown) => requestExtensionCustom(factory, options, current),
     setWidgetPlacement: () => undefined,
     setFooter: (factory?: unknown) => {
@@ -1846,7 +2007,11 @@ function installExtensionUi(current: SessionLike): void {
     getToolsExpanded: () => true,
     setToolsExpanded: () => undefined,
   };
-  current.extensionRunner?.setUIContext(ui, 'rpc');
+  return ui;
+}
+
+function installExtensionUi(current: SessionLike): void {
+  current.extensionRunner?.setUIContext(createExtensionUi(current), extensionUiMode);
 }
 
 function toUiMessage(message: { role?: string; content?: unknown }): { role: string; text: string; thinking?: string; context?: string; hasImages?: boolean; imageCount?: number } | undefined {
@@ -2297,6 +2462,7 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   unsubscribe?.();
   session?.dispose();
   session = next;
+  disposeExtensionWidgetComponents();
   extensionWidgetKeys.clear();
   extensionStatusValues.clear();
   extensionHeaderFactory = undefined;
@@ -3172,11 +3338,13 @@ async function createSessionInternal(path?: string): Promise<boolean> {
   try {
     const manager = path ? SessionManager.open(path) : SessionManager.create(cwd);
     const settingsManager = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
-    const extensionFactories = mcpEnabled
-      ? [createCodemodeExtension(), createToolSearchExtension(), createMcpExtension({
+    const extensionFactories = [
+      createCodemodeExtension(),
+      createToolSearchExtension(),
+      ...(mcpEnabled ? [createMcpExtension({
         openUrl: (url) => send('mcp-open-url', { url: String(url).slice(0, 2048) }),
-      })]
-      : [];
+      })] : []),
+    ];
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir: getAgentDir(),
@@ -3198,23 +3366,24 @@ async function createSessionInternal(path?: string): Promise<boolean> {
     packageManager = createdSession.settingsManager
       ? new DefaultPackageManager({ cwd, agentDir: getAgentDir(), settingsManager: createdSession.settingsManager })
       : undefined;
-    if (mcpEnabled) {
-      installExtensionUi(createdSession);
+    await bindSession(createdSession, false);
+    const uiContext = createExtensionUi(createdSession);
+    if (createdSession.bindExtensions) {
       createdExtensionsBound = true;
-      await createdSession.bindExtensions?.({});
+      await createdSession.bindExtensions({ uiContext, mode: extensionUiMode });
+      sessionExtensionsBound = true;
+    } else {
+      createdSession.extensionRunner?.setUIContext(uiContext, extensionUiMode);
     }
-    await bindSession(createdSession, createdExtensionsBound);
-    if (mcpEnabled) {
-      defaultTools = createdSession.getActiveToolNames?.() ?? defaultTools;
-      snapshot();
-    }
+    defaultTools = createdSession.getActiveToolNames?.() ?? defaultTools;
+    snapshot();
     watchModelConfig();
     if (result.modelFallbackMessage) send('notice', { message: result.modelFallbackMessage });
     await listSessions();
     sendConfiguredPackages();
     return true;
   } catch (error) {
-    if (createdSession && createdSession !== session) {
+    if (createdSession) {
       if (createdExtensionsBound) {
         try {
           await createdSession.extensionRunner?.emit?.({ type: 'session_shutdown', reason: 'quit' });
@@ -3222,7 +3391,17 @@ async function createSessionInternal(path?: string): Promise<boolean> {
           // Dispose a partially opened session even if shutdown fails.
         }
       }
-      createdSession.dispose();
+      if (createdSession === session) {
+        unsubscribe?.();
+        unsubscribe = undefined;
+        session = undefined;
+        sessionExtensionsBound = false;
+        disposeExtensionWidgetComponents();
+        extensionWidgetKeys.clear();
+        extensionStatusValues.clear();
+        send('extension-widgets-reset');
+      }
+      try { createdSession.dispose(); } catch { /* Keep the original session error visible. */ }
     }
     send('runtime-error', { message: error instanceof Error ? error.message : 'Could not open a Pi session.' });
     snapshot();
@@ -3307,6 +3486,7 @@ async function handle(input: WorkerInput): Promise<void> {
         sessionListController = undefined;
         providerAuthController?.abort();
         disposeExtensionEditor();
+        disposeExtensionWidgetComponents();
         cancelPendingExtensionCustom();
         send('extension-custom-reset');
         for (const resolve of pendingUiRequests.values()) resolve(undefined);
@@ -3378,6 +3558,9 @@ async function handle(input: WorkerInput): Promise<void> {
       }
       case 'extensionEditorInput':
         handleExtensionEditorInput(input);
+        return;
+      case 'extensionWidgetInput':
+        handleExtensionWidgetInput(input);
         return;
       case 'extensionCustomCancel': {
         const requestId = typeof input.requestId === 'string' && input.requestId.length <= 128 ? input.requestId : '';

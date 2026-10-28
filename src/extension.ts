@@ -109,6 +109,7 @@ type PiResourceChoice = vscode.QuickPickItem & {
 };
 
 type PiOfflineMode = 'inherit' | 'offline' | 'online';
+type PiExtensionUiMode = 'rpc' | 'tui';
 type ContextFileChoice = { path: string; enabled: boolean };
 
 type RunningSessionRecord = {
@@ -159,6 +160,10 @@ function isAllowedRuntimeEnvironmentName(value: string): boolean {
 function readPiOfflineMode(): PiOfflineMode {
   const value = vscode.workspace.getConfiguration('piChat').get<string>('offlineMode', 'inherit');
   return value === 'offline' || value === 'online' ? value : 'inherit';
+}
+
+function readPiExtensionUiMode(): PiExtensionUiMode {
+  return vscode.workspace.getConfiguration('piChat').get<string>('extensionUiMode', 'rpc') === 'tui' ? 'tui' : 'rpc';
 }
 
 type PendingSessionHandoff = {
@@ -248,6 +253,7 @@ export function activate(context: vscode.ExtensionContext): void {
       for (const activeProvider of [provider, ...editorProviders]) {
         if (event.affectsConfiguration('piChat.agentDir')) activeProvider.onAgentDirConfigurationChanged();
         if (event.affectsConfiguration('piChat.offlineMode')) activeProvider.onOfflineModeConfigurationChanged();
+        if (event.affectsConfiguration('piChat.extensionUiMode')) activeProvider.onExtensionUiModeConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -270,6 +276,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerWorkspace?: string;
   private workerAgentDirSetting = '';
   private workerOfflineModeSetting: PiOfflineMode = 'inherit';
+  private workerExtensionUiModeSetting: PiExtensionUiMode = 'rpc';
   private runtimeBusy = false;
   private queuedWorkCount = 0;
   private runtimeActivity = 'Working in Pi';
@@ -883,6 +890,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const previous = this.worker;
     this.workerAgentDirSetting = '';
     this.workerOfflineModeSetting = 'inherit';
+    this.workerExtensionUiModeSetting = 'rpc';
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
@@ -1036,6 +1044,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const workerUri = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'pi-worker.mjs');
     const configuredAgentDir = vscode.workspace.getConfiguration('piChat').get<string>('agentDir', '').trim();
     const offlineMode = readPiOfflineMode();
+    const extensionUiMode = readPiExtensionUiMode();
     const workerEnv: NodeJS.Dict<string> = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (typeof value === 'string') workerEnv[key] = value;
@@ -1068,6 +1077,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
           mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
           disabledContextFiles: this.readDisabledContextFiles(),
+          extensionUiMode,
         },
       });
     } catch {
@@ -1078,6 +1088,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = worker;
     this.workerAgentDirSetting = configuredAgentDir;
     this.workerOfflineModeSetting = offlineMode;
+    this.workerExtensionUiModeSetting = extensionUiMode;
     this.runtimeBusy = false;
     this.queuedWorkCount = 0;
     worker.on('message', (message: RuntimeMessage) => {
@@ -1670,6 +1681,42 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const mouse = message.mouse as Record<string, unknown>;
         this.worker?.postMessage({
           type: 'extensionEditorInput',
+          requestId,
+          mouse: {
+            type: typeof mouse.type === 'string' ? mouse.type.slice(0, 16) : '',
+            button: typeof mouse.button === 'string' ? mouse.button.slice(0, 16) : '',
+            x: mouse.x,
+            y: mouse.y,
+            width: mouse.width,
+            height: mouse.height,
+            shift: mouse.shift === true,
+            alt: mouse.alt === true,
+            ctrl: mouse.ctrl === true,
+            wheelDelta: mouse.wheelDelta,
+            clickCount: mouse.clickCount,
+          },
+        });
+        return;
+      }
+      case 'extensionWidgetInput': {
+        const requestId = typeof message.requestId === 'string' && /^pi-widget-\d{1,12}$/.test(message.requestId)
+          ? message.requestId
+          : '';
+        if (!requestId) return;
+        if (message.paste === true) {
+          if (typeof message.data === 'string' && message.data.length <= 50_000) {
+            this.worker?.postMessage({ type: 'extensionWidgetInput', requestId, data: message.data, paste: true });
+          }
+          return;
+        }
+        if (typeof message.data === 'string' && message.data.length <= 32) {
+          this.worker?.postMessage({ type: 'extensionWidgetInput', requestId, data: message.data });
+          return;
+        }
+        if (!message.mouse || typeof message.mouse !== 'object' || Array.isArray(message.mouse)) return;
+        const mouse = message.mouse as Record<string, unknown>;
+        this.worker?.postMessage({
+          type: 'extensionWidgetInput',
           requestId,
           mouse: {
             type: typeof mouse.type === 'string' ? mouse.type.slice(0, 16) : '',
@@ -3895,6 +3942,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
       ? 'Pi startup network mode changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
       : 'Pi startup network mode changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
+  }
+
+  onExtensionUiModeConfigurationChanged(): void {
+    const currentMode = readPiExtensionUiMode();
+    if (currentMode === this.workerExtensionUiModeSetting) return;
+    this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
+      ? 'Pi extension UI mode changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
+      : 'Pi extension UI mode changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
   }
 
   private async setPiOfflineMode(message: RuntimeMessage): Promise<void> {

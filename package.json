@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.70",
+  "version": "0.1.71",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -135,6 +135,20 @@
           "default": "inherit",
           "scope": "machine",
           "description": "Choose Pi's startup network behavior. Offline mode does not block model API requests. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.extensionUiMode": {
+          "type": "string",
+          "enum": [
+            "rpc",
+            "tui"
+          ],
+          "enumDescriptions": [
+            "Prefer extension dialogs and the chat's built-in controls.",
+            "Prefer extension-provided terminal components, rendered as safe text cards in the chat."
+          ],
+          "default": "rpc",
+          "scope": "machine",
+          "description": "Choose which Pi extension UI mode extensions see. Changes apply after restarting the Pi runtime."
         },
         "piChat.context.followSelection": {
           "type": "boolean",
