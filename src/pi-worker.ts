@@ -1260,6 +1260,10 @@ function sendOptions(): void {
     })) ?? [];
   send('options', {
     models,
+    providerIds: (session.modelRuntime?.getProviders?.() ?? []).slice(0, 500).flatMap((provider) =>
+      typeof provider.id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(provider.id)
+        ? [provider.id]
+        : []),
     runtimeSettings: {
       autoCompaction: Boolean(session.autoCompactionEnabled),
       autoRetry: Boolean(session.autoRetryEnabled),

@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { access, lstat, mkdir, open as openFile, opendir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open as openFile, opendir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
+import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { isPiPackageSource } from './package-source';
 import { appendDiagnosticLog, DIAGNOSTIC_LOG_FILENAME, type DiagnosticCategory } from './diagnostic-log';
 import {
@@ -256,6 +257,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private knownPromptPaths = new Set<string>();
   private knownResourcePaths = new Set<string>();
   private availableProviders: ProviderSetup[] = [];
+  private availableProviderIds: string[] = [];
   private contextFileChoices: ContextFileChoice[] = [];
   private contextFilesTruncated = false;
   private pendingContextFileSelection?: { worker: Worker; requestId: string; previousDisabled: string[] };
@@ -310,6 +312,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
+    this.availableProviderIds = [];
     this.contextFileChoices = [];
     this.contextFilesTruncated = false;
     this.pendingContextFileSelection = undefined;
@@ -840,6 +843,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
+    this.availableProviderIds = [];
     this.contextFileChoices = [];
     this.contextFilesTruncated = false;
     this.pendingContextFileSelection = undefined;
@@ -877,6 +881,32 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       environment[name] = value;
     }
     return environment;
+  }
+
+  private async validateRuntimeEnvironmentSecret(name: string, value: string): Promise<void> {
+    if (value.length > MAX_RUNTIME_ENV_VALUE_CHARS || value.includes('\0')) {
+      throw new Error('The API key exceeds the Pi runtime environment limit.');
+    }
+    const names = [...new Set((await this.context.secrets.keys())
+      .filter((key) => key.startsWith(RUNTIME_ENV_SECRET_PREFIX))
+      .map((key) => key.slice(RUNTIME_ENV_SECRET_PREFIX.length))
+      .filter(isAllowedRuntimeEnvironmentName))];
+    if (!names.includes(name) && names.length >= MAX_RUNTIME_ENV_VARIABLES) {
+      throw new Error(`Pi runtime environment is limited to ${MAX_RUNTIME_ENV_VARIABLES} variables.`);
+    }
+    let totalChars = 0;
+    for (const existingName of names) {
+      const existingValue = existingName === name ? value
+        : await this.context.secrets.get(`${RUNTIME_ENV_SECRET_PREFIX}${existingName}`);
+      if (existingValue === undefined) continue;
+      if (existingValue.length > MAX_RUNTIME_ENV_VALUE_CHARS || existingValue.includes('\0')) {
+        throw new Error(`The stored value for ${existingName} is invalid or too large.`);
+      }
+      totalChars += existingName.length + existingValue.length + 1;
+      if (totalChars > MAX_RUNTIME_ENV_TOTAL_CHARS) {
+        throw new Error('Pi runtime environment values exceed the total size limit.');
+      }
+    }
   }
 
   private ensureRuntime(): Promise<void> {
@@ -931,6 +961,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.knownPromptPaths.clear();
     this.knownResourcePaths.clear();
     this.availableProviders = [];
+    this.availableProviderIds = [];
     this.modelsConfigPath = '';
     this.settingsConfigPath = '';
     this.mcpConfigPath = '';
@@ -1153,6 +1184,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingPiResourcePicker = undefined;
         void this.openPiResourcePicker(worker, message);
       } else if (message.type === 'options') {
+        this.availableProviderIds = Array.isArray(message.providerIds)
+          ? [...new Set(message.providerIds.filter((providerId): providerId is string => typeof providerId === 'string'
+            && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(providerId)))].slice(0, 500)
+          : [];
         this.availableProviders = Array.isArray(message.providers)
           ? (message.providers as Array<Record<string, unknown>>).slice(0, 200).flatMap((provider) => {
             if (typeof provider.id !== 'string' || provider.id.length > 128 || typeof provider.name !== 'string') return [];
@@ -1603,6 +1638,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openModelsConfig':
         await this.openModelsConfig();
+        return;
+      case 'addCustomEndpoint':
+        await this.addCustomEndpoint();
         return;
       case 'openPiSettings':
         await this.openPiSettings();
@@ -3135,6 +3173,323 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
+  private async addCustomEndpoint(): Promise<void> {
+    const providerIdInput = await vscode.window.showInputBox({
+      title: 'Add custom Pi endpoint · 1/9',
+      prompt: 'Choose a new provider ID using lowercase letters, numbers, dots, underscores, or hyphens.',
+      placeHolder: 'my-local-models',
+      validateInput: (value) => /^[a-z][a-z0-9._-]{1,63}$/.test(value.trim())
+        ? undefined
+        : 'Use 2–64 lowercase characters; start with a letter.',
+    });
+    if (providerIdInput === undefined) return;
+    const providerId = providerIdInput.trim();
+    if (this.availableProviderIds.some((id) => id.toLowerCase() === providerId.toLowerCase())) {
+      void vscode.window.showErrorMessage('That provider ID is already registered in Pi. Choose a new ID to avoid changing an existing provider.');
+      return;
+    }
+
+    const providerNameInput = await vscode.window.showInputBox({
+      title: 'Add custom Pi endpoint · 2/9',
+      prompt: 'Display name for this provider.',
+      value: providerId,
+      validateInput: (value) => value.trim().length > 0 && value.trim().length <= 128 && !/[\u0000-\u001f\u007f]/.test(value)
+        ? undefined
+        : 'Enter a display name of 1–128 characters.',
+    });
+    if (providerNameInput === undefined) return;
+    const providerName = providerNameInput.trim();
+
+    const baseUrlInput = await vscode.window.showInputBox({
+      title: 'Add custom Pi endpoint · 3/9',
+      prompt: 'API base URL. Use HTTPS for remote services; plain HTTP is limited to localhost.',
+      placeHolder: 'https://api.example.com/v1',
+      validateInput: (value) => this.validateCustomEndpointUrl(value) ? undefined
+        : 'Enter an HTTPS URL, or an HTTP URL on localhost, 127.0.0.1, or ::1. User info, query strings, and fragments are not allowed.',
+    });
+    if (baseUrlInput === undefined) return;
+    const baseUrl = this.validateCustomEndpointUrl(baseUrlInput);
+    if (!baseUrl) return;
+
+    const apiChoice = await vscode.window.showQuickPick([
+      { label: 'OpenAI Chat Completions', description: 'openai-completions', api: 'openai-completions' },
+      { label: 'OpenAI Responses', description: 'openai-responses', api: 'openai-responses' },
+      { label: 'Anthropic Messages', description: 'anthropic-messages', api: 'anthropic-messages' },
+      { label: 'Google Generative AI', description: 'google-generative-ai', api: 'google-generative-ai' },
+    ], { title: 'Add custom Pi endpoint · 4/9', placeHolder: 'Choose the API format supported by the endpoint' });
+    if (!apiChoice) return;
+
+    const modelIdInput = await vscode.window.showInputBox({
+      title: 'Add custom Pi endpoint · 5/9',
+      prompt: 'Model ID sent to the endpoint.',
+      placeHolder: 'model-name',
+      validateInput: (value) => /^[a-zA-Z0-9][a-zA-Z0-9._:/+-]{0,127}$/.test(value.trim())
+        ? undefined
+        : 'Use 1–128 letters, numbers, dots, underscores, colons, slashes, plus signs, or hyphens.',
+    });
+    if (modelIdInput === undefined) return;
+    const modelId = modelIdInput.trim();
+
+    const modelNameInput = await vscode.window.showInputBox({
+      title: 'Add custom Pi endpoint · 6/9',
+      prompt: 'Optional display name. Leave blank to use the model ID.',
+      value: modelId,
+      validateInput: (value) => value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value)
+        ? undefined
+        : 'Use at most 128 characters.',
+    });
+    if (modelNameInput === undefined) return;
+    const modelName = modelNameInput.trim() || modelId;
+
+    const contextInput = await vscode.window.showInputBox({
+      title: 'Add custom Pi endpoint · 7/9',
+      prompt: 'Context window size in tokens.',
+      value: '128000',
+      validateInput: (value) => {
+        const size = Number(value.trim());
+        return Number.isSafeInteger(size) && size >= 1024 && size <= 10_000_000
+          ? undefined
+          : 'Enter a whole number from 1,024 to 10,000,000.';
+      },
+    });
+    if (contextInput === undefined) return;
+    const contextWindow = Number(contextInput.trim());
+
+    const maxTokensInput = await vscode.window.showInputBox({
+      title: 'Add custom Pi endpoint · 8/9',
+      prompt: 'Maximum output tokens; must not exceed the context window.',
+      value: String(Math.min(16_384, contextWindow)),
+      validateInput: (value) => {
+        const size = Number(value.trim());
+        return Number.isSafeInteger(size) && size >= 1 && size <= contextWindow
+          ? undefined
+          : `Enter a whole number from 1 to ${contextWindow}.`;
+      },
+    });
+    if (maxTokensInput === undefined) return;
+    const maxTokens = Number(maxTokensInput.trim());
+
+    const capabilities = await vscode.window.showQuickPick([
+      { label: 'Text only', description: 'The model does not accept image input.', input: ['text'], reasoning: false },
+      { label: 'Text and images', description: 'The model accepts image input.', input: ['text', 'image'], reasoning: false },
+      { label: 'Reasoning model', description: 'The model accepts text and supports reasoning.', input: ['text'], reasoning: true },
+      { label: 'Reasoning with images', description: 'The model accepts images and supports reasoning.', input: ['text', 'image'], reasoning: true },
+    ], { title: 'Add custom Pi endpoint · 9/9', placeHolder: 'Choose the model capabilities' });
+    if (!capabilities) return;
+
+    const defaultEnvironmentName = `PI_${providerId.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}_API_KEY`.slice(0, 128);
+    const environmentNameInput = await vscode.window.showInputBox({
+      title: 'Optional API key',
+      prompt: 'Optional SecretStorage variable name. The key will not be written to Pi’s models.json; leave blank for unauthenticated local endpoints.',
+      placeHolder: defaultEnvironmentName,
+      validateInput: (value) => !value.trim() || isAllowedRuntimeEnvironmentName(value.trim())
+        ? undefined
+        : 'Use an allowed uppercase environment variable name, such as PI_LOCAL_API_KEY.',
+    });
+    if (environmentNameInput === undefined) return;
+    const environmentName = environmentNameInput.trim();
+    let apiKey: string | undefined;
+    let secretStorageKey: string | undefined;
+    let previousSecret: string | undefined;
+    if (environmentName) {
+      secretStorageKey = `${RUNTIME_ENV_SECRET_PREFIX}${environmentName}`;
+      try {
+        previousSecret = await this.context.secrets.get(secretStorageKey);
+      } catch {
+        this.post({ type: 'notice', message: 'Could not read the existing Pi runtime secret. No endpoint was added.', isError: true });
+        return;
+      }
+      apiKey = await vscode.window.showInputBox({
+        title: 'Optional API key',
+        prompt: `Enter the API key for ${baseUrl}. It will be stored in VS Code SecretStorage and sent to this endpoint when you use the model.`,
+        password: true,
+        ignoreFocusOut: true,
+        validateInput: (value) => value.length > MAX_RUNTIME_ENV_VALUE_CHARS || value.includes('\0') || (value.length > 0 && !value.trim())
+          ? `Enter a non-empty API key up to ${MAX_RUNTIME_ENV_VALUE_CHARS} characters, or cancel to stop setup.`
+          : undefined,
+      });
+      if (apiKey === undefined || !apiKey.trim()) return;
+    }
+
+    const confirmation = [
+      `Add ${providerName} (${providerId}) to Pi’s machine-level models.json?`,
+      `Endpoint: ${baseUrl}`,
+      `API format: ${apiChoice.api}`,
+      `Model: ${modelName} (${modelId})`,
+      'No provider request is made during setup. Prompts and attached context will be sent to this endpoint only when you later use this model.',
+      secretStorageKey
+        ? previousSecret === undefined
+          ? `Store its API key in VS Code SecretStorage as ${environmentName}?`
+          : `Replace the stored value for ${environmentName} in VS Code SecretStorage?`
+        : 'No API key will be stored.',
+    ].join('\n');
+    const answer = await vscode.window.showWarningMessage(confirmation, { modal: true }, 'Add endpoint');
+    if (answer !== 'Add endpoint') return;
+
+    let secretUpdated = false;
+    try {
+      if (secretStorageKey && apiKey !== undefined) {
+        await this.validateRuntimeEnvironmentSecret(environmentName, apiKey);
+        await this.context.secrets.store(secretStorageKey, apiKey);
+        secretUpdated = true;
+      }
+      await this.writeCustomProviderToModelsConfig(this.modelsConfigPath, providerId, {
+        name: providerName,
+        baseUrl,
+        api: apiChoice.api,
+        ...(environmentName ? { apiKey: `$${environmentName}` } : {}),
+        models: [{
+          id: modelId,
+          name: modelName,
+          contextWindow,
+          maxTokens,
+          reasoning: capabilities.reasoning,
+          input: capabilities.input,
+        }],
+      });
+      this.post({
+        type: 'notice',
+        message: secretStorageKey
+          ? 'Custom endpoint added. Restart the Pi runtime to apply its SecretStorage API key; the model list will then refresh from Pi’s configuration.'
+          : 'Custom endpoint added. The model list will refresh from Pi’s configuration.',
+      });
+    } catch {
+      if (secretUpdated && secretStorageKey) {
+        try {
+          if (previousSecret === undefined) await this.context.secrets.delete(secretStorageKey);
+          else await this.context.secrets.store(secretStorageKey, previousSecret);
+        } catch {
+          this.post({ type: 'notice', message: `Could not restore the previous value for ${environmentName} in VS Code SecretStorage. Review that variable before restarting Pi.`, isError: true });
+        }
+      }
+      this.recordDiagnostic('Pi operation error');
+      this.post({ type: 'notice', message: 'Could not add the custom endpoint. Review the Pi models file and try again.', isError: true });
+    } finally {
+      apiKey = undefined;
+      previousSecret = undefined;
+    }
+  }
+
+  private validateCustomEndpointUrl(value: string): string | undefined {
+    if (typeof value !== 'string' || value.length > 2048) return undefined;
+    try {
+      const url = new URL(value.trim());
+      const localHost = /^(?:localhost|127\.0\.0\.1|\[::1\]|::1)$/i.test(url.hostname);
+      if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && localHost))
+        || !url.hostname || url.username || url.password || url.search || url.hash) return undefined;
+      return url.toString().replace(/\/+$/, '');
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async writeCustomProviderToModelsConfig(filePath: string, providerId: string, provider: Record<string, unknown>): Promise<void> {
+    const targetPath = path.resolve(filePath);
+    if (!path.isAbsolute(filePath) || path.basename(targetPath).toLowerCase() !== 'models.json') {
+      throw new Error('Invalid Pi models file path.');
+    }
+    const comparisonPath = (value: string) => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
+    const parentPath = path.dirname(targetPath);
+    if (comparisonPath(await realpath(parentPath)) !== comparisonPath(parentPath)) {
+      throw new Error('The Pi models directory resolves through a symbolic link.');
+    }
+
+    try {
+      await lstat(targetPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      let file;
+      let createdFileStats;
+      try {
+        file = await openFile(targetPath, 'wx', 0o600);
+        createdFileStats = await file.stat();
+        await file.writeFile(`${JSON.stringify({ $schema: 'https://pi.dev/schemas/models.schema.json', providers: {} }, null, 2)}\n`, 'utf8');
+      } catch (createError) {
+        if (file && createdFileStats) {
+          try {
+            await file.close();
+          } catch {
+            // Continue with identity-checked cleanup of a partially created file.
+          }
+          file = undefined;
+          try {
+            const currentStats = await lstat(targetPath);
+            if (currentStats.isFile() && !currentStats.isSymbolicLink() && currentStats.nlink === 1
+              && currentStats.dev === createdFileStats.dev && currentStats.ino === createdFileStats.ino) {
+              await unlink(targetPath);
+            }
+          } catch {
+            // Preserve the original creation error; never remove a replacement file.
+          }
+        }
+        if ((createError as NodeJS.ErrnoException).code !== 'EEXIST') throw createError;
+      } finally {
+        await file?.close();
+      }
+    }
+
+    const stats = await lstat(targetPath);
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink > 1 || stats.size > 1_000_000
+      || comparisonPath(await realpath(targetPath)) !== comparisonPath(targetPath)) {
+      throw new Error('The Pi models file is not a safe regular file.');
+    }
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(targetPath));
+    if (document.isDirty) throw new Error('Save or discard unsaved changes in models.json before adding a provider.');
+    const text = document.getText();
+    const documentVersion = document.version;
+    const [currentStats, diskText] = await Promise.all([lstat(targetPath), readFile(targetPath, 'utf8')]);
+    if (!currentStats.isFile() || currentStats.isSymbolicLink() || currentStats.nlink > 1
+      || currentStats.dev !== stats.dev || currentStats.ino !== stats.ino
+      || comparisonPath(await realpath(targetPath)) !== comparisonPath(targetPath)
+      || diskText.replace(/\r\n/g, '\n') !== text.replace(/\r\n/g, '\n')) {
+      throw new Error('The Pi models file changed while it was being opened.');
+    }
+    if (Buffer.byteLength(text, 'utf8') > 1_000_000) throw new Error('The Pi models file is too large to update safely.');
+    const errors: ParseError[] = [];
+    const config = parse(text, errors, { allowTrailingComma: true, disallowComments: false });
+    if (errors.length || !config || typeof config !== 'object' || Array.isArray(config)) {
+      throw new Error('The Pi models file contains invalid JSONC.');
+    }
+    const existingProviders = config.providers;
+    if (existingProviders !== undefined
+      && (!existingProviders || typeof existingProviders !== 'object' || Array.isArray(existingProviders))) {
+      throw new Error('The providers field in models.json is invalid.');
+    }
+    if (Object.prototype.hasOwnProperty.call(existingProviders ?? {}, providerId)
+      || this.availableProviderIds.some((id) => id.toLowerCase() === providerId.toLowerCase())) {
+      throw new Error('The provider ID already exists.');
+    }
+
+    const edits = modify(text, ['providers', providerId], provider, {
+      formattingOptions: {
+        insertSpaces: true,
+        tabSize: 2,
+        eol: document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n',
+        insertFinalNewline: true,
+      },
+    });
+    const updatedText = applyEdits(text, edits);
+    if (Buffer.byteLength(updatedText, 'utf8') > 1_000_000) throw new Error('The updated Pi models file would exceed the size limit.');
+    if (document.isDirty || document.version !== documentVersion || document.getText() !== text) {
+      throw new Error('The Pi models file changed while the endpoint was being prepared.');
+    }
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(text.length)), updatedText);
+    if (!await vscode.workspace.applyEdit(edit)) throw new Error('VS Code could not update the Pi models document.');
+    try {
+      if (!await document.save()) throw new Error('VS Code could not save the Pi models document.');
+    } catch (saveError) {
+      if (document.getText() === updatedText) {
+        const rollback = new vscode.WorkspaceEdit();
+        rollback.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(updatedText.length)), text);
+        if (!await vscode.workspace.applyEdit(rollback)) {
+          throw new Error('The Pi models save failed and VS Code could not roll back the in-memory edit.');
+        }
+      }
+      throw saveError;
+    }
+  }
+
   private async openPiSettings(): Promise<void> {
     if (!this.settingsConfigPath || !path.isAbsolute(this.settingsConfigPath)) {
       this.post({ type: 'notice', message: 'Pi did not provide a settings file path. Open a chat, then try again.', isError: true });
@@ -4275,7 +4630,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <button id="delivery-mode" class="control-button delivery-mode" type="button" aria-label="Queued message mode" title="Click to switch between queue and steer" hidden>Queue next</button>
             <section id="model-popover" class="control-popover model-popover" aria-label="Choose a model" hidden>
               <div class="model-search-row"><input id="model-search" class="session-search" type="search" aria-label="Search models" placeholder="Search models, providers, or vision"><button id="refresh-models" class="icon-button small" type="button" title="Refresh models; may contact providers and run configured API-key commands" aria-label="Refresh model catalog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg></button></div>
-              <div class="provider-actions"><span id="provider-status" class="provider-status"></span><button id="connect-provider" class="text-button" type="button">Connect</button><button id="runtime-settings-toggle" class="text-button" type="button" aria-expanded="false">Runtime</button><button id="edit-models-config" class="text-button" type="button" title="Edit Pi's custom models and providers">Models</button><button id="edit-pi-settings" class="text-button" type="button" title="Open Pi's user settings">Pi settings</button></div>
+              <div class="provider-actions"><span id="provider-status" class="provider-status"></span><button id="connect-provider" class="text-button" type="button">Connect</button><button id="runtime-settings-toggle" class="text-button" type="button" aria-expanded="false">Runtime</button><button id="add-model-endpoint" class="text-button" type="button" title="Add a custom endpoint to Pi's model configuration">Add endpoint</button><button id="edit-models-config" class="text-button" type="button" title="Edit Pi's custom models and providers">Models</button><button id="edit-pi-settings" class="text-button" type="button" title="Open Pi's user settings">Pi settings</button></div>
               <section id="runtime-settings" class="runtime-settings" aria-label="Pi runtime settings" hidden>
                 <div class="popover-heading"><strong>Pi runtime settings</strong><span>Saved in global Pi settings</span></div>
                 <button id="choose-pi-home" class="text-button" type="button" title="Change the Pi configuration directory and restart Pi when idle">Choose Pi configuration folder</button>

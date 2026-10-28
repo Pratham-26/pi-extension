@@ -152,6 +152,7 @@ const ui = {
   providerStatus: el('provider-status'),
   connectProvider: el('connect-provider'),
   editModelsConfig: el('edit-models-config'),
+  addModelEndpoint: el('add-model-endpoint'),
   editPiSettings: el('edit-pi-settings'),
   choosePiAgentDir: el('choose-pi-home'),
   restartPiRuntime: el('restart-pi-runtime'),
@@ -374,6 +375,7 @@ function updateControls() {
   ui.bookmarkToggle.disabled = !state.hasSession;
   ui.connectProvider.disabled = !state.hasWorkspace || state.busy || state.providers.length === 0;
   ui.editModelsConfig.disabled = !state.hasWorkspace || state.busy;
+  ui.addModelEndpoint.disabled = !state.hasWorkspace || state.busy;
   ui.editPiSettings.disabled = !state.hasWorkspace || state.busy;
   ui.choosePiAgentDir.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
   ui.restartPiRuntime.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
@@ -3761,6 +3763,7 @@ ui.offlineMode.addEventListener('change', () => {
 });
 ui.manageContextFiles.addEventListener('click', () => post('manageContextFiles'));
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
+ui.addModelEndpoint.addEventListener('click', () => post('addCustomEndpoint'));
 ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));
 ui.choosePiAgentDir.addEventListener('click', () => post('choosePiAgentDir'));
 ui.restartPiRuntime.addEventListener('click', () => post('restartPiRuntime'));
