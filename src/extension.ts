@@ -337,6 +337,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.extensionUiMode')) activeProvider.onExtensionUiModeConfigurationChanged();
         if (event.affectsConfiguration('piChat.extensionStatus')) activeProvider.onExtensionStatusConfigurationChanged();
         if (event.affectsConfiguration('piChat.notifications.sound')) activeProvider.onNotificationSoundConfigurationChanged();
+        if (event.affectsConfiguration('piChat.models.autoRefresh')) activeProvider.onModelRefreshConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -1166,6 +1167,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           cwd,
           extensionRoot: this.context.extensionUri.fsPath,
           autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
+          autoRefreshModels: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
           mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
           disabledContextFiles: this.readDisabledContextFiles(),
           extensionUiMode,
@@ -1442,6 +1444,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           ...safeMessage,
           runtimeSettings: { ...runtimeSettings, offlineMode: readPiOfflineMode() },
           notificationSound: vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('sound', false),
+          autoRefreshModels: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
           presets: this.context.workspaceState.get<ModelPreset[]>('piChat.modelPresets', []),
         });
       } else {
@@ -2023,6 +2026,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         if (typeof message.enabled === 'boolean') {
           await vscode.workspace.getConfiguration('piChat.notifications').update('sound', message.enabled, vscode.ConfigurationTarget.Global);
         }
+        return;
+      case 'setAutoRefreshModels':
+        await this.setAutoRefreshModels(message);
         return;
       case 'openMcpConfig':
         await this.openMcpConfig();
@@ -4118,6 +4124,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  onModelRefreshConfigurationChanged(): void {
+    this.post({
+      type: 'model-refresh-setting',
+      enabled: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
+    });
+  }
+
   private cancelPackageSearch(notify: boolean): void {
     const pending = this.pendingPackageSearch;
     if (!pending) return;
@@ -4247,6 +4260,37 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     } catch {
       this.post({ type: 'offline-mode-setting', mode: readPiOfflineMode() });
       this.post({ type: 'notice', message: 'Could not update Pi startup network mode.', isError: true });
+    }
+  }
+
+  private async setAutoRefreshModels(message: RuntimeMessage): Promise<void> {
+    if (typeof message.enabled !== 'boolean') return;
+    const configuration = vscode.workspace.getConfiguration('piChat.models');
+    const current = configuration.get<boolean>('autoRefresh', false);
+    if (message.enabled === current) {
+      this.onModelRefreshConfigurationChanged();
+      return;
+    }
+    if (message.enabled) {
+      const answer = await vscode.window.showWarningMessage(
+        'Automatically refresh Pi model catalogs when the runtime starts? This can contact configured provider endpoints and run API-key commands from Pi model settings. Refresh is skipped when Pi is offline.',
+        { modal: true },
+        'Enable automatic refresh',
+      );
+      if (answer !== 'Enable automatic refresh') {
+        this.onModelRefreshConfigurationChanged();
+        return;
+      }
+    }
+    try {
+      await configuration.update('autoRefresh', message.enabled, vscode.ConfigurationTarget.Global);
+      this.onModelRefreshConfigurationChanged();
+      this.post({ type: 'notice', message: message.enabled
+        ? 'Automatic model catalog refresh will start after Pi runtime restarts.'
+        : 'Automatic model catalog refresh is disabled.' });
+    } catch {
+      this.onModelRefreshConfigurationChanged();
+      this.post({ type: 'notice', message: 'Could not update automatic model catalog refresh.', isError: true });
     }
   }
 
@@ -5268,6 +5312,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <div class="popover-heading"><strong>Pi runtime settings</strong><span>Saved in global Pi settings</span></div>
                 <button id="choose-pi-home" class="text-button" type="button" title="Change the Pi configuration directory and restart Pi when idle">Choose Pi configuration folder</button>
                 <button id="restart-pi-runtime" class="text-button" type="button" title="Apply runtime setting changes after running and queued work is finished">Restart Pi runtime</button>
+                <label class="runtime-setting"><input id="auto-refresh-models" type="checkbox"><span>Refresh model catalogs at Pi startup</span></label>
+                <p class="runtime-settings-note">Requires confirmation. It may contact provider endpoints and run configured API-key commands; skipped in Pi offline mode. Applies after restarting Pi.</p>
                 <label class="runtime-setting"><input id="auto-compaction" type="checkbox"><span>Automatic context compaction</span></label>
                 <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
                 <label class="runtime-setting"><input id="notification-sound" type="checkbox"><span>Local sound when Pi finishes or needs input while hidden</span></label>

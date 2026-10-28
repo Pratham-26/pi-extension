@@ -155,7 +155,7 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; disabledContextFiles?: unknown; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui' } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui' } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
 const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbsolute(workerOptions.extensionRoot)
   ? workerOptions.extensionRoot
@@ -163,6 +163,8 @@ const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbso
 let mcpEnabled = workerOptions?.mcpEnabled === true;
 let autoNameSessions = workerOptions?.autoNameSessions !== false;
 const extensionUiMode: 'rpc' | 'tui' = workerOptions?.extensionUiMode === 'tui' ? 'tui' : 'rpc';
+const autoRefreshModelsAtStartup = workerOptions?.autoRefreshModels === true && process.env.PI_OFFLINE !== '1';
+let modelCatalogStartupRefreshStarted = false;
 function parseContextFilePaths(value: unknown): string[] | undefined {
   if (!Array.isArray(value) || value.length > 2000) return undefined;
   const paths: string[] = [];
@@ -3381,6 +3383,7 @@ async function createSessionInternal(path?: string): Promise<boolean> {
     if (result.modelFallbackMessage) send('notice', { message: result.modelFallbackMessage });
     await listSessions();
     sendConfiguredPackages();
+    refreshModelCatalogOnStartup(createdSession);
     return true;
   } catch (error) {
     if (createdSession) {
@@ -3407,6 +3410,22 @@ async function createSessionInternal(path?: string): Promise<boolean> {
     snapshot();
     return false;
   }
+}
+
+function refreshModelCatalogOnStartup(activeSession: SessionLike): void {
+  if (!autoRefreshModelsAtStartup || modelCatalogStartupRefreshStarted || !activeSession.modelRuntime?.refresh) return;
+  modelCatalogStartupRefreshStarted = true;
+  void activeSession.modelRuntime.refresh({ allowNetwork: true }).then((result) => {
+    if (session !== activeSession) return;
+    if (result && typeof result === 'object' && 'errors' in result && result.errors instanceof Map && result.errors.size > 0) {
+      send('notice', { message: 'Some configured model catalogs could not be refreshed automatically. Cached models remain available.' });
+    }
+    sendOptions();
+  }).catch(() => {
+    if (session === activeSession) {
+      send('notice', { message: 'Automatic model catalog refresh failed. Cached models remain available.' });
+    }
+  });
 }
 
 function watchModelConfig(): void {

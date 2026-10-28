@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -205,6 +205,12 @@
           "type": "boolean",
           "default": false,
           "description": "Connect enabled servers from Pi MCP configuration after an explicit confirmation."
+        },
+        "piChat.models.autoRefresh": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Refresh configured model catalogs when the Pi runtime starts. This can contact provider endpoints and run configured API-key commands; it is skipped in Pi offline mode."
         },
         "piChat.notifications.runFinished": {
           "type": "boolean",

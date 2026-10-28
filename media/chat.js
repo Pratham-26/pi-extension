@@ -5,6 +5,7 @@ const state = {
   hasWorkspace: false,
   workspaceName: '',
   notificationSoundEnabled: false,
+  autoRefreshModelsEnabled: false,
   sessionPath: typeof persistedWebviewState.sessionPath === 'string'
     && persistedWebviewState.sessionPath.length <= 4096
     && !/[\u0000-\u001f\u007f]/.test(persistedWebviewState.sessionPath)
@@ -197,6 +198,7 @@ const ui = {
   autoRetry: el('auto-retry'),
   cacheWarming: el('cache-warming'),
   offlineMode: el('offline-mode'),
+  autoRefreshModels: el('auto-refresh-models'),
   notificationSound: el('notification-sound'),
   testNotificationSound: el('test-notification-sound'),
   manageContextFiles: el('manage-context-files'),
@@ -462,6 +464,7 @@ function updateControls() {
   ui.autoRetry.disabled = !state.hasSession || state.busy;
   ui.cacheWarming.disabled = !state.hasSession || state.busy;
   ui.offlineMode.disabled = !state.hasWorkspace || state.busy || hasQueuedWork;
+  ui.autoRefreshModels.checked = state.autoRefreshModelsEnabled;
   ui.notificationSound.checked = state.notificationSoundEnabled;
   ui.testNotificationSound.disabled = !state.notificationSoundEnabled;
   ui.manageContextFiles.disabled = !state.hasSession || state.busy || hasQueuedWork;
@@ -2328,6 +2331,8 @@ function sendPrompt(value = ui.prompt.value) {
 }
 
 function renderModelChoices(data) {
+  state.autoRefreshModelsEnabled = data.autoRefreshModels === true;
+  ui.autoRefreshModels.checked = state.autoRefreshModelsEnabled;
   state.notificationSoundEnabled = data.notificationSound === true;
   ui.notificationSound.checked = state.notificationSoundEnabled;
   state.models = Array.isArray(data.models) ? data.models : [];
@@ -4036,6 +4041,11 @@ window.addEventListener('message', (event) => {
       ui.notificationSound.checked = state.notificationSoundEnabled;
       updateControls();
       break;
+    case 'model-refresh-setting':
+      state.autoRefreshModelsEnabled = data.enabled === true;
+      ui.autoRefreshModels.checked = state.autoRefreshModelsEnabled;
+      updateControls();
+      break;
     case 'offline-mode-setting':
       if (['inherit', 'offline', 'online'].includes(data.mode)) {
         state.runtimeSettings.offlineMode = data.mode;
@@ -4694,6 +4704,9 @@ ui.cacheWarming.addEventListener('change', () => {
 ui.offlineMode.addEventListener('change', () => {
   ui.offlineMode.disabled = true;
   post('setPiOfflineMode', { mode: ui.offlineMode.value });
+});
+ui.autoRefreshModels.addEventListener('change', () => {
+  post('setAutoRefreshModels', { enabled: ui.autoRefreshModels.checked });
 });
 ui.notificationSound.addEventListener('change', () => {
   state.notificationSoundEnabled = ui.notificationSound.checked;
