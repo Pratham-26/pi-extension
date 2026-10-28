@@ -5385,6 +5385,11 @@ function dismissComposerPopoversWhenPointerLeavesWebview(event) {
 // Handle outside clicks at the document boundary so dismissal does not depend
 // on a backdrop's stacking context or prevent the clicked control from working.
 document.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
+// Some webview input paths (for example, clicks forwarded from embedded or
+// accessibility-driven controls) may deliver click without a usable pointerdown.
+// Keep click dismissal as a fallback; clicks on the open control are recognized
+// as inside, so toggles and popover actions retain their normal behavior.
+document.addEventListener('click', dismissComposerPopoversFromOutside, true);
 window.addEventListener('focusin', dismissComposerPopoversFromOutside, true);
 // Leaving the webview for the VS Code workbench can still provide a relatedTarget.
 // Any pointer exit from this document is outside the composer controls.
