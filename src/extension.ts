@@ -317,11 +317,21 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'setSkills':
       case 'usePreset':
       case 'refreshModels':
+      case 'setBookmarks':
       case 'replaceQueue':
       case 'extensionUiResponse':
       case 'navigateTree':
         this.worker?.postMessage(message);
         return;
+      case 'compactSession': {
+        const answer = await vscode.window.showWarningMessage(
+          'Pi will summarize older context and update the active session. Continue?',
+          { modal: true },
+          'Compact session',
+        );
+        if (answer === 'Compact session') this.worker?.postMessage({ type: 'compactSession' });
+        return;
+      }
       case 'addPreset':
         await this.addPreset(message);
         return;
@@ -864,6 +874,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <button id="chat-search-toggle" class="icon-button" type="button" title="Search this chat" aria-label="Search this chat" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></svg>
         </button>
+        <button id="bookmark-toggle" class="text-button header-action" type="button" title="Show bookmarked messages" aria-expanded="false">★</button>
         <button id="export-session" class="text-button header-action" type="button" title="Export session">Export</button>
         <button id="open-settings" class="icon-button" type="button" title="Pi Chat settings" aria-label="Pi Chat settings">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1a1.8 1.8 0 1 1-2.5 2.5l-.1-.1a1.8 1.8 0 0 0-3 1.3v.2a1.8 1.8 0 1 1-3.6 0v-.2a1.8 1.8 0 0 0-3-1.3l-.1.1a1.8 1.8 0 1 1-2.5-2.5l.1-.1a1.8 1.8 0 0 0-1.3-3h-.2a1.8 1.8 0 1 1 0-3.6h.2a1.8 1.8 0 0 0 1.3-3l-.1-.1a1.8 1.8 0 1 1 2.5-2.5l.1.1a1.8 1.8 0 0 0 3-1.3v-.2a1.8 1.8 0 1 1 3.6 0v.2a1.8 1.8 0 0 0 3 1.3l.1-.1a1.8 1.8 0 1 1 2.5 2.5l-.1.1a1.8 1.8 0 0 0 1.3 3h.2a1.8 1.8 0 1 1 0 3.6h-.2a1.8 1.8 0 0 0-1.3 3Z"/></svg>
@@ -880,6 +891,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <button id="chat-search-next" class="icon-button small" type="button" title="Next match" aria-label="Next match">↓</button>
         <button id="chat-search-close" class="icon-button small" type="button" title="Close search" aria-label="Close search">×</button>
       </div>
+
+      <aside id="bookmark-panel" class="history-panel bookmark-panel" aria-label="Bookmarks" hidden>
+        <div class="history-heading"><span>Bookmarks</span><button id="close-bookmarks" class="icon-button small" type="button" title="Close" aria-label="Close bookmarks">×</button></div>
+        <div id="bookmark-list" class="session-list"></div>
+        <div id="bookmark-empty" class="session-empty">Bookmark a message to find it here.</div>
+      </aside>
 
       <aside id="history-panel" class="history-panel" aria-label="Recent sessions" hidden>
         <div class="history-heading"><span>Recent sessions</span><button id="close-history" class="icon-button small" type="button" title="Close" aria-label="Close recent sessions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
@@ -982,6 +999,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <div id="context-meter" class="context-meter" role="meter" aria-label="Pi context usage" aria-valuemin="0" aria-valuemax="100" hidden>
           <span id="context-meter-fill" class="context-meter-fill"></span>
           <span id="context-meter-label" class="context-meter-label"></span>
+          <button id="compact-session" class="context-meter-action" type="button" hidden>Compact</button>
         </div>
         <div class="composer-note"><span>Pi uses your existing configuration</span><span id="extension-status" class="extension-status"></span><span id="model-label"></span></div>
       </footer>

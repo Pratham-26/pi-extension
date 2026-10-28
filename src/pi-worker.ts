@@ -9,6 +9,7 @@ type WorkerInput = {
   query?: string;
   name?: string;
   entryId?: string;
+  entryIds?: unknown[];
   requestId?: string;
   value?: unknown;
   provider?: string;
@@ -50,7 +51,7 @@ type SessionLike = {
     appendCustomEntry: (customType: string, data?: unknown) => string;
     createBranchedSession: (leafId: string) => string | undefined;
     appendSessionInfo: (name: string) => string;
-    buildContextEntries: () => Array<{ type?: string; id: string; message?: { role?: string; content?: unknown } }>;
+    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown } }>;
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
@@ -64,6 +65,8 @@ type SessionLike = {
   steer?: (text: string, images?: Array<{ type: 'image'; data: string; mimeType: string }>) => Promise<unknown>;
   followUp?: (text: string, images?: Array<{ type: 'image'; data: string; mimeType: string }>) => Promise<unknown>;
   clearQueue?: () => { steering: string[]; followUp: string[] };
+  compact?: (customInstructions?: string) => Promise<unknown>;
+  abortCompaction?: () => void;
   messages?: Array<{ role?: string; content?: unknown }>;
   subscribe: (listener: (event: any) => void) => () => void;
   prompt: (text: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }> }) => Promise<void>;
@@ -75,6 +78,7 @@ const cwd = String((workerData as { cwd?: string } | undefined)?.cwd ?? process.
 let session: SessionLike | undefined;
 let unsubscribe: (() => void) | undefined;
 let busy = false;
+let compacting = false;
 let defaultTools: string[] = [];
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
@@ -174,6 +178,18 @@ function toUiMessage(message: { role?: string; content?: unknown }): { role: str
   return { role: message.role, text: raw };
 }
 
+function getSessionBookmarks(): string[] {
+  const branchEntries = session?.sessionManager?.buildContextEntries() ?? [];
+  const validBookmarkIds = new Set(branchEntries.filter((entry) => entry.type === 'message'
+    && (entry.message?.role === 'user' || entry.message?.role === 'assistant')).map((entry) => entry.id));
+  const bookmarkEntry = branchEntries
+    .filter((entry) => entry.type === 'custom' && entry.customType === 'pi-chat.bookmarks')
+    .at(-1)?.data as { entryIds?: unknown } | undefined;
+  return Array.isArray(bookmarkEntry?.entryIds)
+    ? [...new Set(bookmarkEntry.entryIds.slice(0, 1000).filter((id): id is string => typeof id === 'string' && id.length <= 256 && validBookmarkIds.has(id)))].slice(0, 500)
+    : [];
+}
+
 function snapshot(): void {
   if (!session) return;
   const model = session.model;
@@ -206,6 +222,7 @@ function snapshot(): void {
     busy,
     contextUsage: session.getContextUsage?.(),
     sessionStats: session.getSessionStats?.(),
+    bookmarks: getSessionBookmarks(),
   });
   sendOptions();
 }
@@ -458,11 +475,22 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'forkSession': {
-        if (!input.entryId || !session?.sessionManager) return;
+        if (!input.entryId || busy || !session?.sessionManager) return;
+        const carriedBookmarks = getSessionBookmarks();
         const branchedPath = session.sessionManager.createBranchedSession(input.entryId);
         if (!branchedPath) throw new Error('Pi could not create a branch from that message.');
         send('session-opening');
         await createSession(branchedPath);
+        if (carriedBookmarks.length && session?.sessionFile === branchedPath && session.sessionManager) {
+          const branchIds = new Set(session.sessionManager.buildContextEntries()
+            .filter((entry) => entry.type === 'message' && (entry.message?.role === 'user' || entry.message?.role === 'assistant'))
+            .map((entry) => entry.id));
+          const inherited = carriedBookmarks.filter((entryId) => branchIds.has(entryId));
+          if (inherited.length) {
+            session.sessionManager.appendCustomEntry('pi-chat.bookmarks', { entryIds: inherited });
+            snapshot();
+          }
+        }
         return;
       }
       case 'navigateTree': {
@@ -470,6 +498,33 @@ async function handle(input: WorkerInput): Promise<void> {
         const result = await session.navigateTree(input.entryId, { summarize: false });
         if (!result.cancelled && result.editorText) send('extension-editor-text', { text: result.editorText });
         snapshot();
+        return;
+      }
+      case 'setBookmarks': {
+        if (!session?.sessionManager || !Array.isArray(input.entryIds)) return;
+        const valid = new Set(session.sessionManager.buildContextEntries().filter((entry) => entry.type === 'message'
+          && (entry.message?.role === 'user' || entry.message?.role === 'assistant')).map((entry) => entry.id));
+        const entryIds = [...new Set(input.entryIds.slice(0, 500).filter((id): id is string => typeof id === 'string' && id.length <= 256 && valid.has(id)))];
+        session.sessionManager.appendCustomEntry('pi-chat.bookmarks', { entryIds });
+        snapshot();
+        return;
+      }
+      case 'compactSession': {
+        if (!session?.compact || busy) return;
+        busy = true;
+        compacting = true;
+        send('run-started');
+        try {
+          await session.compact();
+          send('notice', { message: 'Pi compacted the session context.' });
+        } finally {
+          compacting = false;
+          if (busy) {
+            busy = false;
+            send('run-finished', { aborted: false, compact: true });
+          }
+          snapshot();
+        }
         return;
       }
       case 'exportSession': {
@@ -519,6 +574,10 @@ async function handle(input: WorkerInput): Promise<void> {
         await listSessions();
         return;
       case 'stop':
+        if (compacting) {
+          session?.abortCompaction?.();
+          return;
+        }
         if (session && busy) await session.abort();
         if (busy) {
           busy = false;

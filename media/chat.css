@@ -157,6 +157,7 @@ button:focus-visible, textarea:focus-visible {
 }
 .branch-panel { right: 8px; left: auto; width: min(286px, calc(100vw - 64px)); }
 .queue-panel { right: 8px; left: auto; width: min(340px, calc(100vw - 64px)); }
+.bookmark-panel { width: min(320px, calc(100vw - 64px)); }
 .history-heading { min-height: 42px; padding: 0 10px 0 13px; display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
 .session-search { flex: 0 0 auto; min-width: 0; margin: 0 7px 5px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 11px; }
 .session-search::placeholder { color: var(--muted); }
@@ -251,8 +252,12 @@ button:focus-visible, textarea:focus-visible {
 
 .message-list { width: 100%; max-width: 68ch; margin: 0 auto; }
 .message-row { display: flex; flex-direction: column; gap: 5px; margin: 17px 0 20px; min-width: 0; }
+.message-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; width: 100%; }
+.message-row.user .message-actions { justify-content: flex-end; }
+.message-row.assistant .message-actions { justify-content: flex-start; }
 .message-row.search-match { outline: 1px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 4px; border-radius: 3px; }
 .message-row.search-current { outline: 2px solid var(--focus); outline-offset: 4px; border-radius: 3px; }
+.message-row.bookmark-flash { background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 5px; transition: background 1400ms ease-out; }
 .message-row.user { align-items: flex-end; }
 .message-role { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.03em; }
 .message-content { min-width: 0; max-width: 100%; overflow-wrap: anywhere; line-height: 1.58; }
@@ -267,6 +272,7 @@ button:focus-visible, textarea:focus-visible {
 .branch-button { align-self: flex-end; padding: 3px 6px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
 .branch-button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
 .quote-button { align-self: flex-start; }
+.bookmark-message.bookmarked { color: var(--focus); }
 .message-context { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
 .message-context span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
 .message-content p { margin: 0 0 9px; white-space: pre-wrap; }
@@ -402,10 +408,13 @@ button:focus-visible, textarea:focus-visible {
 .composer-note { display: flex; justify-content: space-between; gap: 8px; max-width: 68ch; margin: 6px auto 0; color: var(--muted); font-size: 10px; }
 .composer-note span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .extension-status { color: var(--muted); }
-.context-meter { position: relative; display: flex; align-items: center; height: 15px; max-width: 68ch; margin: 5px auto 0; overflow: hidden; border-radius: 4px; color: var(--muted); background: color-mix(in srgb, var(--text) 6%, transparent); font-size: 9px; }
+.context-meter { position: relative; display: flex; align-items: center; height: 22px; max-width: 68ch; margin: 5px auto 0; overflow: hidden; border-radius: 4px; color: var(--muted); background: color-mix(in srgb, var(--text) 6%, transparent); font-size: 9px; }
 .context-meter-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: color-mix(in srgb, var(--accent) 33%, transparent); transition: width 160ms ease-out; }
 .context-meter.near-limit .context-meter-fill { background: color-mix(in srgb, var(--danger) 42%, transparent); }
-.context-meter-label { position: relative; z-index: 1; margin: 0 auto; padding: 0 5px; line-height: 15px; }
+.context-meter-label { position: relative; z-index: 1; margin: 0 auto; padding: 0 58px 0 5px; line-height: 22px; }
+.context-meter-action { position: absolute; z-index: 2; top: 0; right: 0; height: 100%; padding: 0 7px; border: 0; border-left: 1px solid var(--line); color: var(--accent); background: var(--surface-raised); cursor: pointer; font: inherit; }
+.context-meter-action:hover:not(:disabled) { color: var(--text); }
+.context-meter-action:disabled { opacity: .55; cursor: default; }
 
 @media (max-width: 360px) {
   .layout { grid-template-columns: 39px minmax(0, 1fr); }

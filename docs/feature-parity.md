@@ -20,11 +20,13 @@ This checklist follows Pendant's published [guide](https://pendant.sh/guide/) as
 - [x] Queue follow-ups or steer a running turn; reorder, edit, and remove queued text messages.
 - [x] Search the current transcript and step through matches in messages and visible tool output.
 - [x] Persist drafts and prompt history by Pi session; quote a message or selected passage into the next prompt.
+- [x] Bookmark transcript messages with persistent branch-local bookmarks and jump back to bookmarked messages.
 - [x] Show estimated context usage and warn visually near the model's context limit.
+- [x] Offer Pi context compaction near the context limit, with an explicit confirmation and cancellation through Stop.
 - [x] Export the active session as HTML or JSONL.
 - [~] Render a safe Markdown subset; full Markdown, math, Mermaid, image output, thinking blocks, and extension renderers are not supported.
 - [~] Tool cards show live activity; historical tool cards, edit diffs, exploration grouping, focused transcript mode, and per-tool expansion settings are not restored/rendered.
-- [ ] Copy/quote actions for code blocks, symbol links, bookmark lists, prompt suggestions, and context compaction controls.
+- [~] Copy actions for code blocks, symbol links, and prompt suggestions are missing; message quoting, bookmark lists, and context compaction are available.
 - [ ] Redacted diagnostic/bug-report export.
 - [ ] Run shell commands from `!` messages. The required direct command execution was rejected by the automatic security review, so this remains unavailable.
 

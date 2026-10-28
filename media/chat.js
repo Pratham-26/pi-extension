@@ -18,6 +18,7 @@ const state = {
   mentionTimer: undefined,
   sessionSearchTimer: undefined,
   messages: [],
+  bookmarks: [],
   attachments: [],
   hasSession: false,
   switchingSession: false,
@@ -103,6 +104,11 @@ const ui = {
   contextMeter: el('context-meter'),
   contextMeterFill: el('context-meter-fill'),
   contextMeterLabel: el('context-meter-label'),
+  compactSession: el('compact-session'),
+  bookmarkToggle: el('bookmark-toggle'),
+  bookmarkPanel: el('bookmark-panel'),
+  bookmarkList: el('bookmark-list'),
+  bookmarkEmpty: el('bookmark-empty'),
   presets: el('model-presets'),
   thinkingChoice: el('thinking-choice'),
   toolsToggle: el('tools-toggle'),
@@ -256,6 +262,8 @@ function updateControls() {
   el('refresh-models').disabled = state.busy;
   ui.presets.querySelectorAll('.preset-choice').forEach((button) => { button.disabled = button.dataset.available !== 'true' || state.busy; });
   ui.thinkingChoice.disabled = !state.hasSession || state.busy || state.thinkingLevels.length === 0;
+  ui.compactSession.disabled = !state.hasSession || state.busy;
+  ui.bookmarkToggle.disabled = !state.hasSession;
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
   ui.skillsToggle.disabled = !state.hasSession || (state.skills.length === 0 && state.prompts.length === 0);
   ui.toolsPopover.querySelectorAll('input').forEach((input) => { input.disabled = state.busy; });
@@ -498,6 +506,7 @@ function renderMessages(shouldFollow = true) {
     const row = document.createElement('article');
     row.className = `message-row ${message.role}`;
     row.dataset.messageIndex = String(messageIndex);
+    if (typeof message.entryId === 'string') row.dataset.entryId = message.entryId;
     const role = document.createElement('div');
     role.className = 'message-role';
     role.textContent = message.role === 'user' ? 'YOU' : 'PI';
@@ -522,6 +531,8 @@ function renderMessages(shouldFollow = true) {
     if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text);
     else body.textContent = message.text;
     row.append(body);
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
     if (message.role === 'user' && message.entryId) {
       const branch = document.createElement('button');
       branch.type = 'button';
@@ -529,7 +540,7 @@ function renderMessages(shouldFollow = true) {
       branch.textContent = 'Branch from here';
       branch.title = 'Create a new Pi session from this message';
       branch.addEventListener('click', () => post('forkSession', { entryId: message.entryId }));
-      row.append(branch);
+      actions.append(branch);
     }
     const quote = document.createElement('button');
     quote.type = 'button';
@@ -550,10 +561,30 @@ function renderMessages(shouldFollow = true) {
       renderAttachments();
       ui.prompt.focus();
     });
-    row.append(quote);
+    actions.append(quote);
+    if (message.entryId) {
+      const bookmarked = state.bookmarks.includes(message.entryId);
+      const bookmark = document.createElement('button');
+      bookmark.type = 'button';
+      bookmark.className = `branch-button bookmark-message${bookmarked ? ' bookmarked' : ''}`;
+      bookmark.textContent = bookmarked ? '★ Bookmarked' : '☆ Bookmark';
+      bookmark.title = bookmarked ? 'Remove bookmark' : 'Bookmark this message';
+      bookmark.setAttribute('aria-pressed', String(bookmarked));
+      bookmark.addEventListener('click', () => {
+        state.bookmarks = bookmarked
+          ? state.bookmarks.filter((entryId) => entryId !== message.entryId)
+          : [...state.bookmarks, message.entryId].slice(-500);
+        renderMessages(false);
+        renderBookmarks();
+        post('setBookmarks', { entryIds: state.bookmarks });
+      });
+      actions.append(bookmark);
+    }
+    row.append(actions);
     ui.messageList.append(row);
   }
 
+  renderBookmarks();
   updateChatSearch();
   ui.empty.hidden = state.messages.length > 0;
   if (shouldFollow && nearBottom) ui.messageArea.scrollTop = ui.messageArea.scrollHeight;
@@ -771,6 +802,7 @@ function renderContextUsage() {
   const percent = Number(usage?.percent);
   if (!usage || !Number.isFinite(percent) || percent < 0) {
     ui.contextMeter.hidden = true;
+    ui.compactSession.hidden = true;
     return;
   }
   const bounded = Math.min(100, percent);
@@ -783,6 +815,55 @@ function renderContextUsage() {
   const format = (value) => value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}m` : `${Math.round(value / 1000)}k`;
   ui.contextMeterLabel.textContent = `${Number.isFinite(tokens) ? format(tokens) : '—'} / ${format(windowSize)} context · ${Math.round(bounded)}%`;
   ui.contextMeter.title = 'Estimated context currently in use';
+  ui.compactSession.hidden = bounded < 80 || !state.hasSession;
+  ui.compactSession.title = 'Ask Pi to summarize older context to free context window space';
+}
+
+function renderBookmarks() {
+  ui.bookmarkList.replaceChildren();
+  const bookmarkedMessages = state.bookmarks
+    .map((entryId) => state.messages.find((message) => message.entryId === entryId))
+    .filter((message) => message && (message.role === 'user' || message.role === 'assistant'));
+  bookmarkedMessages.sort((left, right) => state.messages.indexOf(left) - state.messages.indexOf(right));
+  ui.bookmarkEmpty.hidden = bookmarkedMessages.length > 0;
+  for (const message of bookmarkedMessages) {
+    const entry = document.createElement('div');
+    entry.className = 'session-entry bookmark-entry';
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.className = 'session-row branch-point';
+    const title = document.createElement('span');
+    title.className = 'session-row-title';
+    title.textContent = `${message.role === 'user' ? 'You' : 'Pi'}: ${String(message.text || '').replace(/\s+/g, ' ').slice(0, 76)}`;
+    const subtitle = document.createElement('span');
+    subtitle.className = 'session-row-id';
+    subtitle.textContent = 'Jump to bookmarked message';
+    jump.append(title, subtitle);
+    jump.addEventListener('click', () => {
+      const row = [...ui.messageList.querySelectorAll('[data-entry-id]')]
+        .find((item) => item.dataset.entryId === message.entryId);
+      ui.bookmarkPanel.hidden = true;
+      ui.bookmarkToggle.setAttribute('aria-expanded', 'false');
+      row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (row) {
+        row.classList.add('bookmark-flash');
+        setTimeout(() => row.classList.remove('bookmark-flash'), 1400);
+      }
+    });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'session-action';
+    remove.textContent = '×';
+    remove.title = 'Remove bookmark';
+    remove.setAttribute('aria-label', 'Remove bookmark');
+    remove.addEventListener('click', () => {
+      state.bookmarks = state.bookmarks.filter((entryId) => entryId !== message.entryId);
+      renderMessages(false);
+      post('setBookmarks', { entryIds: state.bookmarks });
+    });
+    entry.append(jump, remove);
+    ui.bookmarkList.append(entry);
+  }
 }
 
 function renderBranchPoints() {
@@ -1135,6 +1216,9 @@ function applySnapshot(data) {
     persistWebviewState();
   }
   state.hasSession = Boolean(data.sessionId || data.sessionFile);
+  state.bookmarks = Array.isArray(data.bookmarks)
+    ? [...new Set(data.bookmarks.slice(0, 500).filter((entryId) => typeof entryId === 'string' && entryId.length <= 256))]
+    : [];
   state.model = data.model || '';
   const messages = Array.isArray(data.messages) ? [...data.messages] : [];
   const toolMessages = state.toolMessagesBySession.get(state.sessionPath) || [];
@@ -1150,6 +1234,7 @@ function applySnapshot(data) {
   ui.title.title = data.title || 'New chat';
   renderSessions();
   renderMessages();
+  renderBookmarks();
   if (state.busy) setBusy(true, 'Pi is working');
 }
 
@@ -1308,6 +1393,7 @@ el('new-session').addEventListener('click', () => {
   }
   state.switchingSession = true;
   state.messages = [];
+  state.bookmarks = [];
   state.model = '';
   setBusy(true, 'Starting a new chat');
   ui.title.textContent = 'New chat';
@@ -1321,6 +1407,21 @@ el('history-toggle').addEventListener('click', () => {
   ui.historyToggle.setAttribute('aria-expanded', String(open));
   if (open) post('listSessions', { query: state.sessionQuery });
 });
+ui.bookmarkToggle.addEventListener('click', () => {
+  const open = ui.bookmarkPanel.hidden;
+  ui.bookmarkPanel.hidden = !open;
+  ui.bookmarkToggle.setAttribute('aria-expanded', String(open));
+  ui.history.hidden = true;
+  ui.historyToggle.setAttribute('aria-expanded', 'false');
+  ui.branchPanel.hidden = true;
+  ui.branchHistoryToggle.setAttribute('aria-expanded', 'false');
+  if (open) renderBookmarks();
+});
+el('close-bookmarks').addEventListener('click', () => {
+  ui.bookmarkPanel.hidden = true;
+  ui.bookmarkToggle.setAttribute('aria-expanded', 'false');
+});
+ui.compactSession.addEventListener('click', () => post('compactSession'));
 el('close-history').addEventListener('click', closeHistory);
 el('close-branches').addEventListener('click', () => {
   ui.branchPanel.hidden = true;
