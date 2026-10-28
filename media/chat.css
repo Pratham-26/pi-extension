@@ -601,6 +601,7 @@ button:focus-visible, textarea:focus-visible {
 .subagent-run { border-top: 1px solid var(--line); padding-top: 5px; }
 .subagent-run > summary, .subagent-transcript > summary { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; cursor: pointer; }
 .subagent-run[open] > summary { margin-bottom: 6px; color: var(--text); }
+.subagent-run-running > summary { color: var(--accent); }
 .subagent-run-error > summary, .subagent-error { color: var(--danger); }
 .subagent-task { margin: 5px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .subagent-transcript { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 5px; }

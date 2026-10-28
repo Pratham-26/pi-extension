@@ -1643,15 +1643,16 @@ function appendSubagentDetails(card, details, partial) {
   }
 
   for (const run of details.results) {
-    const failed = (typeof run.exitCode === 'number' && run.exitCode !== 0)
-      || ['error', 'aborted'].includes(String(run.stopReason || '').toLocaleLowerCase());
+    const running = partial && (run.exitCode === -1 || String(run.status || '').toLocaleLowerCase() === 'running');
+    const failed = !running && ((typeof run.exitCode === 'number' && run.exitCode !== 0)
+      || ['error', 'aborted'].includes(String(run.stopReason || '').toLocaleLowerCase()));
     const runDetails = document.createElement('details');
-    runDetails.className = `subagent-run${failed ? ' subagent-run-error' : ''}`;
+    runDetails.className = `subagent-run${running ? ' subagent-run-running' : ''}${failed ? ' subagent-run-error' : ''}`;
     runDetails.open = details.results.length === 1;
     const summary = document.createElement('summary');
     const name = typeof run.agent === 'string' ? run.agent.slice(0, 128) : 'Subagent';
     const source = typeof run.agentSource === 'string' ? ` · ${run.agentSource.slice(0, 64)}` : '';
-    const status = partial ? 'Running' : failed ? 'Failed' : 'Finished';
+    const status = running ? 'Running' : failed ? 'Failed' : 'Finished';
     summary.textContent = `${name}${source} · ${status}`;
     runDetails.append(summary);
 
