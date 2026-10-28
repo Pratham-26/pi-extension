@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -70,6 +70,16 @@
           "type": "boolean",
           "default": false,
           "description": "Include the active editor file as a reference with each message when there is no selection."
+        },
+        "piChat.context.includeDiagnostics": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include diagnostics from the active workspace file with each message."
+        },
+        "piChat.context.includeGitStatus": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include the active workspace Git branch and changed file names with each message."
         },
         "piChat.notifications.runFinished": {
           "type": "boolean",

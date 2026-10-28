@@ -1483,6 +1483,7 @@ el('chat-search-close').addEventListener('click', () => {
 });
 el('attach-file').addEventListener('click', () => post('attachFile'));
 el('attach-editor').addEventListener('click', () => post('attachEditor'));
+el('attach-range').addEventListener('click', () => post('attachRange'));
 el('attach-folder').addEventListener('click', () => post('attachFolder'));
 el('attach-diagnostics').addEventListener('click', () => post('attachDiagnostics'));
 el('attach-git').addEventListener('click', () => post('attachGit'));

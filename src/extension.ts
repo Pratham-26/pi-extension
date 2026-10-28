@@ -358,6 +358,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'attachEditor':
         this.attachActiveEditor();
         return;
+      case 'attachRange':
+        await this.attachLineRange();
+        return;
       case 'attachFile':
         await this.attachFile();
         return;
@@ -407,6 +410,50 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.post({
       type: 'attachment',
       attachment: { id: randomBytes(8).toString('hex'), label, path: relativePath, context: contextText } satisfies Attachment,
+    });
+  }
+
+  private async attachLineRange(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!editor || !workspace) {
+      this.post({ type: 'notice', message: 'Open a file in this workspace before attaching a line range.' });
+      return;
+    }
+    const relativePath = this.workspaceRelativePath(editor.document.uri, workspace);
+    if (!relativePath) {
+      this.post({ type: 'notice', message: 'The active file is outside this workspace.' });
+      return;
+    }
+    const selection = editor.selection;
+    const firstLine = selection.isEmpty ? selection.active.line + 1 : selection.start.line + 1;
+    const lastLine = selection.isEmpty ? firstLine : Math.max(firstLine, selection.end.line + (selection.end.character === 0 ? 0 : 1));
+    const value = await vscode.window.showInputBox({
+      prompt: `Choose lines from ${relativePath} (1–${editor.document.lineCount})`,
+      placeHolder: '12 or 12-24',
+      value: firstLine === lastLine ? String(firstLine) : `${firstLine}-${lastLine}`,
+      validateInput: (input) => {
+        const match = input.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+        if (!match) return 'Enter a line number or range, such as 12-24.';
+        const start = Number(match[1]);
+        const end = Number(match[2] ?? match[1]);
+        if (start < 1 || end < start || end > editor.document.lineCount) return `Choose a range between 1 and ${editor.document.lineCount}.`;
+        return undefined;
+      },
+    });
+    if (value === undefined) return;
+    const match = value.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (!match) return;
+    const start = Number(match[1]);
+    const end = Number(match[2] ?? match[1]);
+    this.post({
+      type: 'attachment',
+      attachment: {
+        id: randomBytes(8).toString('hex'),
+        label: `${path.basename(relativePath)} · lines ${start}-${end}`,
+        path: relativePath,
+        context: `@${relativePath}:${start}-${end}`,
+      } satisfies Attachment,
     });
   }
 
@@ -525,25 +572,30 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'notice', message: 'The active file is outside this workspace.' });
       return;
     }
-    const problems = vscode.languages.getDiagnostics(editor.document.uri);
+    const attachment = this.createDiagnosticsAttachment(editor.document.uri, workspace);
+    if (attachment) this.post({ type: 'attachment', attachment });
+  }
+
+  private createDiagnosticsAttachment(uri: vscode.Uri, workspace: vscode.WorkspaceFolder): Attachment | undefined {
+    const relativePath = this.workspaceRelativePath(uri, workspace);
+    if (!relativePath) return undefined;
+    const problems = vscode.languages.getDiagnostics(uri);
     const severity = (value: vscode.DiagnosticSeverity): string => value === vscode.DiagnosticSeverity.Error
       ? 'error'
       : value === vscode.DiagnosticSeverity.Warning ? 'warning' : value === vscode.DiagnosticSeverity.Information ? 'info' : 'hint';
-    const details = problems.map((problem) => {
+    const details = problems.slice(0, 50).map((problem) => {
       const line = problem.range.start.line + 1;
       const column = problem.range.start.character + 1;
       const code = typeof problem.code === 'string' || typeof problem.code === 'number' ? ` [${problem.code}]` : '';
-      return `${severity(problem.severity)} ${relativePath}:${line}:${column}${code}: ${problem.message}`;
+      return `${severity(problem.severity)} ${relativePath}:${line}:${column}${code}: ${String(problem.message).slice(0, 500)}`;
     });
-    this.post({
-      type: 'attachment',
-      attachment: {
-        id: randomBytes(8).toString('hex'),
-        label: `${path.basename(relativePath)} · ${problems.length} problems`,
-        path: relativePath,
-        context: `Problems for @${relativePath}:\n${details.length ? details.join('\n') : 'No reported problems.'}`,
-      } satisfies Attachment,
-    });
+    const omitted = problems.length > details.length ? `\n[${problems.length - details.length} more diagnostics omitted]` : '';
+    return {
+      id: randomBytes(8).toString('hex'),
+      label: `${path.basename(relativePath)} · ${problems.length} problems`,
+      path: relativePath,
+      context: `Problems for @${relativePath}:\n${details.length ? details.join('\n') : 'No reported problems.'}${omitted}`.slice(0, MAX_ATTACHMENT_CHARS),
+    };
   }
 
   private async attachGitState(): Promise<void> {
@@ -553,46 +605,49 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     try {
-      const extension = vscode.extensions.getExtension('vscode.git');
-      if (!extension) throw new Error('The built-in Git extension is unavailable.');
-      const git = extension.isActive ? extension.exports : await extension.activate();
-      const api = git.getAPI(1);
-      const repository = api.repositories.find((item: any) => this.workspaceRelativePath(item.rootUri, workspace) !== undefined);
-      if (!repository) {
+      const attachment = await this.createGitStateAttachment(workspace);
+      if (!attachment) {
         this.post({ type: 'notice', message: 'This workspace is not inside a Git repository.' });
         return;
       }
-      const state = repository.state;
-      const names = (changes: any[]) => changes.map((change) => {
-        const uri = change.uri ?? change.resourceUri;
-        return uri ? this.workspaceRelativePath(uri, workspace) : undefined;
-      }).filter(Boolean);
-      const branch = state.HEAD?.name ?? '(detached HEAD)';
-      const upstream = state.HEAD?.upstream ? `\nUpstream: ${state.HEAD.upstream}` : '';
-      const commits = state.HEAD?.ahead !== undefined || state.HEAD?.behind !== undefined
-        ? `\nAhead: ${state.HEAD.ahead ?? 0}; behind: ${state.HEAD.behind ?? 0}`
-        : '';
-      const index = names(state.indexChanges ?? []);
-      const working = names(state.workingTreeChanges ?? []);
-      const conflicts = names(state.mergeChanges ?? []);
-      const context = [
-        `Branch: ${branch}${upstream}${commits}`,
-        `Staged (${index.length}): ${index.join(', ') || 'none'}`,
-        `Unstaged (${working.length}): ${working.join(', ') || 'none'}`,
-        `Conflicts (${conflicts.length}): ${conflicts.join(', ') || 'none'}`,
-      ].join('\n');
-      this.post({
-        type: 'attachment',
-        attachment: {
-          id: randomBytes(8).toString('hex'),
-          label: 'Git status',
-          path: workspace.name,
-          context: `Git workspace state:\n${context}`,
-        } satisfies Attachment,
-      });
+      this.post({ type: 'attachment', attachment });
     } catch (error) {
       this.post({ type: 'notice', message: `Could not read Git status. ${error instanceof Error ? error.message : ''}` });
     }
+  }
+
+  private async createGitStateAttachment(workspace: vscode.WorkspaceFolder): Promise<Attachment | undefined> {
+    const extension = vscode.extensions.getExtension('vscode.git');
+    if (!extension) throw new Error('The built-in Git extension is unavailable.');
+    const git = extension.isActive ? extension.exports : await extension.activate();
+    const api = git.getAPI(1);
+    const repository = api.repositories.find((item: any) => this.workspaceRelativePath(item.rootUri, workspace) !== undefined);
+    if (!repository) return undefined;
+    const state = repository.state;
+    const names = (changes: any[]) => changes.slice(0, 100).map((change) => {
+      const uri = change.uri ?? change.resourceUri;
+      return uri ? this.workspaceRelativePath(uri, workspace) : undefined;
+    }).filter(Boolean);
+    const branch = String(state.HEAD?.name ?? '(detached HEAD)').slice(0, 200);
+    const upstream = state.HEAD?.upstream ? `\nUpstream: ${String(state.HEAD.upstream).slice(0, 200)}` : '';
+    const commits = state.HEAD?.ahead !== undefined || state.HEAD?.behind !== undefined
+      ? `\nAhead: ${Number(state.HEAD.ahead) || 0}; behind: ${Number(state.HEAD.behind) || 0}`
+      : '';
+    const index = names(state.indexChanges ?? []);
+    const working = names(state.workingTreeChanges ?? []);
+    const conflicts = names(state.mergeChanges ?? []);
+    const context = [
+      `Branch: ${branch}${upstream}${commits}`,
+      `Staged (${state.indexChanges?.length ?? 0}): ${index.join(', ') || 'none'}`,
+      `Unstaged (${state.workingTreeChanges?.length ?? 0}): ${working.join(', ') || 'none'}`,
+      `Conflicts (${state.mergeChanges?.length ?? 0}): ${conflicts.join(', ') || 'none'}`,
+    ].join('\n');
+    return {
+      id: randomBytes(8).toString('hex'),
+      label: 'Git status',
+      path: workspace.name,
+      context: `Git workspace state:\n${context}`.slice(0, MAX_ATTACHMENT_CHARS),
+    };
   }
 
   private async attachUris(rawUris: string[]): Promise<void> {
@@ -806,31 +861,45 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const settings = vscode.workspace.getConfiguration('piChat.context');
     const editor = vscode.window.activeTextEditor;
     const workspace = vscode.workspace.workspaceFolders?.[0];
-    if (!editor || !workspace) return [];
-    const relativePath = this.workspaceRelativePath(editor.document.uri, workspace);
-    if (!relativePath) return [];
-
+    if (!workspace) return [];
     const attachments: Attachment[] = [];
     const followSelection = settings.get<boolean>('followSelection', true);
     const followActiveFile = settings.get<boolean>('followActiveFile', false);
-    if (followSelection && !editor.selection.isEmpty) {
-      const start = editor.selection.start.line + 1;
-      const end = Math.max(start, editor.selection.end.line + (editor.selection.end.character === 0 ? 0 : 1));
-      attachments.push({
-        id: randomBytes(8).toString('hex'),
-        label: `${path.basename(relativePath)} · lines ${start}-${end}`,
-        path: relativePath,
-        context: `@${relativePath}:${start}-${end}`,
-      });
-    } else if (followActiveFile) {
-      attachments.push({
-        id: randomBytes(8).toString('hex'),
-        label: `${path.basename(relativePath)} · active file`,
-        path: relativePath,
-        context: `@${relativePath}`,
-      });
+    if (editor) {
+      const relativePath = this.workspaceRelativePath(editor.document.uri, workspace);
+      if (relativePath) {
+        if (followSelection && !editor.selection.isEmpty) {
+          const start = editor.selection.start.line + 1;
+          const end = Math.max(start, editor.selection.end.line + (editor.selection.end.character === 0 ? 0 : 1));
+          attachments.push({
+            id: randomBytes(8).toString('hex'),
+            label: `${path.basename(relativePath)} · lines ${start}-${end}`,
+            path: relativePath,
+            context: `@${relativePath}:${start}-${end}`,
+          });
+        } else if (followActiveFile) {
+          attachments.push({
+            id: randomBytes(8).toString('hex'),
+            label: `${path.basename(relativePath)} · active file`,
+            path: relativePath,
+            context: `@${relativePath}`,
+          });
+        }
+        if (settings.get<boolean>('includeDiagnostics', false)) {
+          const diagnostics = this.createDiagnosticsAttachment(editor.document.uri, workspace);
+          if (diagnostics) attachments.push(diagnostics);
+        }
+      }
     }
-    return attachments;
+    if (settings.get<boolean>('includeGitStatus', false)) {
+      try {
+        const gitStatus = await this.createGitStateAttachment(workspace);
+        if (gitStatus) attachments.push(gitStatus);
+      } catch {
+        // Automatic context is optional; manual Git attachment reports errors.
+      }
+    }
+    return attachments.slice(0, 8);
   }
 
   private post(message: RuntimeMessage): void {
@@ -1001,6 +1070,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 12.5 6.3-6.3a3.2 3.2 0 0 1 4.5 4.5L11 19.5a5 5 0 0 1-7.1-7.1l8.4-8.5"/></svg>
               </button>
               <button id="attach-editor" class="text-button" type="button">Add editor context</button>
+              <button id="attach-range" class="text-button" type="button" title="Attach a line range from the active file">Lines</button>
               <button id="attach-folder" class="text-button" type="button" title="Attach a folder">Folder</button>
               <button id="attach-diagnostics" class="text-button" type="button" title="Attach problems from the active file">Problems</button>
               <button id="attach-git" class="text-button" type="button" title="Attach Git status">Git</button>

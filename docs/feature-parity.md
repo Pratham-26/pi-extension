@@ -43,11 +43,12 @@ This checklist follows Pendant's published [guide](https://pendant.sh/guide/) as
 
 ## Workspace context
 
-- [x] Attach files, folders, images, active-file problems, and Git status; paste images; drag/drop workspace files.
+- [x] Attach files, folders, images, active-file problems, and Git status; paste images; drag/drop workspace files; optionally add diagnostics and Git status automatically.
+- [x] Attach a selected line range manually by line number.
 - [x] Type `@` to search workspace files, insert a reference, and attach the selected file.
 - [x] Automatically attach a selected-line reference or follow the active file, controlled by extension settings.
 - [~] Manual file attachments include bounded text content; automatic editor context uses file/line references. Image context is sent as image content.
-- [ ] Automatic toggles for diagnostics and Git state; pin/follow the active file; select arbitrary line ranges by number.
+- [~] Automatic diagnostics/Git toggles, active-file following, and arbitrary line ranges are available; pinning an active file until removed is missing.
 - [ ] Quote diff lines, quote transcript passages with persistent jump-back references, and show full attached context as compact chips.
 
 ## Pi tools, skills, prompts, extensions, and packages
