@@ -2272,6 +2272,7 @@ ui.cacheWarming.addEventListener('change', () => {
 ui.editModelsConfig.addEventListener('click', () => post('openModelsConfig'));
 ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));
 ui.editMcpConfig.addEventListener('click', () => post('openMcpConfig'));
+el('export-diagnostics').addEventListener('click', () => post('exportDiagnostics'));
 ui.mcpEnabled.addEventListener('change', () => {
   state.mcpSettingPending = true;
   updateControls();

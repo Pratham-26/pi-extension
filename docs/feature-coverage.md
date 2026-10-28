@@ -28,7 +28,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [~] Render a safe Markdown subset; full Markdown, math, Mermaid, image output, thinking blocks, and extension renderers are not supported.
 - [~] Tool cards show live activity; historical tool cards, edit diffs, exploration grouping, focused transcript mode, and per-tool expansion settings are not restored/rendered.
 - [~] Code blocks can be copied; symbol links and model-generated prompt suggestions are missing. Message quoting, bookmarks, persistent context edits, and context compaction are available.
-- [ ] Redacted diagnostic/bug-report export.
+- [x] Export a redacted diagnostic report with software versions and generic error categories; the report excludes prompt/transcript content, workspace/session paths, file names, provider IDs, credentials, and environment variables.
 - [ ] Run shell commands from `!` messages. The required direct command execution was rejected by the automatic security review, so this remains unavailable.
 
 ## Sessions
@@ -40,7 +40,6 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [ ] Auto-name a session.
 - [ ] Git worktree sessions, setup commands, ignored-file copying, and safe worktree removal.
 - [ ] Group running sessions and expose live progress in the session list.
-- [ ] Export a redacted bug report with optional diagnostics.
 
 ## Workspace context
 

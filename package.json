@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -61,6 +61,11 @@
       {
         "command": "piChat.openSettings",
         "title": "Pi Chat: Open Settings",
+        "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.exportDiagnostics",
+        "title": "Pi Chat: Export Redacted Diagnostic Report",
         "category": "Pi Chat"
       }
     ],
@@ -118,6 +123,11 @@
         },
         {
           "command": "piChat.openSettings",
+          "when": "view == piChat.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "piChat.exportDiagnostics",
           "when": "view == piChat.chatView",
           "group": "navigation"
         }

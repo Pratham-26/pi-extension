@@ -86,6 +86,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piChat.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.pi-chat-vscode')),
+    vscode.commands.registerCommand('piChat.exportDiagnostics', () => provider.exportDiagnostics()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.restartRuntime()),
     provider,
   );
@@ -114,6 +115,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private activeEditorSubscription: vscode.Disposable;
   private selectionSubscription: vscode.Disposable;
   private pinnedActiveFileEnabled: boolean;
+  private diagnosticEvents: Array<{ at: string; category: string }> = [];
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
@@ -171,6 +173,42 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   async cloneSession(): Promise<void> {
     if (!this.worker) await this.ensureRuntime();
     this.worker?.postMessage({ type: 'cloneSession' });
+  }
+
+  async exportDiagnostics(): Promise<void> {
+    const packageJson = this.context.extension.packageJSON as {
+      version?: unknown;
+      dependencies?: Record<string, unknown>;
+    };
+    const destination = await vscode.window.showSaveDialog({
+      filters: { 'JSON report': ['json'] },
+      saveLabel: 'Export redacted report',
+    });
+    if (!destination) return;
+    const report = {
+      format: 'pi-chat-vscode-diagnostic-report',
+      generatedAt: new Date().toISOString(),
+      versions: {
+        vscode: vscode.version,
+        extension: String(packageJson.version ?? 'unknown').slice(0, 32),
+        piSdk: String(packageJson.dependencies?.['@earendil-works/pi-coding-agent'] ?? 'unknown').slice(0, 32),
+        node: process.versions.node,
+      },
+      environment: {
+        platform: process.platform,
+        architecture: process.arch,
+        workspaceOpen: Boolean(vscode.workspace.workspaceFolders?.length),
+        piWorkerRunning: Boolean(this.worker),
+      },
+      recentErrors: this.diagnosticEvents.slice(-20),
+      privacy: 'This report omits prompt text, transcript content, workspace and session paths, file names, provider IDs, credentials, and environment variables.',
+    };
+    try {
+      await vscode.workspace.fs.writeFile(destination, Buffer.from(JSON.stringify(report, null, 2), 'utf8'));
+      void vscode.window.showInformationMessage('Redacted Pi Chat diagnostic report saved.');
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Could not save the diagnostic report. ${error instanceof Error ? error.message.slice(0, 240) : ''}`);
+    }
   }
 
   restartRuntime(): void {
@@ -233,6 +271,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = worker;
     worker.on('message', (message: RuntimeMessage) => {
       if (this.worker !== worker) return;
+      if (message.type === 'runtime-error') this.recordDiagnostic('Pi runtime error');
+      else if (message.type === 'notice' && message.isError === true) this.recordDiagnostic('Pi operation error');
       if (message.type === 'run-finished') void this.refreshGitChanges();
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
         this.activeSessionPath = message.sessionFile;
@@ -332,6 +372,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     });
     worker.on('error', (error: Error) => {
       if (this.worker === worker) {
+        this.recordDiagnostic('Pi worker error');
         this.post({ type: 'runtime-error', message: error.message || 'The Pi runtime stopped unexpectedly.' });
       }
     });
@@ -342,6 +383,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.failPendingMcpSetting(worker);
       if (this.workerWorkspace === cwd && code !== 0) {
+        this.recordDiagnostic('Pi worker exited unexpectedly');
         this.post({ type: 'runtime-error', message: `The Pi runtime exited with code ${code}.` });
       }
     });
@@ -373,6 +415,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'discardGitChange':
         await this.discardGitChange(message.path);
+        return;
+      case 'exportDiagnostics':
+        await this.exportDiagnostics();
         return;
       case 'newSession':
         await this.newSession();
@@ -1586,6 +1631,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     worker.postMessage({ type: 'setMcpEnabled', enabled: message.enabled, requestId });
   }
 
+  private recordDiagnostic(category: string): void {
+    this.diagnosticEvents.push({ at: new Date().toISOString(), category });
+    if (this.diagnosticEvents.length > 50) this.diagnosticEvents.splice(0, this.diagnosticEvents.length - 50);
+  }
+
   private async handleMcpSettingResult(message: RuntimeMessage, worker: Worker): Promise<void> {
     const pending = this.pendingMcpSetting;
     if (!pending || pending.worker !== worker || pending.requestId !== message.requestId || this.worker !== worker) return;
@@ -2134,6 +2184,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <label class="runtime-setting"><input id="mcp-enabled" type="checkbox"><span>Connect configured MCP servers</span></label>
                 <button id="edit-mcp-config" class="text-button" type="button">Open global mcp.json</button>
                 <p class="runtime-settings-note">Enabled stdio entries can launch local programs; HTTP entries contact remote services. Pi’s project trust rules still apply. Use <code>/mcp</code> to inspect connections and sign in; edit the file and reload resources to change server settings.</p>
+                <button id="export-diagnostics" class="text-button" type="button">Export redacted diagnostic report</button>
+                <p class="runtime-settings-note">The report includes versions and generic error categories. It omits prompts, paths, file names, provider IDs, credentials, and environment variables.</p>
               </section>
               <div id="model-list" class="option-list" role="listbox" aria-label="Available models"></div>
             </section>
