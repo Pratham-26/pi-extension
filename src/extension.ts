@@ -5446,7 +5446,6 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       </main>
 
       <footer class="composer-wrap">
-        <div id="composer-popover-dismiss" class="composer-popover-dismiss" aria-hidden="true" hidden></div>
         <div id="extension-widgets-above" class="extension-widgets" aria-label="Pi extension widgets above the editor"></div>
         <div id="attachments" class="attachments" aria-label="Attached workspace context"></div>
         <div id="mention-panel" class="mention-panel" role="listbox" aria-label="Workspace files" hidden></div>

@@ -238,7 +238,6 @@ const ui = {
   bookmarkEmpty: el('bookmark-empty'),
   presets: el('model-presets'),
   composerControls: document.querySelector('.composer-controls'),
-  composerPopoverDismiss: el('composer-popover-dismiss'),
   thinkingChoice: el('thinking-choice'),
   toolsToggle: el('tools-toggle'),
   toolsPopover: el('tools-popover'),
@@ -5128,13 +5127,11 @@ function closeComposerPopovers() {
   ui.modelScopeToggle.textContent = 'Model cycling scope';
   ui.runtimeSettings.hidden = true;
   ui.runtimeSettingsToggle.setAttribute('aria-expanded', 'false');
-  ui.composerPopoverDismiss.hidden = true;
   ui.composerControls.classList.remove('popover-open');
 }
 
-function syncComposerPopoverDismissLayer() {
+function syncComposerPopoverOpenState() {
   const isOpen = !ui.modelPopover.hidden || !ui.toolsPopover.hidden || !ui.skillsPopover.hidden;
-  ui.composerPopoverDismiss.hidden = !isOpen;
   ui.composerControls.classList.toggle('popover-open', isOpen);
 }
 
@@ -5157,9 +5154,9 @@ function dismissComposerPopoversWhenPointerLeavesWebview(event) {
   if (event.relatedTarget == null) closeComposerPopovers();
 }
 
-// The transparent layer reliably receives pointer input outside the menu,
-// including clicks in areas where the webview retargets events.
-ui.composerPopoverDismiss.addEventListener('pointerdown', closeComposerPopovers);
+// Handle outside clicks at the document boundary so dismissal does not depend
+// on a backdrop's stacking context or prevent the clicked control from working.
+document.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
 window.addEventListener('focusin', dismissComposerPopoversFromOutside, true);
 // Leaving the webview for the VS Code workbench can still provide a relatedTarget.
 // Any pointer exit from this document is outside the composer controls.
@@ -5176,7 +5173,7 @@ ui.modelToggle.addEventListener('click', () => {
   closeComposerPopovers();
   ui.modelPopover.hidden = !open;
   ui.modelToggle.setAttribute('aria-expanded', String(open));
-  syncComposerPopoverDismissLayer();
+  syncComposerPopoverOpenState();
   if (open) {
     renderModelList();
     ui.modelSearch.focus();
@@ -5273,14 +5270,14 @@ ui.toolsToggle.addEventListener('click', () => {
   closeComposerPopovers();
   ui.toolsPopover.hidden = !open;
   ui.toolsToggle.setAttribute('aria-expanded', String(open));
-  syncComposerPopoverDismissLayer();
+  syncComposerPopoverOpenState();
 });
 ui.skillsToggle.addEventListener('click', () => {
   const open = ui.skillsPopover.hidden;
   closeComposerPopovers();
   ui.skillsPopover.hidden = !open;
   ui.skillsToggle.setAttribute('aria-expanded', String(open));
-  syncComposerPopoverDismissLayer();
+  syncComposerPopoverOpenState();
   if (open) post('listPackages');
 });
 document.querySelectorAll('[data-tool-preset]').forEach((button) => {
