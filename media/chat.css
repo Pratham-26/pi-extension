@@ -181,6 +181,7 @@ button:focus-visible, textarea:focus-visible {
 .session-search { flex: 0 0 auto; min-width: 0; margin: 0 7px 5px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 11px; }
 .session-search::placeholder { color: var(--muted); }
 .session-list { min-height: 0; overflow: auto; padding: 3px 6px 8px; }
+.session-group-heading { padding: 9px 7px 4px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; font-weight: 600; }
 .session-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; border-radius: 5px; }
 .session-row {
   display: grid;
@@ -206,6 +207,7 @@ button:focus-visible, textarea:focus-visible {
 .session-color.color-green { background: #63a57c; }
 .session-color.color-blue { background: #6798d0; }
 .session-color.color-purple { background: #9e7acb; }
+.session-row.running .session-color { background: var(--vscode-testing-iconPassed, #63a57c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--vscode-testing-iconPassed, #63a57c) 16%, transparent); }
 .session-actions { display: flex; align-items: center; gap: 2px; padding-right: 4px; opacity: 0; transition: opacity 100ms ease-out; }
 .session-entry:hover .session-actions, .session-entry:focus-within .session-actions { opacity: 1; }
 .session-action { padding: 4px 5px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 9px; }
@@ -214,6 +216,7 @@ button:focus-visible, textarea:focus-visible {
 .session-action.danger-action:hover:not(:disabled) { color: var(--danger); }
 .session-row-title { grid-column: 2; grid-row: 1; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .session-row-id { grid-column: 2; grid-row: 2; display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.session-row-progress { grid-column: 2; grid-row: auto; display: block; max-width: 100%; margin-top: 3px; overflow: hidden; color: var(--vscode-testing-iconPassed, #63a57c); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .session-row-workspace { grid-column: 2; grid-row: 3; display: block; max-width: 100%; margin-top: 3px; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .session-row-match { grid-column: 2; grid-row: 3; display: block; max-width: 100%; margin-top: 3px; overflow: hidden; color: var(--vscode-descriptionForeground, var(--muted)); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .session-row-match.has-workspace { grid-row: 4; }

@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { access, lstat, mkdir, open as openFile, realpath, writeFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { access, lstat, mkdir, open as openFile, opendir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { isPiPackageSource } from './package-source';
 import { appendDiagnosticLog, DIAGNOSTIC_LOG_FILENAME, type DiagnosticCategory } from './diagnostic-log';
@@ -82,6 +82,13 @@ type PiResourceChoice = vscode.QuickPickItem & {
 
 type PiOfflineMode = 'inherit' | 'offline' | 'online';
 
+type RunningSessionRecord = {
+  version: 1;
+  sessionKey: string;
+  activity: string;
+  updatedAt: number;
+};
+
 const VIEW_ID = 'piChat.chatView';
 const PENDING_SESSION_HANDOFF_KEY = 'piChat.pendingSessionHandoff';
 const SESSION_HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;
@@ -93,6 +100,9 @@ const MAX_GIT_DIFF_CHARS = 500_000;
 const MAX_GIT_DRAFT_CHARS = 30_000;
 const MAX_GIT_DRAFT_FILES = 24;
 const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
+const MAX_RUNNING_SESSION_RECORD_BYTES = 8_192;
+const MAX_RUNNING_SESSION_RECORDS = 200;
+const RUNNING_SESSION_RECORD_TTL_MS = 12_000;
 
 function readPiOfflineMode(): PiOfflineMode {
   const value = vscode.workspace.getConfiguration('piChat').get<string>('offlineMode', 'inherit');
@@ -168,6 +178,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerOfflineModeSetting: PiOfflineMode = 'inherit';
   private runtimeBusy = false;
   private queuedWorkCount = 0;
+  private runtimeActivity = 'Working in Pi';
+  private sessionListForRunningStatus: Array<Record<string, unknown>> = [];
+  private readonly runningSessionsDirectory: string;
+  private readonly runningSessionRecordPath: string;
+  private readonly runningSessionPoller: NodeJS.Timeout;
+  private runningSessionOperation: Promise<void> = Promise.resolve();
+  private runningSessionLeasePublished = false;
+  private runningSessionLeaseSignature = '';
+  private runningSessionLeaseWrittenAt = 0;
   private webviewMessageSubscription?: vscode.Disposable;
   private sessionQuery = '';
   private sessionSearchAllWorkspaces = false;
@@ -198,6 +217,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
     this.openLatestSessionOnStart = vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('openLatestOnStart', false);
     this.outputChannel = vscode.window.createOutputChannel('Pi Chat');
+    this.runningSessionsDirectory = path.join(context.globalStorageUri.fsPath, 'running-sessions');
+    this.runningSessionRecordPath = path.join(this.runningSessionsDirectory, `${randomBytes(16).toString('hex')}.json`);
+    this.runningSessionPoller = setInterval(() => {
+      this.refreshRunningSessionLease();
+      void this.refreshRunningSessionStatuses();
+    }, 2500);
+    this.runningSessionPoller.unref?.();
     this.activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (this.pinnedActiveFileEnabled && editor) this.publishPinnedActiveFile(editor);
     });
@@ -207,6 +233,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose(): void {
+    clearInterval(this.runningSessionPoller);
+    this.clearRunningSessionLease();
     this.cancelProviderAuthPrompts();
     this.outputChannel.dispose();
     this.activeEditorSubscription.dispose();
@@ -332,6 +360,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.worker = undefined;
     this.runtimeBusy = false;
     this.queuedWorkCount = 0;
+    this.runtimeActivity = '';
+    this.sessionListForRunningStatus = [];
+    this.clearRunningSessionLease();
     this.pendingPiResourcePicker = undefined;
     this.workerWorkspace = undefined;
     this.knownSessionPaths.clear();
@@ -371,6 +402,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
     this.queuedWorkCount = 0;
+    this.runtimeActivity = '';
+    this.sessionListForRunningStatus = [];
+    this.clearRunningSessionLease();
     this.pendingPiResourcePicker = undefined;
     this.failPendingMcpSetting(previous);
     if (previous) this.stopWorker(previous);
@@ -436,16 +470,29 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'extension-ui-reset') this.pendingExtensionUiRequestIds.clear();
       if (message.type === 'runtime-error') this.recordDiagnostic('Pi runtime error');
       else if (message.type === 'notice' && message.isError === true) this.recordDiagnostic('Pi operation error');
-      if (message.type === 'run-started') this.runtimeBusy = true;
-      else if (message.type === 'run-finished') this.runtimeBusy = false;
+      if (message.type === 'run-started') {
+        this.runtimeBusy = true;
+        this.runtimeActivity = this.safeRunningActivity(message.activity);
+        this.refreshRunningSessionLease();
+      } else if (message.type === 'run-finished') {
+        this.runtimeBusy = false;
+        this.runtimeActivity = this.queuedWorkCount > 0 ? `Queued work (${this.queuedWorkCount})` : '';
+        this.refreshRunningSessionLease();
+      } else if (message.type === 'activity') {
+        this.runtimeActivity = this.safeRunningActivity(message.message);
+        this.refreshRunningSessionLease();
+      }
       if (message.type === 'queue') {
         const steering = Array.isArray(message.steering) ? message.steering.length : 0;
         const followUp = Array.isArray(message.followUp) ? message.followUp.length : 0;
         this.queuedWorkCount = Math.min(5000, steering + followUp);
+        if (!this.runtimeBusy) this.runtimeActivity = this.queuedWorkCount > 0 ? `Queued work (${this.queuedWorkCount})` : '';
+        this.refreshRunningSessionLease();
       }
       if (message.type === 'run-finished') void this.refreshGitChanges();
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
         this.activeSessionPath = message.sessionFile;
+        this.refreshRunningSessionLease();
         this.post(message);
       } else if (message.type === 'run-finished' && !message.providerLogin && !this.view?.visible && vscode.workspace.getConfiguration('piChat.notifications').get<boolean>('runFinished', true)) {
         void this.showChatNotification('Pi finished its run.');
@@ -515,6 +562,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           .sort((a, b) => Number(b['pinned']) - Number(a['pinned'])
             || (orderIndex.get(String(a['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(String(b['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER)
             || Number(b['modified'] ?? 0) - Number(a['modified'] ?? 0));
+        this.sessionListForRunningStatus = sessions;
+        void this.refreshRunningSessionStatuses();
         this.consumePendingSessionHandoff(worker);
         this.post({ ...message, sessions });
         if (this.openLatestSessionOnStart && !this.latestSessionOpenAttempted) {
@@ -594,6 +643,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.worker = undefined;
         this.runtimeBusy = false;
         this.queuedWorkCount = 0;
+        this.runtimeActivity = '';
+        this.clearRunningSessionLease();
         this.pendingExtensionUiRequestIds.clear();
         this.pendingPiResourcePicker = undefined;
         this.cancelProviderAuthPrompts(worker);
@@ -705,12 +756,18 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           this.post({ type: 'notice', message: 'That session is not in the current workspace session list.', isError: true });
           return;
         }
+        if (await this.isSessionRunning(message.path)) {
+          this.post({ type: 'notice', message: 'Wait for this Pi session to finish in its other window before renaming it.', isError: true });
+          return;
+        }
         const name = await vscode.window.showInputBox({
           prompt: 'Name this Pi session',
           placeHolder: 'Session name',
           value: typeof message.currentName === 'string' ? message.currentName : '',
         });
-        if (name !== undefined && this.isKnownSessionPath(message.path)) this.worker?.postMessage({ type: 'renameSession', path: message.path, name: name.slice(0, 160) });
+        if (name !== undefined && this.isKnownSessionPath(message.path) && !await this.isSessionRunning(message.path)) {
+          this.worker?.postMessage({ type: 'renameSession', path: message.path, name: name.slice(0, 160) });
+        }
         return;
       }
       case 'forkSession':
@@ -729,6 +786,10 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           this.post({ type: 'notice', message: 'That session is not in the current workspace session list.', isError: true });
           return;
         }
+        if (await this.isSessionRunning(message.path)) {
+          this.post({ type: 'notice', message: 'Wait for this Pi session to finish in its other window before deleting it.', isError: true });
+          return;
+        }
         if (this.normalizeSessionPath(message.path) === this.normalizeSessionPath(this.activeSessionPath)) {
           this.post({ type: 'notice', message: 'Switch to another session before deleting the active one.', isError: true });
           return;
@@ -739,9 +800,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           'Delete session',
         );
         if (answer !== 'Delete session') return;
-        if (!this.isKnownSessionPath(message.path)
+        if (!this.isKnownSessionPath(message.path) || await this.isSessionRunning(message.path)
           || this.normalizeSessionPath(message.path) === this.normalizeSessionPath(this.activeSessionPath)) {
-          this.post({ type: 'notice', message: 'The session changed while the confirmation was open; refresh history and try again.', isError: true });
+          this.post({ type: 'notice', message: 'The session changed or began running while confirmation was open. Refresh history and try again.', isError: true });
           return;
         }
         await vscode.workspace.fs.delete(vscode.Uri.file(message.path));
@@ -2565,6 +2626,187 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       query: this.sessionQuery,
       allWorkspaces: this.sessionSearchAllWorkspaces,
     });
+  }
+
+  private runningSessionKey(sessionPath: string, workspacePath: string): string | undefined {
+    if (!path.isAbsolute(sessionPath) || sessionPath.length > 4096 || /[\u0000-\u001f\u007f]/.test(sessionPath)
+      || !path.isAbsolute(workspacePath) || workspacePath.length > 4096 || /[\u0000-\u001f\u007f]/.test(workspacePath)) return undefined;
+    try {
+      const workspaceKey = this.normalizeSessionPath(workspacePath);
+      const sessionKey = this.normalizeSessionPath(sessionPath);
+      return createHash('sha256').update(workspaceKey).update('\0').update(sessionKey).digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
+
+  private safeRunningActivity(value: unknown): string {
+    if (typeof value !== 'string') return 'Working in Pi';
+    const activity = value.trim();
+    if (activity === 'Pi is thinking' || activity === 'Managing Pi packages' || activity === 'Reloading Pi resources') return activity;
+    if (/^Running [A-Za-z0-9_.:-]{1,80}$/.test(activity)) return activity;
+    if (/^Connecting [A-Za-z0-9_. -]{1,80}$/.test(activity)) return activity;
+    if (/^Queued work \([1-9]\d{0,3}\)$/.test(activity)) return activity;
+    return 'Working in Pi';
+  }
+
+  private makeRunningSessionRecord(): RunningSessionRecord | undefined {
+    if ((!this.runtimeBusy && this.queuedWorkCount <= 0) || !this.activeSessionPath || !this.workerWorkspace) return undefined;
+    const sessionKey = this.runningSessionKey(this.activeSessionPath, this.workerWorkspace);
+    if (!sessionKey) return undefined;
+    return { version: 1, sessionKey, activity: this.safeRunningActivity(this.runtimeActivity), updatedAt: Date.now() };
+  }
+
+  private refreshRunningSessionLease(): void {
+    const record = this.makeRunningSessionRecord();
+    if (!record) {
+      if (!this.runningSessionLeasePublished) return;
+      this.runningSessionLeasePublished = false;
+      this.runningSessionLeaseSignature = '';
+      this.runningSessionOperation = this.runningSessionOperation.then(async () => {
+        try { await unlink(this.runningSessionRecordPath); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }).catch(() => undefined);
+      return;
+    }
+
+    const signature = `${record.sessionKey}\0${record.activity}`;
+    const now = Date.now();
+    if (this.runningSessionLeasePublished && signature === this.runningSessionLeaseSignature
+      && now - this.runningSessionLeaseWrittenAt < 4000) return;
+    this.runningSessionLeasePublished = true;
+    this.runningSessionLeaseSignature = signature;
+    this.runningSessionLeaseWrittenAt = now;
+    this.runningSessionOperation = this.runningSessionOperation.then(async () => {
+      let tempPath = '';
+      try {
+        await mkdir(this.runningSessionsDirectory, { recursive: true, mode: 0o700 });
+        const directoryStats = await lstat(this.runningSessionsDirectory);
+        if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) throw new Error('Invalid running-session registry directory.');
+        tempPath = `${this.runningSessionRecordPath}.${randomBytes(8).toString('hex')}.tmp`;
+        const handle = await openFile(tempPath, 'wx', 0o600);
+        try {
+          await handle.writeFile(JSON.stringify(record), { encoding: 'utf8' });
+        } finally {
+          await handle.close();
+        }
+        await rename(tempPath, this.runningSessionRecordPath);
+        tempPath = '';
+      } catch {
+        this.runningSessionLeasePublished = false;
+      } finally {
+        if (tempPath) {
+          try { await unlink(tempPath); } catch { /* Best-effort removal of the private temporary record. */ }
+        }
+      }
+    }).catch(() => { this.runningSessionLeasePublished = false; });
+  }
+
+  private clearRunningSessionLease(): void {
+    this.runningSessionLeasePublished = false;
+    this.runningSessionLeaseSignature = '';
+    this.runningSessionOperation = this.runningSessionOperation.then(async () => {
+      try { await unlink(this.runningSessionRecordPath); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }).catch(() => undefined);
+  }
+
+  private async readRunningSessionRecords(): Promise<RunningSessionRecord[]> {
+    let names: string[];
+    try {
+      const directoryStats = await lstat(this.runningSessionsDirectory);
+      if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) return [];
+      names = [];
+      const directory = await opendir(this.runningSessionsDirectory);
+      try {
+        let scanned = 0;
+        while (scanned < MAX_RUNNING_SESSION_RECORDS * 5 && names.length < MAX_RUNNING_SESSION_RECORDS) {
+          const entry = await directory.read();
+          if (!entry) break;
+          scanned += 1;
+          if (/^[a-f0-9]{32}\.json$/.test(entry.name)) names.push(entry.name);
+        }
+      } finally {
+        await directory.close();
+      }
+    } catch {
+      return [];
+    }
+
+    const records: RunningSessionRecord[] = [];
+    const now = Date.now();
+    for (const name of names) {
+      const filePath = path.join(this.runningSessionsDirectory, name);
+      try {
+        const fileStats = await lstat(filePath);
+        if (!fileStats.isFile() || fileStats.isSymbolicLink()) continue;
+        if (fileStats.size > MAX_RUNNING_SESSION_RECORD_BYTES) continue;
+        if (now - fileStats.mtimeMs > RUNNING_SESSION_RECORD_TTL_MS) {
+          try { await unlink(filePath); } catch { /* A stale lease is harmless if it cannot be removed. */ }
+          continue;
+        }
+        const handle = await openFile(filePath, 'r');
+        let text: string;
+        try {
+          const openedStats = await handle.stat();
+          if (!openedStats.isFile() || openedStats.size > MAX_RUNNING_SESSION_RECORD_BYTES) continue;
+          text = await handle.readFile({ encoding: 'utf8' });
+        } finally {
+          await handle.close();
+        }
+        const value = JSON.parse(text) as Partial<RunningSessionRecord>;
+        if (value.version !== 1 || typeof value.sessionKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.sessionKey)
+          || typeof value.activity !== 'string' || this.safeRunningActivity(value.activity) !== value.activity
+          || !Number.isSafeInteger(value.updatedAt) || Number(value.updatedAt) > now + 2000
+          || now - Number(value.updatedAt) > RUNNING_SESSION_RECORD_TTL_MS) continue;
+        records.push({ version: 1, sessionKey: value.sessionKey, activity: value.activity, updatedAt: Number(value.updatedAt) });
+      } catch {
+        // A partially-written or malformed local status record is ignored.
+      }
+    }
+    return records;
+  }
+
+  private async refreshRunningSessionStatuses(): Promise<void> {
+    const records = await this.readRunningSessionRecords();
+    const bySession = new Map<string, { count: number; activity: string; updatedAt: number }>();
+    for (const record of records) {
+      const previous = bySession.get(record.sessionKey);
+      if (previous) {
+        previous.count = Math.min(100, previous.count + 1);
+        if (record.updatedAt > previous.updatedAt) {
+          previous.activity = record.activity;
+          previous.updatedAt = record.updatedAt;
+        }
+      } else {
+        bySession.set(record.sessionKey, { count: 1, activity: record.activity, updatedAt: record.updatedAt });
+      }
+    }
+    const statuses = this.sessionListForRunningStatus.flatMap((session) => {
+      const sessionPath = session['path'];
+      if (typeof sessionPath !== 'string' || sessionPath.length > 4096) return [];
+      const workspacePath = typeof session['workspacePath'] === 'string' && session['workspacePath']
+        ? session['workspacePath']
+        : this.workerWorkspace;
+      if (!workspacePath) return [];
+      const sessionKey = this.runningSessionKey(sessionPath, workspacePath);
+      const status = sessionKey ? bySession.get(sessionKey) : undefined;
+      return status ? [{ path: sessionPath, count: status.count, activity: status.activity }] : [];
+    });
+    this.post({ type: 'running-session-status', statuses });
+  }
+
+  private async isSessionRunning(value: unknown): Promise<boolean> {
+    if (!this.isKnownSessionPath(value)) return false;
+    let normalizedPath: string;
+    try { normalizedPath = this.normalizeSessionPath(value); } catch { return false; }
+    const workspacePath = this.sessionWorkspaceByPath.get(normalizedPath) ?? this.workerWorkspace;
+    if (!workspacePath) return false;
+    const sessionKey = this.runningSessionKey(value, workspacePath);
+    if (!sessionKey) return false;
+    return (await this.readRunningSessionRecords()).some((record) => record.sessionKey === sessionKey);
   }
 
   private async openSessionInWorkspace(sessionPath: string, cwd: string): Promise<void> {

@@ -406,17 +406,32 @@ function renderSessions() {
   ui.sessions.replaceChildren();
   ui.railSessions.replaceChildren();
   const sessions = state.sessions;
+  const runningSessions = sessions.filter((session) => session.running === true);
+  const recentSessions = sessions.filter((session) => session.running !== true);
   ui.sessionsEmpty.hidden = sessions.length > 0;
   ui.sessionsEmpty.textContent = state.sessionSearchAllWorkspaces
     ? (state.sessionQuery ? 'No sessions match across Pi workspaces.' : 'No saved Pi sessions were found across workspaces.')
     : (state.sessionQuery ? 'No sessions match this search.' : 'No saved sessions yet.');
 
-  for (const session of sessions) {
+  if (runningSessions.length) {
+    const heading = document.createElement('div');
+    heading.className = 'session-group-heading';
+    heading.textContent = `Running sessions · ${runningSessions.length}`;
+    ui.sessions.append(heading);
+  }
+  if (runningSessions.length && recentSessions.length) {
+    const heading = document.createElement('div');
+    heading.className = 'session-group-heading';
+    heading.textContent = 'Recent sessions';
+    ui.sessions.append(heading);
+  }
+
+  for (const session of [...runningSessions, ...recentSessions]) {
     const entry = document.createElement('div');
-    entry.className = 'session-entry';
+    entry.className = `session-entry${session.running === true ? ' running-session-entry' : ''}`;
     const row = document.createElement('button');
     row.type = 'button';
-    row.className = `session-row${session.path === state.sessionPath ? ' active' : ''}`;
+    row.className = `session-row${session.path === state.sessionPath ? ' active' : ''}${session.running === true ? ' running' : ''}`;
     row.title = session.workspacePath ? `${session.title}\n${session.workspacePath}` : session.title;
     const color = document.createElement('span');
     color.className = `session-color color-${['red', 'orange', 'yellow', 'green', 'blue', 'purple'].includes(session.color) ? session.color : 'default'}`;
@@ -428,6 +443,14 @@ function renderSessions() {
     id.className = 'session-row-id';
     id.textContent = session.id ? session.id.slice(0, 8) : 'Pi session';
     row.append(color, title, id);
+    if (session.running === true) {
+      const progress = document.createElement('span');
+      progress.className = 'session-row-progress';
+      const count = Number.isSafeInteger(session.runningCount) ? Math.max(1, Math.min(100, session.runningCount)) : 1;
+      const activity = typeof session.runningActivity === 'string' ? session.runningActivity.slice(0, 96) : 'Working in Pi';
+      progress.textContent = count > 1 ? `${count} windows · ${activity}` : activity;
+      row.append(progress);
+    }
     if (session.isCurrentWorkspace === false) {
       const workspace = document.createElement('span');
       workspace.className = 'session-row-workspace';
@@ -470,27 +493,34 @@ function renderSessions() {
     rename.type = 'button';
     rename.className = 'session-action';
     rename.textContent = 'Rename';
+    rename.disabled = session.running === true;
+    rename.title = rename.disabled ? 'Wait for the session to finish before renaming it' : 'Rename session';
     rename.addEventListener('click', () => post('renameSession', { path: session.path, currentName: session.title }));
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'session-action danger-action';
     remove.textContent = 'Delete';
-    remove.disabled = session.path === state.sessionPath;
-    remove.title = remove.disabled ? 'Switch to another session before deleting this one' : 'Permanently delete this session';
+    remove.disabled = session.path === state.sessionPath || session.running === true;
+    remove.title = session.running === true ? 'Wait for the session to finish before deleting it'
+      : remove.disabled ? 'Switch to another session before deleting this one' : 'Permanently delete this session';
     remove.addEventListener('click', () => post('deleteSession', { path: session.path, title: session.title }));
     actions.append(pin, changeColor, rename, remove);
     entry.append(actions);
-    entry.draggable = true;
-    entry.addEventListener('dragstart', (event) => event.dataTransfer?.setData('text/pi-session', session.path));
-    entry.addEventListener('dragover', (event) => event.preventDefault());
+    entry.draggable = session.running !== true;
+    entry.addEventListener('dragstart', (event) => {
+      if (session.running === true) { event.preventDefault(); return; }
+      event.dataTransfer?.setData('text/pi-session', session.path);
+    });
+    entry.addEventListener('dragover', (event) => { if (session.running !== true) event.preventDefault(); });
     entry.addEventListener('drop', (event) => {
+      if (session.running === true) return;
       event.preventDefault();
       const fromPath = event.dataTransfer?.getData('text/pi-session');
       if (!fromPath || fromPath === session.path) return;
       const reordered = [...state.sessions];
       const fromIndex = reordered.findIndex((item) => item.path === fromPath);
       const toIndex = reordered.findIndex((item) => item.path === session.path);
-      if (fromIndex < 0 || toIndex < 0) return;
+      if (fromIndex < 0 || toIndex < 0 || reordered[fromIndex].running === true) return;
       const [moved] = reordered.splice(fromIndex, 1);
       reordered.splice(toIndex, 0, moved);
       state.sessions = reordered;
@@ -2956,6 +2986,27 @@ window.addEventListener('message', (event) => {
       }
       renderSessions();
       break;
+    case 'running-session-status': {
+      const statuses = Array.isArray(data.statuses) ? data.statuses.slice(0, 500) : [];
+      const byPath = new Map(statuses.flatMap((status) => status && typeof status.path === 'string'
+        && status.path.length <= 4096
+        && Number.isSafeInteger(status.count) && status.count > 0
+        && typeof status.activity === 'string'
+        ? [[status.path, status]]
+        : []));
+      let changed = false;
+      state.sessions = state.sessions.map((session) => {
+        const status = byPath.get(session.path);
+        const running = Boolean(status);
+        const runningCount = status ? Math.min(100, status.count) : 0;
+        const runningActivity = status ? status.activity.slice(0, 96) : '';
+        if (session.running === running && session.runningCount === runningCount && session.runningActivity === runningActivity) return session;
+        changed = true;
+        return { ...session, running, runningCount, runningActivity };
+      });
+      if (changed) renderSessions();
+      break;
+    }
     case 'snapshot':
       applySnapshot(data);
       break;

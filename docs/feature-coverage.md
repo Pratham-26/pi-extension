@@ -39,7 +39,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [~] Open the latest session when the chat view starts is optional; multiple independent chat editor tabs, persisted tab restore, and new chat beside a file are unavailable.
 - [x] Save a local title from the first non-command prompt without an extra provider request; configurable through `piChat.sessions.autoName`.
 - [ ] Git worktree sessions, setup commands, ignored-file copying, and safe worktree removal.
-- [ ] Group running sessions and expose live progress in the session list.
+- [~] Group running sessions and expose live activity/queue status in the session list for sessions visible to the current workspace or opt-in all-workspaces search. Short-lived local records contain hashed identifiers, not prompts, titles, or paths; running sessions cannot be renamed or deleted. Cross-device status and independent editor-tab restore remain unavailable.
 
 ## Workspace context
 
