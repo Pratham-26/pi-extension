@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
@@ -251,7 +251,40 @@ try {
   assert.equal(requestStream, true, 'the worker should request a streaming model response');
   assert.equal(requestModel, 'smoke-model', 'the selected Pi model should reach the local endpoint');
 
-  console.log('Worker smoke check passed: session opened, local model selected, assistant reply streamed and persisted.');
+  const sessionFile = savedTranscript.sessionFile;
+  assert.equal(typeof sessionFile, 'string', 'the smoke session should expose its persisted path');
+  assert.ok(resolve(sessionFile).startsWith(resolve(temporaryRoot) + sep), 'the persisted session should stay inside temporary smoke data');
+  const selectedToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
+    && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'per-session tool selection');
+  worker.postMessage({ type: 'setTools', toolNames: ['read'] });
+  const selectedToolOptions = await selectedToolOptionsPromise;
+  assert.deepEqual(selectedToolOptions.activeTools, ['read'], 'the selected tool should be active in the smoke session');
+
+  await worker.terminate();
+  worker = undefined;
+  messages.length = 0;
+  worker = new Worker(workerPath, {
+    env: environment,
+    workerData: {
+      cwd: workspacePath,
+      extensionRoot: repositoryRoot,
+      autoNameSessions: false,
+      autoRefreshModels: false,
+      mcpEnabled: false,
+      disabledContextFiles: [],
+      extensionUiMode: 'rpc',
+    },
+  });
+  await waitForWorkerMessage((message) => message?.type === 'worker-ready', 'Pi worker restart');
+  const reopenedSnapshotPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
+    && message.sessionFile === sessionFile, 'reopened smoke session');
+  const restoredToolOptionsPromise = waitForWorkerMessage((message) => message?.type === 'options'
+    && Array.isArray(message.activeTools) && message.activeTools.includes('read'), 'restored per-session tool selection');
+  worker.postMessage({ type: 'openSession', path: sessionFile });
+  const [, restoredToolOptions] = await Promise.all([reopenedSnapshotPromise, restoredToolOptionsPromise]);
+  assert.deepEqual(restoredToolOptions.defaultTools, [], 'the session choice should not replace Pi defaults');
+
+  console.log('Worker smoke check passed: session opened, local model selected, assistant reply streamed and persisted, and the selected tool set survived a worker restart.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   if (server) await new Promise((resolveClose) => server.close(() => resolveClose()));

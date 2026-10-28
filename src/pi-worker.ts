@@ -103,7 +103,7 @@ type SessionLike = {
   supportsThinking?: () => boolean;
   getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
   getSessionStats?: () => { tokens: { total: number }; cost: number };
-  getAllTools?: () => Array<{ name: string; description?: string; namespace?: { name?: string } }>;
+  getAllTools?: () => Array<{ name: string; description?: string; exposure?: string; namespace?: { name?: string } }>;
   getToolDefinition?: (name: string) => unknown;
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
@@ -314,6 +314,8 @@ const lazyToolRendererRequests = new Set<string>();
 const MAX_LAZY_TOOL_RENDER_REQUESTS = 64;
 let defaultTools: string[] = [];
 let sessionExtensionsBound = false;
+let sessionToolNames: string[] | undefined;
+let sessionDefaultToolNames: string[] | undefined;
 let disabledSkills = new Set<string>();
 let skillsDisabledBySource = new Set<string>();
 let sessionQuery = '';
@@ -356,6 +358,34 @@ const pendingProviderAuthRequests = new Set<string>();
 
 function send(type: string, payload: Record<string, unknown> = {}): void {
   parentPort?.postMessage({ type, ...payload });
+}
+
+function parseSavedToolNames(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > 256) return undefined;
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const name of value) {
+    if (typeof name !== 'string' || name.length === 0 || name.length > 128 || /[\u0000-\u001f\u007f]/.test(name)) return undefined;
+    if (!seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+function applySavedSessionToolNames(activeSession: SessionLike | undefined = session): void {
+  if (sessionToolNames === undefined || !activeSession?.setActiveToolsByName) return;
+  activeSession.setActiveToolsByName([...sessionToolNames]);
+}
+
+function saveSessionSettings(): void {
+  if (!session?.sessionManager) return;
+  session.sessionManager.appendCustomEntry('pi-chat.session-settings', {
+    disabledSkills: [...disabledSkills],
+    ...(sessionToolNames === undefined ? {} : { toolNames: [...sessionToolNames] }),
+    ...(sessionDefaultToolNames === undefined ? {} : { defaultTools: [...sessionDefaultToolNames] }),
+  });
 }
 
 function createSubagentRpcExtension(): InlineExtension {
@@ -2658,6 +2688,7 @@ function sendOptions(): void {
   }
   const tools = session.getAllTools?.().slice(0, 1000).flatMap((tool) => {
     if (typeof tool.name !== 'string' || !tool.name || tool.name.length > 128) return [];
+    if (tool.exposure && tool.exposure !== 'direct' && tool.exposure !== 'model-only') return [];
     return [{
       name: tool.name,
       description: (tool.description ?? '').slice(0, 1000),
@@ -2756,13 +2787,20 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   reloadingResources = false;
   authenticatingProvider = false;
   defaultTools = next.getActiveToolNames?.() ?? [];
-  const skillData = next.sessionManager?.getEntries()
-    .filter((entry) => entry.type === 'custom' && entry.customType === 'pi-chat.session-settings')
-    .at(-1)?.data as { disabledSkills?: unknown } | undefined;
-  disabledSkills = new Set(Array.isArray(skillData?.disabledSkills)
-    ? skillData.disabledSkills.filter((name): name is string => typeof name === 'string')
-    : []);
+  const branchEntryIds = new Set(next.sessionManager?.getBranch().map((entry) => entry.id) ?? []);
+  const settingsData = next.sessionManager?.getEntries()
+    .filter((entry) => entry.type === 'custom' && entry.customType === 'pi-chat.session-settings'
+      && typeof entry.id === 'string' && branchEntryIds.has(entry.id))
+    .at(-1)?.data as { disabledSkills?: unknown; toolNames?: unknown; defaultTools?: unknown } | undefined;
+  sessionToolNames = parseSavedToolNames(settingsData?.toolNames);
+  sessionDefaultToolNames = parseSavedToolNames(settingsData?.defaultTools);
   const loadedSkills = next.resourceLoader?.getSkills().skills ?? [];
+  const loadedSkillNames = new Set(loadedSkills.map((skill) => skill.name));
+  disabledSkills = new Set(Array.isArray(settingsData?.disabledSkills)
+    ? settingsData.disabledSkills.slice(0, 500).filter((name): name is string => typeof name === 'string'
+      && name.length > 0 && name.length <= 128 && !/[\u0000-\u001f\u007f]/.test(name)
+      && loadedSkillNames.has(name))
+    : []);
   skillsDisabledBySource = new Set(loadedSkills.filter((skill) => skill.disableModelInvocation).map((skill) => skill.name));
   for (const skill of loadedSkills) skill.disableModelInvocation = skillsDisabledBySource.has(skill.name) || disabledSkills.has(skill.name);
   next.setActiveToolsByName?.(next.getActiveToolNames?.() ?? []);
@@ -3274,6 +3312,7 @@ async function manageConfiguredPackage(input: WorkerInput): Promise<void> {
       await operationManager.update();
     }
     await activeSession.reload?.();
+    applySavedSessionToolNames(activeSession);
     const message = action === 'update'
       ? updatingUserPackagesOnly
         ? 'User Pi packages were updated and resources reloaded. Trust this workspace to update project-scoped packages.'
@@ -3665,7 +3704,13 @@ async function createSessionInternal(path?: string): Promise<boolean> {
     } else {
       createdSession.extensionRunner?.setUIContext(uiContext, extensionUiMode);
     }
-    defaultTools = createdSession.getActiveToolNames?.() ?? defaultTools;
+    if (sessionDefaultToolNames !== undefined) {
+      defaultTools = [...sessionDefaultToolNames];
+    } else {
+      defaultTools = createdSession.getActiveToolNames?.() ?? defaultTools;
+      sessionDefaultToolNames = [...defaultTools];
+    }
+    applySavedSessionToolNames(createdSession);
     snapshot();
     watchModelConfig();
     if (result.modelFallbackMessage) send('notice', { message: result.modelFallbackMessage });
@@ -3777,10 +3822,14 @@ async function setContextFileSelection(input: WorkerInput): Promise<void> {
   try {
     disabledContextFilePaths = nextDisabled;
     await activeSession.reload();
+    applySavedSessionToolNames(activeSession);
     send('context-files-applied', { requestId, disabledContextFiles: [...disabledContextFilePaths] });
   } catch {
     disabledContextFilePaths = previousDisabled;
-    try { await activeSession.reload(); } catch { /* Keep the previous selection for the next resource reload. */ }
+    try {
+      await activeSession.reload();
+      applySavedSessionToolNames(activeSession);
+    } catch { /* Keep the previous selection for the next resource reload. */ }
     send('context-files-failed', { requestId, message: 'Pi could not reload with that context-file selection. The previous selection was restored.' });
   } finally {
     reloadingResources = false;
@@ -4218,28 +4267,52 @@ async function handle(input: WorkerInput): Promise<void> {
         session.setThinkingLevel(input.thinkingLevel);
         snapshot();
         return;
-      case 'setTools':
+      case 'setTools': {
         if (!session || busy || !Array.isArray(input.toolNames) || !session.setActiveToolsByName) return;
-        session.setActiveToolsByName(input.toolNames);
+        const requestedToolNames = parseSavedToolNames(input.toolNames);
+        if (requestedToolNames === undefined) {
+          send('notice', { message: 'The selected Pi tool list was invalid.', isError: true });
+          return;
+        }
+        const selectableToolNames = new Set((session.getAllTools?.() ?? []).flatMap((tool) =>
+          typeof tool.name === 'string' && tool.name.length > 0 && tool.name.length <= 128
+          && (!tool.exposure || tool.exposure === 'direct' || tool.exposure === 'model-only')
+            ? [tool.name]
+            : []));
+        sessionToolNames = requestedToolNames.filter((name) => selectableToolNames.has(name));
+        session.setActiveToolsByName([...sessionToolNames]);
+        saveSessionSettings();
         sendOptions();
         return;
+      }
       case 'replaceQueue': {
         if (!session || !busy || !session.clearQueue || !session.steer || !session.followUp) return;
         const steering = Array.isArray(input.steering) ? input.steering.filter((text): text is string => typeof text === 'string') : [];
         const followUp = Array.isArray(input.followUp) ? input.followUp.filter((text): text is string => typeof text === 'string') : [];
         session.clearQueue();
-        for (const text of steering) await session.steer(text);
-        for (const text of followUp) await session.followUp(text);
+        for (const text of steering) {
+          applySavedSessionToolNames(session);
+          await session.steer(text);
+        }
+        for (const text of followUp) {
+          applySavedSessionToolNames(session);
+          await session.followUp(text);
+        }
         return;
       }
       case 'setSkills': {
         if (!session || busy || !Array.isArray(input.disabledSkills)) return;
-        disabledSkills = new Set(input.disabledSkills.filter((name): name is string => typeof name === 'string'));
-        for (const skill of session.resourceLoader?.getSkills().skills ?? []) {
+        const loadedSkills = session.resourceLoader?.getSkills().skills ?? [];
+        const loadedSkillNames = new Set(loadedSkills.map((skill) => skill.name));
+        disabledSkills = new Set(input.disabledSkills.slice(0, 500).filter((name): name is string => typeof name === 'string'
+          && name.length > 0 && name.length <= 128 && !/[\u0000-\u001f\u007f]/.test(name)
+          && loadedSkillNames.has(name)));
+        for (const skill of loadedSkills) {
           skill.disableModelInvocation = skillsDisabledBySource.has(skill.name) || disabledSkills.has(skill.name);
         }
-        session.setActiveToolsByName?.(session.getActiveToolNames?.() ?? []);
-        session.sessionManager?.appendCustomEntry('pi-chat.session-settings', { disabledSkills: [...disabledSkills] });
+        if (sessionToolNames !== undefined) applySavedSessionToolNames(session);
+        else session.setActiveToolsByName?.(session.getActiveToolNames?.() ?? []);
+        saveSessionSettings();
         sendOptions();
         return;
       }
@@ -4389,6 +4462,7 @@ async function handle(input: WorkerInput): Promise<void> {
         send('run-started', { canStop: false, activity: 'Reloading Pi resources' });
         try {
           await session.reload();
+          applySavedSessionToolNames(session);
           send('notice', { message: 'Pi resources reloaded.' });
         } finally {
           reloadingResources = false;
@@ -4424,6 +4498,7 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'prompt':
         if (!session) await createSession();
         if (!session || !input.text) return;
+        applySavedSessionToolNames(session);
         const hasPriorNonCommandPrompt = (session.getUserMessagesForForking?.() ?? [])
           .some((message) => typeof message.text === 'string' && !message.text.trimStart().startsWith('/'));
         if (autoNameSessions && !session.sessionName?.trim() && !input.text.trimStart().startsWith('/')
