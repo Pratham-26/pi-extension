@@ -6,6 +6,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 - [x] Use Pi's SDK and the user's existing Pi configuration, credentials, extensions, skills, prompt templates, and workspace session files; request trust before loading project-local Pi resources.
 - [x] Pick an available model before the first prompt; show provider, context-window size, and image support.
+- [x] Set the current model as Pi's global default for new sessions through an explicit model-control action.
 - [x] Search models by provider, name, ID, or vision support; refresh manually and watch `models.json` for updates.
 - [x] Limit model cycling to a session-only ordered scope, load saved `enabledModels` patterns from Pi settings, and save an explicit scope back to global Pi settings; cycle to the next available model from the composer.
 - [x] Choose a thinking level supported by the selected model.

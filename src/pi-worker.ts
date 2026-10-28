@@ -143,7 +143,7 @@ type SessionLike = {
     } | undefined;
   };
   bindExtensions?: (bindings: Record<string, unknown>) => Promise<void>;
-  setModel?: (model: unknown) => Promise<void>;
+  setModel?: (model: unknown, options?: { persist?: boolean }) => Promise<void>;
   setScopedModels?: (models: Array<{ model: any; thinkingLevel?: string }>) => void;
   cycleModel?: (direction?: 'forward' | 'backward') => Promise<unknown>;
   setThinkingLevel?: (level: any) => void;
@@ -2371,6 +2371,8 @@ function sendOptions(): void {
   const currentModel = session.model;
   const availableModels = session.modelRuntime?.getAvailableSnapshot() ?? [];
   const modelScope = getModelScopeState(session);
+  const defaultProvider = session.settingsManager?.getDefaultProvider();
+  const defaultModelId = session.settingsManager?.getDefaultModel();
   const models = availableModels.map((model) => ({
     provider: model.provider,
     id: model.id,
@@ -2496,6 +2498,7 @@ function sendOptions(): void {
     settingsConfigPath: join(getAgentDir(), 'settings.json'),
     mcpConfigPath: join(getAgentDir(), 'mcp.json'),
     currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+    defaultModel: defaultProvider && defaultModelId ? { provider: defaultProvider, id: defaultModelId } : undefined,
     modelScopeIds: modelScope.ids,
     modelScopeSource: modelScope.source,
     thinkingLevel: session.thinkingLevel,
@@ -3786,6 +3789,23 @@ async function handle(input: WorkerInput): Promise<void> {
         const model = session.modelRuntime?.getModel(input.provider, input.modelId);
         if (!model || !session.setModel) throw new Error('That model is not available with the current Pi configuration.');
         await session.setModel(model);
+        snapshot();
+        return;
+      }
+      case 'setDefaultModel': {
+        if (!session || busy || !session.model?.provider || !session.model.id || !session.modelRuntime || !session.setModel || !session.settingsManager) return;
+        const model = session.modelRuntime.getModel(session.model.provider, session.model.id);
+        if (!model) throw new Error('The current model is not available with the current Pi configuration.');
+        if (session.settingsManager.drainErrors().length) {
+          send('notice', { message: 'A previous Pi settings write failed. Retrying the default-model save.' });
+        }
+        await session.setModel(model, { persist: true });
+        await session.settingsManager.flush();
+        if (session.settingsManager.drainErrors().length) {
+          send('notice', { message: 'Pi could not save the default model to settings.json.', isError: true });
+        } else {
+          send('notice', { message: 'Default model saved to Pi settings.' });
+        }
         snapshot();
         return;
       }

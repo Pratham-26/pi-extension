@@ -56,6 +56,7 @@ const state = {
   modelScopeSource: 'all',
   modelScopeStatus: '',
   modelScopeSaving: false,
+  defaultModel: undefined,
   chatSearch: '',
   chatSearchHits: [],
   chatSearchIndex: -1,
@@ -197,6 +198,7 @@ const ui = {
   modelScopeStatus: el('model-scope-status'),
   modelScopeAll: el('model-scope-all'),
   saveModelScope: el('save-model-scope'),
+  makeDefaultModel: el('make-default-model'),
   providerStatus: el('provider-status'),
   connectProvider: el('connect-provider'),
   editModelsConfig: el('edit-models-config'),
@@ -470,6 +472,15 @@ function updateControls() {
   ui.modelScopeAll.disabled = !state.hasSession || state.busy;
   ui.saveModelScope.disabled = !state.hasSession || state.busy || state.modelScopeSaving;
   ui.modelScopeList.querySelectorAll('input, button').forEach((control) => { control.disabled = state.busy; });
+  const modelIsDefault = Boolean(state.currentModel && state.defaultModel
+    && state.currentModel.provider === state.defaultModel.provider
+    && state.currentModel.id === state.defaultModel.id);
+  ui.makeDefaultModel.hidden = !state.currentModel;
+  ui.makeDefaultModel.disabled = !state.hasSession || state.busy || modelIsDefault;
+  ui.makeDefaultModel.textContent = modelIsDefault ? 'Default model' : 'Set as default';
+  ui.makeDefaultModel.title = modelIsDefault
+    ? 'This model is already Pi’s default for new sessions'
+    : 'Use the current model as Pi’s default for new sessions';
   el('refresh-models').disabled = state.busy;
   ui.presets.querySelectorAll('.preset-choice').forEach((button) => { button.disabled = button.dataset.available !== 'true' || state.busy; });
   ui.thinkingChoice.disabled = !state.hasSession || state.busy || state.thinkingLevels.length === 0;
@@ -2371,6 +2382,9 @@ function renderModelChoices(data) {
       authLabel: typeof provider.authLabel === 'string' ? provider.authLabel.slice(0, 128) : '',
     })) : [];
   state.currentModel = data.currentModel;
+  state.defaultModel = data.defaultModel && typeof data.defaultModel.provider === 'string' && typeof data.defaultModel.id === 'string'
+    ? { provider: data.defaultModel.provider, id: data.defaultModel.id }
+    : undefined;
   const runtimeSettings = data.runtimeSettings || {};
   state.runtimeSettings = {
     autoCompaction: runtimeSettings.autoCompaction === true,
@@ -4869,6 +4883,10 @@ ui.saveModelScope.addEventListener('click', () => {
   post('saveModelScope', { modelIds: state.modelScopeIds });
 });
 el('refresh-models').addEventListener('click', () => post('refreshModels'));
+ui.makeDefaultModel.addEventListener('click', () => {
+  closeComposerPopovers();
+  post('setDefaultModel');
+});
 ui.connectProvider.addEventListener('click', () => post('connectProvider'));
 ui.runtimeSettingsToggle.addEventListener('click', () => {
   const open = ui.runtimeSettings.hidden;
