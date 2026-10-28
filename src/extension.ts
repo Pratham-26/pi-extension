@@ -1613,6 +1613,23 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'manageMcpServers':
         await this.manageMcpServers();
         return;
+      case 'suggestFollowUps': {
+        const worker = this.worker;
+        const entryId = typeof message.entryId === 'string' ? message.entryId : '';
+        const requestId = typeof message.requestId === 'string' && /^[a-f0-9]{24}$/.test(message.requestId) ? message.requestId : '';
+        if (!entryId || entryId.length > 256 || /[\u0000-\u001f\u007f]/.test(entryId) || !requestId) return;
+        if (!worker || this.runtimeBusy || this.queuedWorkCount > 0) {
+          this.post({ type: 'prompt-suggestions-result', requestId, entryId, suggestions: [], error: 'Finish current and queued Pi work before generating suggestions.' });
+          return;
+        }
+        worker.postMessage({ type: 'suggestFollowUps', entryId, requestId });
+        return;
+      }
+      case 'cancelPromptSuggestions': {
+        const requestId = typeof message.requestId === 'string' && /^[a-f0-9]{24}$/.test(message.requestId) ? message.requestId : '';
+        if (requestId) this.worker?.postMessage({ type: 'cancelPromptSuggestions', requestId });
+        return;
+      }
       case 'setMcpEnabled':
         await this.setMcpEnabled(message);
         return;

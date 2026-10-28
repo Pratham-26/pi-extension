@@ -13,6 +13,7 @@ const state = {
   toolExpansion: Object.fromEntries(Object.entries(persistedWebviewState.toolExpansion || {})
     .filter(([name, open]) => typeof name === 'string' && name.length > 0 && name.length <= 128 && typeof open === 'boolean')
     .slice(-200)),
+  promptSuggestions: undefined,
   focusedTranscript: persistedWebviewState.focusedTranscript === true,
   promptHistoryIndex: -1,
   promptHistoryDraft: '',
@@ -210,6 +211,10 @@ ui.sessionSearchAll.checked = state.sessionSearchAllWorkspaces;
 
 function post(type, payload = {}) {
   vscode.postMessage({ type, ...payload });
+}
+
+function createRequestId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(12)), (value) => value.toString(16).padStart(2, '0')).join('');
 }
 
 function persistWebviewState() {
@@ -1162,6 +1167,8 @@ function renderToolImages(card, message) {
 function renderMessages(shouldFollow = true) {
   const nearBottom = ui.messageArea.scrollHeight - ui.messageArea.scrollTop - ui.messageArea.clientHeight < 80;
   ui.messageList.replaceChildren();
+  const latestAssistantIndex = state.busy ? -1 : state.messages.findLastIndex((message) =>
+    message.role === 'assistant' && message.streaming !== true && typeof message.entryId === 'string');
   for (let messageIndex = 0; messageIndex < state.messages.length; messageIndex += 1) {
     const message = state.messages[messageIndex];
     if (!isTranscriptMessageVisible(message)) continue;
@@ -1354,7 +1361,58 @@ function renderMessages(shouldFollow = true) {
       });
       actions.append(bookmark);
     }
+    if (message.role === 'assistant' && messageIndex === latestAssistantIndex) {
+      const suggestionState = state.promptSuggestions?.entryId === message.entryId ? state.promptSuggestions : undefined;
+      const suggest = document.createElement('button');
+      suggest.type = 'button';
+      suggest.className = 'branch-button prompt-suggestion-trigger';
+      suggest.textContent = suggestionState?.loading
+        ? suggestionState.requestId ? 'Cancel suggestions' : 'Starting…'
+        : 'Suggest follow-ups';
+      suggest.title = 'Ask the current Pi model for follow-up prompts. This sends a separate provider request and may incur usage.';
+      suggest.disabled = Boolean(suggestionState?.loading && !suggestionState.requestId);
+      suggest.addEventListener('click', () => {
+        if (suggestionState?.loading) {
+          if (suggestionState.requestId) post('cancelPromptSuggestions', { requestId: suggestionState.requestId });
+          return;
+        }
+        const requestId = createRequestId();
+        state.promptSuggestions = { entryId: message.entryId, loading: true, requestId, suggestions: [] };
+        renderMessages(false);
+        post('suggestFollowUps', { entryId: message.entryId, requestId });
+      });
+      actions.append(suggest);
+    }
     row.append(actions);
+    const promptSuggestions = state.promptSuggestions?.entryId === message.entryId ? state.promptSuggestions : undefined;
+    if (message.role === 'assistant' && promptSuggestions && (promptSuggestions.loading || promptSuggestions.suggestions?.length)) {
+      const suggestions = document.createElement('div');
+      suggestions.className = 'prompt-suggestions';
+      suggestions.setAttribute('aria-label', 'Model-generated follow-up prompts');
+      if (promptSuggestions.loading) {
+        const loading = document.createElement('span');
+        loading.className = 'prompt-suggestions-status';
+        loading.textContent = 'Generating with the current model…';
+        suggestions.append(loading);
+      } else {
+        for (const value of promptSuggestions.suggestions.slice(0, 3)) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'prompt-suggestion-chip';
+          chip.textContent = value;
+          chip.title = 'Add this prompt to the composer; it will not be sent automatically';
+          chip.addEventListener('click', () => {
+            ui.prompt.value = value;
+            ui.prompt.style.height = 'auto';
+            ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 170)}px`;
+            rememberDraft();
+            ui.prompt.focus();
+          });
+          suggestions.append(chip);
+        }
+      }
+      row.append(suggestions);
+    }
     ui.messageList.append(row);
   }
 
@@ -2938,6 +2996,7 @@ function beginAssistantMessage() {
 function applySnapshot(data) {
   const nextSessionPath = data.sessionFile || '';
   if (nextSessionPath !== state.sessionPath) {
+    state.promptSuggestions = undefined;
     const previousKey = state.sessionPath || '__new';
     const currentDraft = String(ui.prompt.value || '').slice(0, 20000);
     if (currentDraft) state.drafts[previousKey] = currentDraft;
@@ -2973,6 +3032,8 @@ function applySnapshot(data) {
   if (lastAssistant >= 0) messages.splice(lastAssistant, 0, ...unrecordedLiveTools);
   else messages.push(...unrecordedLiveTools);
   state.messages = messages;
+  const latestAssistant = messages.findLast((message) => message.role === 'assistant' && typeof message.entryId === 'string');
+  if (state.promptSuggestions && latestAssistant?.entryId !== state.promptSuggestions.entryId) state.promptSuggestions = undefined;
   state.busy = Boolean(data.busy);
   state.contextUsage = data.contextUsage;
   state.sessionStats = data.sessionStats;
@@ -3071,6 +3132,25 @@ window.addEventListener('message', (event) => {
     case 'command-completions':
       renderExtensionCommandCompletions(data);
       break;
+    case 'prompt-suggestions-started':
+      if (state.promptSuggestions?.entryId === data.entryId
+        && typeof data.requestId === 'string' && data.requestId === state.promptSuggestions.requestId) {
+        renderMessages(false);
+      }
+      break;
+    case 'prompt-suggestions-result': {
+      const current = state.promptSuggestions;
+      if (!current || current.entryId !== data.entryId || typeof data.requestId !== 'string' || current.requestId !== data.requestId) break;
+      const suggestions = Array.isArray(data.suggestions) ? data.suggestions.slice(0, 3).flatMap((value) => {
+        if (typeof value !== 'string') return [];
+        const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+        return text.length >= 8 && text.length <= 240 ? [text] : [];
+      }) : [];
+      state.promptSuggestions = { entryId: current.entryId, requestId: '', loading: false, suggestions };
+      if (typeof data.error === 'string' && data.error) showNotice(data.error.slice(0, 300), true);
+      renderMessages(false);
+      break;
+    }
     case 'mcp-setting-pending':
       state.mcpSettingPending = true;
       updateControls();

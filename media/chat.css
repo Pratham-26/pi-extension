@@ -325,6 +325,10 @@ button:focus-visible, textarea:focus-visible {
 .message-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; width: 100%; }
 .message-row.user .message-actions { justify-content: flex-end; }
 .message-row.assistant .message-actions { justify-content: flex-start; }
+.prompt-suggestions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 2px; }
+.prompt-suggestion-chip { max-width: 100%; padding: 5px 8px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; background: transparent; text-align: left; cursor: pointer; font: inherit; font-size: 10px; }
+.prompt-suggestion-chip:hover { color: var(--text); border-color: var(--focus); }
+.prompt-suggestions-status { color: var(--muted); font-size: 10px; }
 .message-context-state { align-self: flex-start; padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 9px; }
 .message-context-state.omitted { color: var(--vscode-editorWarning-foreground, var(--muted)); }
 .message-context-state.edited { color: var(--accent); }
