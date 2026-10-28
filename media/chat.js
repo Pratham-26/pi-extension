@@ -30,6 +30,10 @@ const state = {
   model: '',
   currentModel: undefined,
   providers: [],
+  extensionCommands: [],
+  commandCompletionRequestId: '',
+  commandCompletionContext: undefined,
+  commandCompletionSequence: 0,
   runtimeSettings: { autoCompaction: false, autoRetry: false, cacheWarming: 'off' },
   models: [],
   modelSearch: '',
@@ -138,6 +142,8 @@ const ui = {
   skillsToggle: el('skills-toggle'),
   skillsPopover: el('skills-popover'),
   skillList: el('skill-list'),
+  extensionCommandList: el('extension-command-list'),
+  extensionCommandSuggestions: el('extension-command-suggestions'),
   promptList: el('prompt-list'),
   resourceDiagnostics: el('resource-diagnostics'),
   newPromptTemplate: el('new-prompt-template'),
@@ -301,12 +307,13 @@ function updateControls() {
   ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
   ui.reloadResources.disabled = !state.hasSession || state.busy;
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
-  ui.skillsToggle.disabled = !state.hasSession || (state.skills.length === 0 && state.prompts.length === 0);
+  ui.skillsToggle.disabled = !state.hasSession || (state.skills.length === 0 && state.prompts.length === 0 && state.extensionCommands.length === 0);
   ui.toolsPopover.querySelectorAll('input').forEach((input) => { input.disabled = state.busy; });
   ui.skillsPopover.querySelectorAll('.skill-auto-toggle').forEach((input) => {
     const skill = state.skills.find((item) => item.name === input.getAttribute('data-skill-name'));
     input.disabled = state.busy || !skill?.canEnableAutoInvoke;
   });
+  ui.skillsPopover.querySelectorAll('.extension-command-suggest').forEach((button) => { button.disabled = state.busy; });
   ui.deliveryMode.hidden = !state.busy;
   ui.deliveryMode.textContent = state.deliverAs === 'steer' ? 'Steer now' : 'Queue next';
   ui.send.title = state.busy ? (state.deliverAs === 'steer' ? 'Send steering message' : 'Queue follow-up') : 'Send message';
@@ -912,6 +919,13 @@ function renderModelChoices(data) {
   if (state.thinkingLevel) ui.thinkingChoice.value = state.thinkingLevel;
 
   state.skills = Array.isArray(data.skills) ? data.skills : [];
+  state.extensionCommands = Array.isArray(data.extensionCommands) ? data.extensionCommands.slice(0, 100).filter((command) => command
+    && typeof command.name === 'string' && command.name.length > 0 && command.name.length <= 128
+    && !/[\\/\s\u0000-\u001f\u007f]/.test(command.name)).map((command) => ({
+      name: command.name,
+      description: typeof command.description === 'string' ? command.description.slice(0, 500) : '',
+      hasArgumentCompletions: command.hasArgumentCompletions === true,
+    })) : [];
   state.prompts = Array.isArray(data.prompts) ? data.prompts : [];
   state.resourceDiagnostics = Array.isArray(data.resourceDiagnostics) ? data.resourceDiagnostics.slice(0, 100) : [];
   state.tools = Array.isArray(data.tools) ? data.tools : [];
@@ -1157,15 +1171,17 @@ function renderTools() {
   }
 }
 
-function insertCommand(command) {
+function insertCommand(command, closePopover = true) {
   const existing = ui.prompt.value.trim();
   ui.prompt.value = existing ? `${command} ${existing}` : `${command} `;
   ui.prompt.focus();
   ui.prompt.setSelectionRange(ui.prompt.value.length, ui.prompt.value.length);
   ui.prompt.style.height = 'auto';
   ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 170)}px`;
-  ui.skillsPopover.hidden = true;
-  ui.skillsToggle.setAttribute('aria-expanded', 'false');
+  if (closePopover) {
+    ui.skillsPopover.hidden = true;
+    ui.skillsToggle.setAttribute('aria-expanded', 'false');
+  }
   updateControls();
 }
 
@@ -1354,7 +1370,12 @@ function addPromptOption(parent, prompt) {
 }
 
 function renderCommands() {
+  state.commandCompletionRequestId = '';
+  state.commandCompletionContext = undefined;
   ui.skillList.replaceChildren();
+  ui.extensionCommandList.replaceChildren();
+  ui.extensionCommandSuggestions.replaceChildren();
+  ui.extensionCommandSuggestions.hidden = true;
   ui.promptList.replaceChildren();
   if (!state.skills.length) {
     const empty = document.createElement('div');
@@ -1387,6 +1408,38 @@ function renderCommands() {
     row.append(automatic);
     ui.skillList.append(row);
   }
+  if (!state.extensionCommands.length) {
+    const empty = document.createElement('div');
+    empty.className = 'option-empty';
+    empty.textContent = 'No Pi extension commands are registered.';
+    ui.extensionCommandList.append(empty);
+  }
+  for (const command of state.extensionCommands) {
+    const row = document.createElement('div');
+    row.className = 'extension-command-row';
+    const choose = document.createElement('button');
+    choose.type = 'button';
+    choose.className = 'command-option';
+    choose.title = `${command.description || 'extension command'} · Insert /${command.name} into the composer`;
+    const name = document.createElement('strong');
+    name.textContent = `/${command.name}`;
+    const description = document.createElement('small');
+    description.textContent = command.description || 'Extension command';
+    choose.append(name, description);
+    choose.addEventListener('click', () => insertCommand(`/${command.name}`));
+    row.append(choose);
+    if (command.hasArgumentCompletions) {
+      const suggest = document.createElement('button');
+      suggest.type = 'button';
+      suggest.className = 'session-action extension-command-suggest';
+      suggest.textContent = 'Suggest args';
+      suggest.title = 'Call this configured extension command’s argument completion function. Suggestions are inserted into the composer and are not sent.';
+      suggest.disabled = state.busy;
+      suggest.addEventListener('click', () => requestExtensionCommandCompletions(command));
+      row.append(suggest);
+    }
+    ui.extensionCommandList.append(row);
+  }
   if (!state.prompts.length) {
     const empty = document.createElement('div');
     empty.className = 'option-empty';
@@ -1396,6 +1449,83 @@ function renderCommands() {
   for (const prompt of state.prompts) {
     addPromptOption(ui.promptList, prompt);
   }
+}
+
+function requestExtensionCommandCompletions(command) {
+  const commandText = `/${command.name}`;
+  const existing = ui.prompt.value;
+  const startsWithCommand = existing.startsWith(commandText)
+    && (existing.length === commandText.length || /\s/.test(existing[commandText.length]));
+  if (!startsWithCommand) insertCommand(commandText, false);
+  const value = ui.prompt.value;
+  const commandEnd = commandText.length;
+  let argumentStart = commandEnd;
+  while (value[argumentStart] === ' ' || value[argumentStart] === '\t') argumentStart++;
+  if (ui.prompt.selectionStart < argumentStart) {
+    ui.prompt.setSelectionRange(argumentStart, argumentStart);
+  }
+  const cursor = ui.prompt.selectionStart;
+  const argumentPrefix = value.slice(Math.min(argumentStart, cursor), cursor);
+  const requestId = `${Date.now()}-${++state.commandCompletionSequence}`;
+  state.commandCompletionRequestId = requestId;
+  state.commandCompletionContext = { commandName: command.name, promptValue: value, cursor, argumentStart, argumentPrefix };
+  ui.extensionCommandSuggestions.replaceChildren();
+  ui.extensionCommandSuggestions.hidden = false;
+  const loading = document.createElement('div');
+  loading.className = 'option-empty';
+  loading.textContent = 'Loading argument suggestions…';
+  ui.extensionCommandSuggestions.append(loading);
+  post('completeExtensionCommand', { requestId, commandName: command.name, argumentPrefix });
+}
+
+function renderExtensionCommandCompletions(data) {
+  if (typeof data.requestId !== 'string' || data.requestId !== state.commandCompletionRequestId) return;
+  const context = state.commandCompletionContext;
+  if (!context || ui.prompt.value !== context.promptValue || ui.prompt.selectionStart !== context.cursor) {
+    ui.extensionCommandSuggestions.replaceChildren();
+    ui.extensionCommandSuggestions.hidden = true;
+    state.commandCompletionRequestId = '';
+    state.commandCompletionContext = undefined;
+    return;
+  }
+  ui.extensionCommandSuggestions.replaceChildren();
+  const items = Array.isArray(data.items) ? data.items.slice(0, 100).filter((item) => item
+    && typeof item.value === 'string' && item.value.length <= 512).map((item) => ({
+      value: item.value,
+      label: typeof item.label === 'string' ? item.label.slice(0, 256) : item.value.slice(0, 256),
+      description: typeof item.description === 'string' ? item.description.slice(0, 500) : '',
+    })) : [];
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'option-empty';
+    empty.textContent = data.error ? 'The extension could not provide suggestions.' : 'No argument suggestions are available.';
+    ui.extensionCommandSuggestions.append(empty);
+  } else {
+    for (const item of items) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'command-option extension-command-completion';
+      const label = document.createElement('strong');
+      label.textContent = item.label;
+      const description = document.createElement('small');
+      description.textContent = item.description;
+      button.append(label, description);
+      button.addEventListener('click', () => {
+        if (ui.prompt.value !== context.promptValue || ui.prompt.selectionStart !== context.cursor) return;
+        ui.prompt.value = `${context.promptValue.slice(0, context.argumentStart)}${item.value}${context.promptValue.slice(context.cursor)}`;
+        ui.prompt.focus();
+        const nextCursor = context.argumentStart + item.value.length;
+        ui.prompt.setSelectionRange(nextCursor, nextCursor);
+        ui.prompt.dispatchEvent(new Event('input'));
+        ui.extensionCommandSuggestions.replaceChildren();
+        ui.extensionCommandSuggestions.hidden = true;
+      });
+      ui.extensionCommandSuggestions.append(button);
+    }
+  }
+  ui.extensionCommandSuggestions.hidden = false;
+  state.commandCompletionRequestId = '';
+  state.commandCompletionContext = undefined;
 }
 
 function renderQueue() {
@@ -1600,6 +1730,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'options':
       renderModelChoices(data);
+      break;
+    case 'command-completions':
+      renderExtensionCommandCompletions(data);
       break;
     case 'presets':
       state.presets = Array.isArray(data.presets) ? data.presets : [];

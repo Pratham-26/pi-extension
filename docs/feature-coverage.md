@@ -61,7 +61,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [ ] Browse/install/update/remove packages; choose user/project scope; enable/disable package resources; recommendations.
 - [~] Support extension select/confirm/input/editor dialogs, notices, status values, plain-text widgets, and composer text. Concurrent dialogs, timeouts/signals, custom components, renderers, terminal cards, checklist/plan presentation, and native subagent UI are missing.
 - [~] Show and open extension load-error sources and reload Pi resources; package-manager controls are missing.
-- [ ] Extension command/action picker and argument autocomplete.
+- [~] Browse registered Pi extension commands and request their argument suggestions; completion code runs only after a user click, suggestions only fill the composer, and package-management controls remain unavailable.
 - [ ] MCP server manager and supported web/MCP tool cards.
 - [ ] Recognize supported subagent tools and show their runs, transcripts, and controls.
 

@@ -461,6 +461,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'editUserMessage':
       case 'setMessageContext':
       case 'editMessageContext':
+      case 'completeExtensionCommand':
         this.worker?.postMessage(message);
         return;
       case 'refreshModels': {
@@ -1682,6 +1683,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <section id="skills-popover" class="control-popover skills-popover" aria-label="Skills and prompt templates" hidden>
               <div class="popover-heading"><strong>Skills</strong><span>Insert a slash command into the message</span></div>
               <div id="skill-list" class="option-list"></div>
+              <div class="popover-heading extension-command-heading"><strong>Extension commands</strong><span>Suggestions call extension code and only fill the composer</span></div>
+              <div id="extension-command-list" class="option-list"></div>
+              <div id="extension-command-suggestions" class="extension-command-suggestions" aria-live="polite" hidden></div>
               <div class="popover-heading prompt-heading"><strong>Prompt templates</strong><div class="prompt-heading-actions"><button id="new-prompt-template" class="text-button" type="button" title="Create a project prompt template">New</button><button id="reload-pi-resources" class="text-button" type="button" title="Reload extensions, skills, prompts, and themes">Reload</button></div></div>
               <div id="prompt-list" class="option-list"></div>
               <div id="resource-diagnostics" class="resource-diagnostics"></div>

@@ -419,6 +419,12 @@ button:focus-visible, textarea:focus-visible {
 .skill-option .command-option { flex: 1; }
 .skill-auto-toggle { flex: 0 0 auto; margin: 0 6px; accent-color: var(--accent); }
 .skill-auto-toggle:disabled { opacity: .55; }
+.extension-command-heading { margin-top: 5px; border-top: 1px solid var(--line); padding-top: 10px; }
+.extension-command-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.extension-command-row .command-option { flex: 1; }
+.extension-command-suggest { flex: 0 0 auto; white-space: nowrap; }
+.extension-command-suggestions { max-height: 180px; margin-top: 4px; overflow: auto; border-top: 1px solid var(--line); }
+.extension-command-completion strong, .extension-command-completion small { overflow-wrap: anywhere; white-space: normal; }
 .tool-card { width: min(100%, 68ch); margin: 7px auto; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--surface-raised) 70%, transparent); }
 .tool-card summary { padding: 6px 8px; color: var(--muted); font-size: 10px; cursor: pointer; }
 .tool-card[open] summary { color: var(--text); border-bottom: 1px solid var(--line); }

@@ -13,6 +13,8 @@ type WorkerInput = {
   entryIds?: unknown[];
   action?: string;
   setting?: string;
+  commandName?: string;
+  argumentPrefix?: string;
   requestId?: string;
   value?: unknown;
   provider?: string;
@@ -85,7 +87,14 @@ type SessionLike = {
   navigateTree?: (targetId: string, options?: { summarize?: boolean }) => Promise<{ editorText?: string; cancelled: boolean }>;
   exportToHtml?: () => Promise<string>;
   exportToJsonl?: () => string;
-  extensionRunner?: { setUIContext: (ui: any, mode?: 'tui' | 'rpc' | 'json' | 'print') => void };
+  extensionRunner?: {
+    setUIContext: (ui: any, mode?: 'tui' | 'rpc' | 'json' | 'print') => void;
+    getRegisteredCommands?: () => Array<{
+      invocationName: string;
+      description?: string;
+      getArgumentCompletions?: (prefix: string) => unknown;
+    }>;
+  };
   setModel?: (model: unknown) => Promise<void>;
   setThinkingLevel?: (level: any) => void;
   steer?: (text: string, images?: Array<{ type: 'image'; data: string; mimeType: string }>) => Promise<unknown>;
@@ -310,6 +319,19 @@ function sendOptions(): void {
   const loadedSkills = session.resourceLoader?.getSkills();
   const loadedPrompts = session.resourceLoader?.getPrompts();
   const loadedExtensions = session.resourceLoader?.getExtensions?.();
+  let extensionCommands: Array<{ name: string; description: string; hasArgumentCompletions: boolean }> = [];
+  try {
+    extensionCommands = (session.extensionRunner?.getRegisteredCommands?.() ?? []).slice(0, 100).flatMap((command) => {
+      if (typeof command.invocationName !== 'string' || !command.invocationName || command.invocationName.length > 128) return [];
+      return [{
+        name: command.invocationName,
+        description: typeof command.description === 'string' ? command.description.slice(0, 500) : '',
+        hasArgumentCompletions: typeof command.getArgumentCompletions === 'function',
+      }];
+    });
+  } catch {
+    // A broken extension command should not block the rest of the controls.
+  }
   const providers: Array<Record<string, unknown>> = [];
   try {
     for (const provider of (session.modelRuntime?.getProviders?.() ?? []).slice(0, 200)) {
@@ -393,6 +415,7 @@ function sendOptions(): void {
       cacheWarming: session.settingsManager?.getCacheWarmingMode?.() ?? 'off',
     },
     providers: providers.filter((provider) => provider.supportsApiKey || provider.supportsOAuth),
+    extensionCommands,
     modelsConfigPath: join(getAgentDir(), 'models.json'),
     settingsConfigPath: join(getAgentDir(), 'settings.json'),
     currentModel: currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
@@ -544,6 +567,48 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'getOptions':
         sendOptions();
         return;
+      case 'completeExtensionCommand': {
+        const requestId = input.requestId;
+        const commandName = input.commandName;
+        const prefix = input.argumentPrefix;
+        if (typeof requestId !== 'string' || requestId.length > 128
+          || typeof commandName !== 'string' || commandName.length > 128
+          || typeof prefix !== 'string' || prefix.length > 512) return;
+        let command: { invocationName: string; getArgumentCompletions?: (prefix: string) => unknown } | undefined;
+        try {
+          command = session?.extensionRunner?.getRegisteredCommands?.().find((item) => item.invocationName === commandName);
+        } catch {
+          send('command-completions', { requestId, commandName, items: [], error: true });
+          return;
+        }
+        if (!command?.getArgumentCompletions) {
+          send('command-completions', { requestId, commandName, items: [] });
+          return;
+        }
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const result = await Promise.race([
+            Promise.resolve(command.getArgumentCompletions(prefix)),
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(() => reject(new Error('Argument suggestions timed out')), 3000);
+            }),
+          ]);
+          const items = Array.isArray(result) ? result.slice(0, 100).flatMap((item: any) => {
+            if (!item || typeof item.value !== 'string' || item.value.length > 512) return [];
+            return [{
+              value: item.value,
+              label: typeof item.label === 'string' ? item.label.slice(0, 256) : item.value.slice(0, 256),
+              description: typeof item.description === 'string' ? item.description.slice(0, 500) : '',
+            }];
+          }) : [];
+          send('command-completions', { requestId, commandName, argumentPrefix: prefix, items });
+        } catch {
+          send('command-completions', { requestId, commandName, argumentPrefix: prefix, items: [], error: true });
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+        return;
+      }
       case 'newSession':
         if (authenticatingProvider) {
           send('notice', { message: 'Finish or cancel provider sign-in before switching sessions.' });
