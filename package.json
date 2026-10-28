@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.109",
+  "version": "0.1.110",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -242,6 +242,12 @@
             "Send messages as steering input during the current turn."
           ],
           "description": "Choose the default action for messages sent while Pi is working. The composer toggle can switch it for the current chat."
+        },
+        "piChat.composer.promptHistory": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Remember recent prompts locally in the chat composer for Arrow Up and Arrow Down. Disabling this clears the webview's saved prompt history; Pi session transcripts and saved drafts are unchanged."
         },
         "piChat.mcp.enabled": {
           "type": "boolean",

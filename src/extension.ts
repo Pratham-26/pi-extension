@@ -416,6 +416,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.notifications.sound')) activeProvider.onNotificationSoundConfigurationChanged();
         if (event.affectsConfiguration('piChat.models.autoRefresh')) activeProvider.onModelRefreshConfigurationChanged();
         if (event.affectsConfiguration('piChat.queue.defaultAction')) activeProvider.onQueueDefaultActionConfigurationChanged();
+        if (event.affectsConfiguration('piChat.composer.promptHistory')) activeProvider.onPromptHistoryConfigurationChanged();
         if (event.affectsConfiguration('piChat.appearance')) activeProvider.onAppearanceConfigurationChanged();
       }
     }),
@@ -606,6 +607,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private postQueueDefaultAction(): void {
     const value = vscode.workspace.getConfiguration('piChat.queue').get<unknown>('defaultAction', 'followUp');
     this.post({ type: 'queue-default-action', action: value === 'steer' ? 'steer' : 'followUp' });
+  }
+
+  onPromptHistoryConfigurationChanged(): void {
+    this.postPromptHistorySetting();
+  }
+
+  private postPromptHistorySetting(): void {
+    const enabled = vscode.workspace.getConfiguration('piChat.composer').get<boolean>('promptHistory', true);
+    this.post({ type: 'prompt-history-setting', enabled });
   }
 
   onAppearanceConfigurationChanged(): void {
@@ -1802,6 +1812,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'ready':
         this.sessionSearchAllWorkspaces = message.allWorkspaces === true;
+        this.postPromptHistorySetting();
         await this.savedDraftsWrite;
         this.post({ type: 'saved-drafts', drafts: draftStore.normalizeStore(this.context.globalState.get<unknown>('piChat.savedDrafts')) });
         this.post({ type: 'extension-widget-pins', keys: this.getPinnedExtensionWidgetKeys() });

@@ -25,6 +25,7 @@ const state = {
   pendingDraftSave: undefined,
   draftUndo: undefined,
   draftUndoTimer: undefined,
+  promptHistoryEnabled: false,
   promptHistory: persistedWebviewState.promptHistory && typeof persistedWebviewState.promptHistory === 'object' ? persistedWebviewState.promptHistory : {},
   toolExpansion: Object.fromEntries(Object.entries(persistedWebviewState.toolExpansion || {})
     .filter(([name, open]) => typeof name === 'string' && name.length > 0 && name.length <= 128 && typeof open === 'boolean')
@@ -359,7 +360,7 @@ function createRequestId() {
 }
 
 function persistWebviewState() {
-  vscode.setState({ sessionPath: state.sessionPath, drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces });
+  vscode.setState({ sessionPath: state.sessionPath, drafts: state.drafts, promptHistory: state.promptHistoryEnabled ? state.promptHistory : {}, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces });
 }
 
 function persistSavedDrafts() {
@@ -567,6 +568,7 @@ function undoDeletedDraft() {
 }
 
 function rememberPrompt(text) {
+  if (!state.promptHistoryEnabled) return;
   const key = currentSessionKey();
   const history = Array.isArray(state.promptHistory[key]) ? state.promptHistory[key] : [];
   if (history.at(-1) !== text) history.push(text);
@@ -576,6 +578,7 @@ function rememberPrompt(text) {
 }
 
 function browsePromptHistory(direction) {
+  if (!state.promptHistoryEnabled) return;
   const key = currentSessionKey();
   const history = Array.isArray(state.promptHistory[key]) ? state.promptHistory[key] : [];
   if (!history.length) return;
@@ -4735,6 +4738,15 @@ window.addEventListener('message', (event) => {
     case 'appearance-settings':
       applyAppearanceSettings(data);
       break;
+    case 'prompt-history-setting':
+      state.promptHistoryEnabled = data.enabled === true;
+      if (!state.promptHistoryEnabled) {
+        state.promptHistory = {};
+        state.promptHistoryIndex = -1;
+        state.promptHistoryDraft = '';
+      }
+      persistWebviewState();
+      break;
     case 'dismiss-composer-popovers':
       closeComposerPopovers();
       break;
@@ -5893,12 +5905,12 @@ ui.prompt.addEventListener('keydown', (event) => {
       return;
     }
   }
-  if (event.key === 'ArrowUp' && !event.shiftKey && ui.prompt.selectionStart === 0 && ui.prompt.selectionEnd === 0) {
+  if (state.promptHistoryEnabled && event.key === 'ArrowUp' && !event.shiftKey && ui.prompt.selectionStart === 0 && ui.prompt.selectionEnd === 0) {
     event.preventDefault();
     browsePromptHistory(1);
     return;
   }
-  if (event.key === 'ArrowDown' && !event.shiftKey && ui.prompt.selectionStart === ui.prompt.value.length && ui.prompt.selectionEnd === ui.prompt.value.length && state.promptHistoryIndex >= 0) {
+  if (state.promptHistoryEnabled && event.key === 'ArrowDown' && !event.shiftKey && ui.prompt.selectionStart === ui.prompt.value.length && ui.prompt.selectionEnd === ui.prompt.value.length && state.promptHistoryIndex >= 0) {
     event.preventDefault();
     browsePromptHistory(-1);
     return;
