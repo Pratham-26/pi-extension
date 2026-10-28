@@ -1639,6 +1639,54 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           this.worker?.postMessage({ type: 'extensionCustomCancel', requestId: message.requestId });
         }
         return;
+      case 'extensionEditorSync':
+        if (typeof message.text === 'string' && message.text.length <= 100_000) {
+          this.worker?.postMessage({ type: 'extensionEditorSync', text: message.text });
+        }
+        return;
+      case 'extensionEditorSetText':
+        if (typeof message.requestId === 'string' && /^pi-editor-\d{1,12}$/.test(message.requestId)
+          && typeof message.text === 'string' && message.text.length <= 100_000) {
+          this.worker?.postMessage({ type: 'extensionEditorSetText', requestId: message.requestId, text: message.text });
+        }
+        return;
+      case 'extensionEditorPaste':
+      case 'extensionEditorInput': {
+        const requestId = typeof message.requestId === 'string' && /^pi-editor-\d{1,12}$/.test(message.requestId)
+          ? message.requestId
+          : '';
+        if (!requestId) return;
+        if (message.type === 'extensionEditorPaste') {
+          if (typeof message.text === 'string' && message.text.length <= 50_000) {
+            this.worker?.postMessage({ type: 'extensionEditorPaste', requestId, text: message.text });
+          }
+          return;
+        }
+        if (typeof message.data === 'string' && message.data.length <= 32) {
+          this.worker?.postMessage({ type: 'extensionEditorInput', requestId, data: message.data });
+          return;
+        }
+        if (!message.mouse || typeof message.mouse !== 'object' || Array.isArray(message.mouse)) return;
+        const mouse = message.mouse as Record<string, unknown>;
+        this.worker?.postMessage({
+          type: 'extensionEditorInput',
+          requestId,
+          mouse: {
+            type: typeof mouse.type === 'string' ? mouse.type.slice(0, 16) : '',
+            button: typeof mouse.button === 'string' ? mouse.button.slice(0, 16) : '',
+            x: mouse.x,
+            y: mouse.y,
+            width: mouse.width,
+            height: mouse.height,
+            shift: mouse.shift === true,
+            alt: mouse.alt === true,
+            ctrl: mouse.ctrl === true,
+            wheelDelta: mouse.wheelDelta,
+            clickCount: mouse.clickCount,
+          },
+        });
+        return;
+      }
       case 'navigateTree':
       case 'editUserMessage':
       case 'setMessageContext':
@@ -4923,6 +4971,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div id="package-empty" class="package-empty">Package manager is unavailable until a Pi session is ready.</div>
             </section>
           </div>
+          <div id="extension-editor-view" class="extension-editor-view" role="textbox" aria-label="Pi extension editor" aria-multiline="true" tabindex="0" hidden></div>
           <textarea id="prompt" rows="1" aria-label="Message Pi" placeholder="Ask Pi anything"></textarea>
           <div class="composer-bottom">
             <div class="composer-actions">

@@ -219,6 +219,16 @@ type ExtensionCustomComponent = {
   dispose?: () => void;
   wantsKeyRelease?: boolean;
 };
+type ExtensionEditorComponent = ExtensionCustomComponent & {
+  getText: () => string;
+  getExpandedText?: () => string;
+  setText: (text: string) => void;
+  insertTextAtCursor?: (text: string) => void;
+  addToHistory?: (text: string) => void;
+  onSubmit?: (text: string) => void;
+  onChange?: (text: string) => void;
+  focused?: boolean;
+};
 type PendingExtensionCustom = {
   requestId: string;
   session: SessionLike;
@@ -252,6 +262,7 @@ type ToolRendererState = {
 type PiThemeModule = {
   theme?: unknown;
   getThemeByName?: (name: string) => unknown;
+  getEditorTheme?: () => unknown;
 };
 type PiKeybindingsModule = {
   KeybindingsManager?: { create?: (agentDir?: string) => unknown };
@@ -289,6 +300,13 @@ const extensionStatusValues = new Map<string, string>();
 const pendingExtensionCustom = new Map<string, PendingExtensionCustom>();
 const MAX_PENDING_EXTENSION_CUSTOM = 4;
 const MAX_EXTENSION_CUSTOM_INPUTS_PER_SECOND = 100;
+let extensionEditorFactory: ((tui: unknown, theme: unknown, keybindings: unknown) => unknown) | undefined;
+let extensionEditorComponent: ExtensionEditorComponent | undefined;
+let extensionEditorText = '';
+let extensionEditorRequestId = '';
+let extensionEditorGeneration = 0;
+let extensionEditorInputWindowStartedAt = 0;
+let extensionEditorInputCount = 0;
 let extensionHeaderFactory: ((tui: any, theme: unknown) => unknown) | undefined;
 let extensionFooterFactory: ((tui: any, theme: unknown, footerData: unknown) => unknown) | undefined;
 let extensionGitBranch: string | null = null;
@@ -769,6 +787,166 @@ async function createExtensionCustomKeybindings(): Promise<unknown> {
   return create(getAgentDir());
 }
 
+function boundedExtensionEditorText(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.slice(0, 100_000);
+}
+
+function getExtensionEditorText(component = extensionEditorComponent): string {
+  if (!component) return extensionEditorText;
+  try {
+    return boundedExtensionEditorText(component.getText());
+  } catch {
+    return extensionEditorText;
+  }
+}
+
+function getExpandedExtensionEditorText(component = extensionEditorComponent): string {
+  if (!component) return extensionEditorText;
+  try {
+    return boundedExtensionEditorText(component.getExpandedText?.() ?? component.getText());
+  } catch {
+    return getExtensionEditorText(component);
+  }
+}
+
+function publishExtensionEditorText(): void {
+  extensionEditorText = getExtensionEditorText();
+  send('extension-editor-text', {
+    ...(extensionEditorRequestId ? { requestId: extensionEditorRequestId } : {}),
+    text: extensionEditorText,
+    expandedText: getExpandedExtensionEditorText(),
+  });
+}
+
+function publishExtensionEditorRender(requestId = extensionEditorRequestId): void {
+  const component = extensionEditorComponent;
+  if (!component || !requestId || requestId !== extensionEditorRequestId) return;
+  try {
+    component.invalidate?.();
+    send('extension-editor-render', {
+      requestId,
+      lines: renderSafePiComponent(component),
+      wantsKeyRelease: component.wantsKeyRelease === true,
+    });
+  } catch {
+    send('extension-ui-notice', { message: 'A Pi extension editor could not be rendered in the composer.', level: 'warning' });
+  }
+}
+
+function disposeExtensionEditor(sendReset = true): void {
+  extensionEditorGeneration += 1;
+  const component = extensionEditorComponent;
+  if (component) extensionEditorText = getExtensionEditorText(component);
+  extensionEditorFactory = undefined;
+  extensionEditorComponent = undefined;
+  extensionEditorRequestId = '';
+  extensionEditorInputWindowStartedAt = 0;
+  extensionEditorInputCount = 0;
+  try { component?.dispose?.(); } catch { /* Keep the default composer available if extension cleanup fails. */ }
+  if (sendReset) {
+    send('extension-editor-reset');
+    send('extension-editor-text', { text: extensionEditorText });
+  }
+}
+
+function setExtensionEditorText(value: unknown, requestId = extensionEditorRequestId): void {
+  const text = boundedExtensionEditorText(value);
+  extensionEditorText = text;
+  const component = extensionEditorComponent;
+  if (component && requestId === extensionEditorRequestId) {
+    try {
+      component.setText(text);
+      publishExtensionEditorText();
+      publishExtensionEditorRender(requestId);
+    } catch {
+      send('extension-ui-notice', { message: 'The active Pi extension editor could not update its text.', level: 'warning' });
+    }
+    return;
+  }
+  if (!component) send('extension-editor-text', { text });
+}
+
+function getCurrentEditorTheme(): unknown {
+  try { return piThemeModule?.getEditorTheme?.(); } catch { return undefined; }
+}
+
+function setExtensionEditorComponent(factory: unknown, current: SessionLike): void {
+  const generation = ++extensionEditorGeneration;
+  const priorText = getExtensionEditorText();
+  const prior = extensionEditorComponent;
+  extensionEditorFactory = typeof factory === 'function'
+    ? factory as (tui: unknown, theme: unknown, keybindings: unknown) => unknown
+    : undefined;
+  extensionEditorComponent = undefined;
+  extensionEditorRequestId = '';
+  try { prior?.dispose?.(); } catch { /* Fall back to the new editor factory even if cleanup fails. */ }
+  if (!extensionEditorFactory) {
+    extensionEditorText = priorText;
+    send('extension-editor-reset');
+    send('extension-editor-text', { text: priorText });
+    return;
+  }
+
+  extensionEditorText = priorText;
+  const factoryToCreate = extensionEditorFactory;
+  const requestId = `pi-editor-${++uiRequestSequence}`;
+  extensionEditorRequestId = requestId;
+  void createExtensionCustomKeybindings().then(async (keybindings) => {
+    if (generation !== extensionEditorGeneration || current !== session || factoryToCreate !== extensionEditorFactory) return undefined;
+    const tui = createStaticTuiContext();
+    const requestRender = () => publishExtensionEditorRender(requestId);
+    tui.requestRender = requestRender;
+    tui.renderNow = requestRender;
+    tui.stop = () => undefined;
+    tui.start = () => undefined;
+    tui.terminal = { columns: 80, rows: 24, width: 80, height: 24 };
+    const editor = await factoryToCreate(tui, getCurrentEditorTheme(), keybindings);
+    return editor;
+  }).then((value) => {
+    if (generation !== extensionEditorGeneration || current !== session || factoryToCreate !== extensionEditorFactory) {
+      try { (value as { dispose?: () => void } | undefined)?.dispose?.(); } catch { /* Dispose an editor created after a session change. */ }
+      return;
+    }
+    if (!value || typeof value !== 'object' || typeof (value as Record<string, unknown>).render !== 'function'
+      || typeof (value as Record<string, unknown>).getText !== 'function'
+      || typeof (value as Record<string, unknown>).setText !== 'function'
+      || typeof (value as Record<string, unknown>).handleInput !== 'function') {
+      disposeExtensionEditor();
+      send('extension-ui-notice', { message: 'A Pi extension editor did not provide the required editor methods.', level: 'warning' });
+      return;
+    }
+    const component = value as ExtensionEditorComponent;
+    extensionEditorComponent = component;
+    component.onChange = (text: string) => {
+      if (generation !== extensionEditorGeneration || component !== extensionEditorComponent) return;
+      extensionEditorText = boundedExtensionEditorText(text);
+      publishExtensionEditorText();
+      publishExtensionEditorRender(requestId);
+    };
+    component.onSubmit = (text: string) => {
+      if (generation !== extensionEditorGeneration || component !== extensionEditorComponent) return;
+      const submittedText = getExpandedExtensionEditorText(component) || boundedExtensionEditorText(text);
+      try { if (submittedText) component.addToHistory?.(submittedText); } catch { /* History is optional for extension-provided editors. */ }
+      send('extension-editor-submit', { requestId, text: submittedText });
+    };
+    try {
+      component.setText(extensionEditorText);
+      component.focused = true;
+      send('extension-editor-mode', { requestId, active: true });
+      publishExtensionEditorText();
+      publishExtensionEditorRender(requestId);
+    } catch {
+      disposeExtensionEditor();
+      send('extension-ui-notice', { message: 'The Pi extension editor failed while initializing.', level: 'warning' });
+    }
+  }).catch(() => {
+    if (generation !== extensionEditorGeneration) return;
+    disposeExtensionEditor();
+    send('extension-ui-notice', { message: 'The Pi extension editor could not be initialized.', level: 'warning' });
+  });
+}
+
 function getCurrentToolRendererTheme(current: SessionLike): unknown {
   const module = piThemeModule;
   if (!module) return undefined;
@@ -925,6 +1103,25 @@ function customTuiComponent(pending: PendingExtensionCustom): ExtensionCustomCom
   return pending.overlayComponent ?? pending.focusedComponent ?? pending.component;
 }
 
+function renderSafePiComponent(component: ExtensionCustomComponent | undefined, width = 80): SafeTuiLine[] {
+  if (!component) return [];
+  const raw = component.render(Math.max(1, Math.min(160, width)));
+  const source = typeof raw === 'string' ? raw.slice(0, MAX_TUI_RENDER_CHARS + 1).split('\n')
+    : Array.isArray(raw) ? raw.slice(0, MAX_TUI_RENDER_LINES + 1) : [];
+  const visibleLines = source.flatMap((line): string[] => {
+    if (typeof line !== 'string') return [];
+    return [line.slice(0, MAX_TUI_RENDER_CHARS + 1)
+      .replace(/\u001b_pi:c\u0007/g, '\u001b[7m \u001b[0m')
+      .replace(/\u001b_pi:fc\u0007/g, '\u001b[7m')
+      .replace(/\u001b_pi:\/fc\u0007/g, '\u001b[0m')
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, (sequence) => sequence.endsWith('m') && /^[\d;]*$/.test(sequence.slice(2, -1)) ? sequence : '')
+      .replace(/\u001b\](?:[^\u0007]|\u001b(?!\\))*(?:\u0007|\u001b\\)/g, '')
+      .replace(/\u001b[_P^][\s\S]*?(?:\u0007|\u001b\\)/g, '')
+      .replace(/\u001b[\s\S]?/g, '')];
+  });
+  return safeTuiLines({ render: () => visibleLines }) ?? [];
+}
+
 function scheduleExtensionCustomRender(pending: PendingExtensionCustom): void {
   if (pending.settled || pending.hidden || pending.renderTimer) return;
   const wait = Math.max(0, 34 - (Date.now() - pending.lastRenderAt));
@@ -934,21 +1131,7 @@ function scheduleExtensionCustomRender(pending: PendingExtensionCustom): void {
     pending.rendering = true;
     try {
       const component = customTuiComponent(pending);
-      const raw = component?.render(80);
-      const source = typeof raw === 'string' ? raw.slice(0, MAX_TUI_RENDER_CHARS + 1).split('\n')
-        : Array.isArray(raw) ? raw.slice(0, MAX_TUI_RENDER_LINES + 1) : [];
-      const visibleLines = source.flatMap((line): string[] => {
-        if (typeof line !== 'string') return [];
-        return [line.slice(0, MAX_TUI_RENDER_CHARS + 1)
-          .replace(/\u001b_pi:c\u0007/g, '\u001b[7m \u001b[0m')
-          .replace(/\u001b_pi:fc\u0007/g, '\u001b[7m')
-          .replace(/\u001b_pi:\/fc\u0007/g, '\u001b[0m')
-          .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, (sequence) => sequence.endsWith('m') && /^[\d;]*$/.test(sequence.slice(2, -1)) ? sequence : '')
-          .replace(/\u001b\](?:[^\u0007]|\u001b(?!\\))*(?:\u0007|\u001b\\)/g, '')
-          .replace(/\u001b[_P^][\s\S]*?(?:\u0007|\u001b\\)/g, '')
-          .replace(/\u001b[\s\S]?/g, '')];
-      });
-      const lines = safeTuiLines({ render: () => visibleLines }) ?? [];
+      const lines = renderSafePiComponent(component);
       pending.lastRenderAt = Date.now();
       const type = pending.requestSent ? 'extension-custom-update' : 'extension-custom-request';
       pending.requestSent = true;
@@ -1205,6 +1388,46 @@ function handleExtensionCustomInput(input: WorkerInput): void {
     scheduleExtensionCustomRender(pending);
   } catch {
     finishExtensionCustom(pending, undefined);
+  }
+}
+
+function handleExtensionEditorInput(input: WorkerInput): void {
+  const requestId = typeof input.requestId === 'string' && /^pi-editor-\d{1,12}$/.test(input.requestId)
+    ? input.requestId
+    : '';
+  const component = extensionEditorComponent;
+  if (!requestId || requestId !== extensionEditorRequestId || !component) return;
+  const now = Date.now();
+  if (now - extensionEditorInputWindowStartedAt >= 1000) {
+    extensionEditorInputWindowStartedAt = now;
+    extensionEditorInputCount = 0;
+  }
+  extensionEditorInputCount += 1;
+  if (extensionEditorInputCount > MAX_EXTENSION_CUSTOM_INPUTS_PER_SECOND) return;
+
+  if (input.mouse !== undefined) {
+    const event = validExtensionCustomMouse(input.mouse);
+    if (!event || !component.handleMouse) return;
+    try {
+      const result = component.handleMouse(event);
+      if (result && typeof result === 'object' && (result as Record<string, unknown>).focus === true) component.focused = true;
+      component.invalidate?.();
+      publishExtensionEditorText();
+      publishExtensionEditorRender(requestId);
+    } catch {
+      send('extension-ui-notice', { message: 'The Pi extension editor rejected pointer input.', level: 'warning' });
+    }
+    return;
+  }
+
+  if (!validExtensionCustomInput(input.data)) return;
+  try {
+    component.handleInput?.(input.data);
+    component.invalidate?.();
+    publishExtensionEditorText();
+    publishExtensionEditorRender(requestId);
+  } catch {
+    send('extension-ui-notice', { message: 'The Pi extension editor rejected keyboard input.', level: 'warning' });
   }
 }
 
@@ -1584,9 +1807,22 @@ function installExtensionUi(current: SessionLike): void {
         else send('extension-ui-notice', { message: 'A Pi extension widget could not be rendered in the sidebar.', level: 'warning' });
       }
     },
-    setEditorText: (text: string) => send('extension-editor-text', { text }),
-    pasteToEditor: (text: string) => send('extension-editor-text', { text, append: true }),
-    getEditorText: () => '',
+    setEditorText: (text: string) => setExtensionEditorText(text),
+    pasteToEditor: (text: string) => {
+      const bounded = boundedExtensionEditorText(text);
+      if (extensionEditorComponent?.insertTextAtCursor) {
+        try {
+          extensionEditorComponent.insertTextAtCursor(bounded);
+          publishExtensionEditorText();
+          publishExtensionEditorRender();
+        } catch {
+          send('extension-ui-notice', { message: 'The active Pi extension editor could not insert the requested text.', level: 'warning' });
+        }
+      } else {
+        setExtensionEditorText(`${getExtensionEditorText()}${bounded}`);
+      }
+    },
+    getEditorText: () => getExtensionEditorText(),
     onTerminalInput: () => () => undefined,
     custom: async (factory: unknown, options?: unknown) => requestExtensionCustom(factory, options, current),
     setWidgetPlacement: () => undefined,
@@ -1602,8 +1838,8 @@ function installExtensionUi(current: SessionLike): void {
         : undefined;
       refreshExtensionChrome(current);
     },
-    setEditorComponent: () => undefined,
-    getEditorComponent: () => undefined,
+    setEditorComponent: (factory: unknown) => setExtensionEditorComponent(factory, current),
+    getEditorComponent: () => extensionEditorFactory,
     getTheme: () => undefined,
     setTheme: () => ({ success: false, error: 'Themes are not available in this sidebar.' }),
     getAllThemes: () => [],
@@ -2044,6 +2280,7 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   sessionListController = undefined;
   providerAuthController?.abort();
   providerAuthController = undefined;
+  disposeExtensionEditor();
   cancelPendingExtensionCustom();
   send('extension-custom-reset');
   if (pendingUiRequests.size) send('extension-ui-reset');
@@ -3069,6 +3306,7 @@ async function handle(input: WorkerInput): Promise<void> {
         sessionListController?.abort();
         sessionListController = undefined;
         providerAuthController?.abort();
+        disposeExtensionEditor();
         cancelPendingExtensionCustom();
         send('extension-custom-reset');
         for (const resolve of pendingUiRequests.values()) resolve(undefined);
@@ -3112,6 +3350,34 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       case 'extensionCustomInput':
         handleExtensionCustomInput(input);
+        return;
+      case 'extensionEditorSync':
+        if (typeof input.text === 'string' && input.text.length <= 100_000) {
+          if ((extensionEditorComponent && !input.requestId)
+            || (input.requestId && input.requestId !== extensionEditorRequestId)) return;
+          extensionEditorText = boundedExtensionEditorText(input.text);
+        }
+        return;
+      case 'extensionEditorSetText':
+        if (extensionEditorRequestId && input.requestId !== extensionEditorRequestId) return;
+        setExtensionEditorText(input.text, extensionEditorRequestId);
+        return;
+      case 'extensionEditorPaste': {
+        const requestId = typeof input.requestId === 'string' ? input.requestId : '';
+        const component = extensionEditorComponent;
+        if (!component || requestId !== extensionEditorRequestId || typeof input.text !== 'string' || input.text.length > 50_000) return;
+        try {
+          if (component.insertTextAtCursor) component.insertTextAtCursor(input.text);
+          else component.setText(`${getExtensionEditorText(component)}${input.text}`.slice(0, 100_000));
+          publishExtensionEditorText();
+          publishExtensionEditorRender(requestId);
+        } catch {
+          send('extension-ui-notice', { message: 'The Pi extension editor could not paste the selected text.', level: 'warning' });
+        }
+        return;
+      }
+      case 'extensionEditorInput':
+        handleExtensionEditorInput(input);
         return;
       case 'extensionCustomCancel': {
         const requestId = typeof input.requestId === 'string' && input.requestId.length <= 128 ? input.requestId : '';

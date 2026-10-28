@@ -639,6 +639,10 @@ button:focus-visible, textarea:focus-visible {
   background: transparent;
   line-height: 1.45;
 }
+.extension-editor-view { display: block; width: 100%; min-height: 26px; max-height: 170px; padding: 2px 1px 5px; overflow: auto; color: var(--vscode-input-foreground, var(--text)); background: transparent; white-space: pre; overflow-wrap: normal; font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 12px); line-height: 1.45; }
+.extension-editor-view[hidden] { display: none; }
+.extension-editor-view:focus-visible { outline: none; }
+.extension-editor-line { display: block; min-height: 1.45em; white-space: pre; }
 .composer textarea::placeholder { color: var(--vscode-input-placeholderForeground, var(--muted)); opacity: 1; }
 .composer textarea:focus-visible { outline: none; }
 .composer-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }

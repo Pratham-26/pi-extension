@@ -87,6 +87,12 @@ const state = {
   extensionCustomQueue: [],
   extensionCustomPressedKeys: new Map(),
   extensionCustomLastPointerAt: 0,
+  extensionEditorActive: false,
+  extensionEditorRequestId: '',
+  extensionEditorWantsKeyRelease: false,
+  extensionEditorPressedKeys: new Map(),
+  extensionEditorLines: [],
+  extensionEditorText: '',
   extensionQueueFullNotified: false,
   extensionDialogTimer: undefined,
   showWorking: true,
@@ -128,6 +134,7 @@ const ui = {
   extensionCustomHint: el('extension-custom-hint'),
   extensionCustomContent: el('extension-custom-content'),
   extensionCustomCancel: el('extension-custom-cancel'),
+  extensionEditorView: el('extension-editor-view'),
   extensionHeader: el('extension-header'),
   extensionFooter: el('extension-footer'),
   extensionWidgetsAbove: el('extension-widgets-above'),
@@ -344,7 +351,7 @@ function chooseMention(index) {
   ui.mentionPanel.hidden = true;
   post('attachUris', { uris: [item.uri] });
   ui.prompt.dispatchEvent(new Event('input'));
-  ui.prompt.focus();
+  focusComposer();
 }
 
 function escapeText(value) {
@@ -379,6 +386,8 @@ function updateControls() {
   const hasQueuedWork = state.queue.steering.length + state.queue.followUp.length > 0;
   ui.send.disabled = !state.hasWorkspace || !hasText;
   ui.prompt.disabled = !state.hasWorkspace || state.switchingSession;
+  ui.extensionEditorView.tabIndex = state.hasWorkspace && !state.switchingSession ? 0 : -1;
+  ui.extensionEditorView.setAttribute('aria-disabled', String(!state.hasWorkspace || state.switchingSession));
   ui.stop.hidden = !state.busy || !state.stopAllowed;
   ui.activity.hidden = !state.busy || !state.showWorking;
   ui.empty.hidden = state.messages.length > 0;
@@ -1414,7 +1423,7 @@ function renderMessages(shouldFollow = true) {
         context: `<quote-context>\n<quote${source}>\n${String(chosen || '').slice(0, 4000)}\n</quote>\n</quote-context>`,
       });
       renderAttachments();
-      ui.prompt.focus();
+      focusComposer();
     });
     actions.append(quote);
     if (message.entryId) {
@@ -1479,8 +1488,9 @@ function renderMessages(shouldFollow = true) {
             ui.prompt.value = value;
             ui.prompt.style.height = 'auto';
             ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 170)}px`;
+            syncPromptToWorker();
             rememberDraft();
-            ui.prompt.focus();
+            focusComposer();
           });
           suggestions.append(chip);
         }
@@ -2205,6 +2215,19 @@ function setBusy(busy, activityText, stopAllowed = true) {
   updateControls();
 }
 
+function focusComposer() {
+  if (state.extensionEditorActive && !ui.extensionEditorView.hidden) ui.extensionEditorView.focus({ preventScroll: true });
+  else ui.prompt.focus();
+}
+
+function syncPromptToWorker() {
+  if (state.extensionEditorActive) {
+    post('extensionEditorSetText', { requestId: state.extensionEditorRequestId, text: ui.prompt.value });
+  } else {
+    post('extensionEditorSync', { text: ui.prompt.value });
+  }
+}
+
 function closeHistory() {
   ui.history.hidden = true;
   ui.historyToggle.setAttribute('aria-expanded', 'false');
@@ -2222,6 +2245,7 @@ function sendPrompt(value = ui.prompt.value) {
   if (state.busy) {
     ui.prompt.value = '';
     ui.prompt.style.height = 'auto';
+    syncPromptToWorker();
     rememberDraft();
     state.attachments = [];
     renderAttachments();
@@ -2235,12 +2259,13 @@ function sendPrompt(value = ui.prompt.value) {
   state.attachments = [];
   ui.prompt.value = '';
   ui.prompt.style.height = 'auto';
+  syncPromptToWorker();
   rememberDraft();
   renderAttachments();
   renderMessages();
   setBusy(true, 'Starting Pi');
   post('send', { text: promptText, attachments, deliverAs: state.deliverAs });
-  ui.prompt.focus();
+  focusComposer();
 }
 
 function renderModelChoices(data) {
@@ -2616,10 +2641,11 @@ function renderTools() {
 function insertCommand(command, closePopover = true) {
   const existing = ui.prompt.value.trim();
   ui.prompt.value = existing ? `${command} ${existing}` : `${command} `;
-  ui.prompt.focus();
+  focusComposer();
   ui.prompt.setSelectionRange(ui.prompt.value.length, ui.prompt.value.length);
   ui.prompt.style.height = 'auto';
   ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 170)}px`;
+  syncPromptToWorker();
   if (closePopover) {
     ui.skillsPopover.hidden = true;
     ui.skillsToggle.setAttribute('aria-expanded', 'false');
@@ -2989,7 +3015,7 @@ function renderExtensionCommandCompletions(data) {
       button.addEventListener('click', () => {
         if (ui.prompt.value !== context.promptValue || ui.prompt.selectionStart !== context.cursor) return;
         ui.prompt.value = `${context.promptValue.slice(0, context.argumentStart)}${item.value}${context.promptValue.slice(context.cursor)}`;
-        ui.prompt.focus();
+        focusComposer();
         const nextCursor = context.argumentStart + item.value.length;
         ui.prompt.setSelectionRange(nextCursor, nextCursor);
         ui.prompt.dispatchEvent(new Event('input'));
@@ -3416,6 +3442,111 @@ function resetExtensionCustom() {
   renderExtensionCustom();
 }
 
+function extensionEditorRecord(data) {
+  if (!data || typeof data.requestId !== 'string' || !/^pi-editor-\d{1,12}$/.test(data.requestId)) return undefined;
+  return {
+    requestId: data.requestId,
+    lines: boundedExtensionCustomLines(data.lines),
+    wantsKeyRelease: data.wantsKeyRelease === true,
+  };
+}
+
+function renderExtensionEditor(focus = false) {
+  const preserveFocus = ui.extensionEditorView.contains(document.activeElement);
+  ui.extensionEditorView.replaceChildren();
+  if (!state.extensionEditorActive) return;
+  if (state.extensionEditorLines.length) {
+    for (const line of state.extensionEditorLines.slice(0, 120)) {
+      const row = document.createElement('span');
+      row.className = 'extension-editor-line';
+      appendTuiSegments(row, line);
+      ui.extensionEditorView.append(row);
+    }
+  } else {
+    const placeholder = document.createElement('span');
+    placeholder.className = 'extension-editor-line';
+    placeholder.textContent = ui.prompt.placeholder || 'Ask Pi anything';
+    ui.extensionEditorView.append(placeholder);
+  }
+  if (focus || preserveFocus) ui.extensionEditorView.focus({ preventScroll: true });
+}
+
+function activateExtensionEditor(data) {
+  const record = extensionEditorRecord(data);
+  if (!record) return;
+  state.extensionEditorActive = true;
+  state.extensionEditorRequestId = record.requestId;
+  state.extensionEditorWantsKeyRelease = record.wantsKeyRelease;
+  state.extensionEditorLines = record.lines;
+  state.extensionEditorPressedKeys.clear();
+  ui.prompt.hidden = true;
+  ui.extensionEditorView.hidden = false;
+  ui.extensionEditorView.setAttribute('aria-valuetext', state.extensionEditorText.slice(0, 4_000));
+  renderExtensionEditor(true);
+  updateControls();
+}
+
+function resetExtensionEditor() {
+  const restoreFocus = ui.extensionEditorView.contains(document.activeElement);
+  state.extensionEditorActive = false;
+  state.extensionEditorRequestId = '';
+  state.extensionEditorWantsKeyRelease = false;
+  state.extensionEditorLines = [];
+  state.extensionEditorPressedKeys.clear();
+  ui.extensionEditorView.hidden = true;
+  ui.extensionEditorView.replaceChildren();
+  ui.extensionEditorView.removeAttribute('aria-valuetext');
+  ui.prompt.hidden = false;
+  updateControls();
+  if (restoreFocus && !ui.prompt.disabled) ui.prompt.focus({ preventScroll: true });
+}
+
+function extensionEditorMouseFromEvent(event, output, type) {
+  const mouse = extensionCustomMouseFromEvent(event, output, type);
+  if (!mouse) return undefined;
+  mouse.height = Math.max(1, Math.min(120, state.extensionEditorLines.length || 24));
+  return mouse;
+}
+
+function handleExtensionEditorKeyboard(event, eventType) {
+  const requestId = state.extensionEditorRequestId;
+  if (eventType === 3 && (!state.extensionEditorActive || !requestId || state.extensionRequest || !ui.promptTemplateLayer.hidden)) {
+    state.extensionEditorPressedKeys.delete(event.code);
+    return;
+  }
+  if (!state.extensionEditorActive || !requestId || state.extensionRequest || !ui.promptTemplateLayer.hidden
+    || (!ui.extensionEditorView.contains(event.target) && event.target !== ui.prompt)) return;
+  if (event.isComposing || event.key === 'Process' || event.key === 'Dead') return;
+  if (eventType === 3) {
+    const pressed = state.extensionEditorPressedKeys.get(event.code);
+    if (!pressed) return;
+    state.extensionEditorPressedKeys.delete(event.code);
+    const sequence = extensionCustomKeyboardSequence(pressed, 3, state.extensionEditorWantsKeyRelease);
+    if (sequence) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      post('extensionEditorInput', { requestId, data: sequence });
+    }
+    return;
+  }
+  const sequence = extensionCustomKeyboardSequence(event, 1, state.extensionEditorWantsKeyRelease);
+  if (!sequence) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (state.extensionEditorWantsKeyRelease
+    && (state.extensionEditorPressedKeys.has(event.code) || state.extensionEditorPressedKeys.size < 128)) {
+    state.extensionEditorPressedKeys.set(event.code, {
+      key: event.key,
+      code: event.code,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+    });
+  }
+  post('extensionEditorInput', { requestId, data: sequence });
+}
+
 function extensionCustomMouseFromEvent(event, output, type) {
   const rect = output.getBoundingClientRect();
   if (!rect.width || !rect.height) return undefined;
@@ -3444,7 +3575,7 @@ function extensionCustomMouseFromEvent(event, output, type) {
   };
 }
 
-function extensionCustomKeyboardSequence(event, eventType) {
+function extensionCustomKeyboardSequence(event, eventType, wantsKeyRelease = state.extensionCustomRequest?.wantsKeyRelease === true) {
   const key = event.key;
   const modifiers = (event.shiftKey ? 1 : 0) | (event.altKey ? 2 : 0) | (event.ctrlKey ? 4 : 0) | (event.metaKey ? 8 : 0);
   const kittyModifiers = modifiers + 1;
@@ -3455,8 +3586,8 @@ function extensionCustomKeyboardSequence(event, eventType) {
     const code = value.toUpperCase().charCodeAt(0);
     return code >= 64 && code <= 95 ? String.fromCharCode(code & 31) : undefined;
   };
-  if (eventType === 3 && !state.extensionCustomRequest?.wantsKeyRelease) return undefined;
-  if (state.extensionCustomRequest?.wantsKeyRelease) {
+  if (eventType === 3 && !wantsKeyRelease) return undefined;
+  if (wantsKeyRelease) {
     if (arrows[key]) return `\u001b[1;${kittyModifiers}:${eventType}${arrows[key]}`;
     if (key === 'Home' || key === 'End') return `\u001b[1;${kittyModifiers}:${eventType}${key === 'Home' ? 'H' : 'F'}`;
     if (functional[key]) return `\u001b[${functional[key]};${kittyModifiers}:${eventType}~`;
@@ -3541,6 +3672,8 @@ function applySnapshot(data) {
     delete state.promptHistory.__new;
     state.sessionPath = nextSessionPath;
     ui.prompt.value = state.drafts[nextSessionPath] || '';
+    state.extensionEditorText = ui.prompt.value;
+    syncPromptToWorker();
     state.switchingSession = false;
     state.promptHistoryIndex = -1;
     persistWebviewState();
@@ -3732,6 +3865,25 @@ window.addEventListener('message', (event) => {
     case 'extension-custom-reset':
       resetExtensionCustom();
       break;
+    case 'extension-editor-mode':
+      if (data.active === true) activateExtensionEditor(data);
+      else resetExtensionEditor();
+      break;
+    case 'extension-editor-reset':
+      resetExtensionEditor();
+      break;
+    case 'extension-editor-render': {
+      const record = extensionEditorRecord(data);
+      if (!record || !state.extensionEditorActive || record.requestId !== state.extensionEditorRequestId) break;
+      state.extensionEditorLines = record.lines;
+      state.extensionEditorWantsKeyRelease = record.wantsKeyRelease;
+      renderExtensionEditor();
+      break;
+    }
+    case 'extension-editor-submit':
+      if (state.extensionEditorActive && data.requestId === state.extensionEditorRequestId
+        && typeof data.text === 'string' && data.text.length <= 100_000) sendPrompt(data.text);
+      break;
     case 'extension-ui-notice':
       showNotice(data.message || 'Pi extension notification', data.level === 'error' || data.level === 'warning');
       break;
@@ -3773,7 +3925,19 @@ window.addEventListener('message', (event) => {
       if (data.title) ui.title.textContent = shorten(data.title, 48);
       break;
     case 'extension-editor-text':
-      ui.prompt.value = data.append ? `${ui.prompt.value}${String(data.text || '')}` : String(data.text || '');
+      if (typeof data.requestId === 'string'
+        && (!state.extensionEditorActive || data.requestId !== state.extensionEditorRequestId)) break;
+      if (state.extensionEditorActive && !data.requestId) break;
+      const incomingText = String(data.text || '').slice(0, 100_000);
+      const visibleText = String(data.expandedText ?? incomingText).slice(0, 100_000);
+      ui.prompt.value = (data.append ? `${ui.prompt.value}${visibleText}` : visibleText).slice(0, 100_000);
+      state.extensionEditorText = (data.append ? `${state.extensionEditorText}${incomingText}` : incomingText).slice(0, 100_000);
+      if (state.extensionEditorActive) ui.extensionEditorView.setAttribute('aria-valuetext', state.extensionEditorText.slice(0, 4_000));
+      ui.prompt.style.height = 'auto';
+      ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 170)}px`;
+      if (state.promptHistoryIndex < 0) state.promptHistoryDraft = ui.prompt.value;
+      rememberDraft();
+      if (!state.extensionEditorActive) updateMentionSearch();
       if (!data.append && typeof data.context === 'string' && data.context.trim()) {
         state.attachments.push({
           id: `restored-context-${Date.now()}`,
@@ -3789,7 +3953,7 @@ window.addEventListener('message', (event) => {
         if (skipped) showNotice(`Could not restore ${skipped} image ${skipped === 1 ? 'attachment' : 'attachments'}; supported images must be PNG, JPEG, WebP, or GIF up to 5 MB each.`);
       }
       if (!data.append && (typeof data.context === 'string' && data.context.trim() || Array.isArray(data.images))) renderAttachments();
-      ui.prompt.focus();
+      focusComposer();
       updateControls();
       break;
     case 'working-visible':
@@ -3811,7 +3975,7 @@ window.addEventListener('message', (event) => {
         const prompt = data.draftPrompt.slice(0, 2000);
         ui.prompt.value = `${current}${current.trim() ? '\n\n' : ''}${prompt}`.slice(0, 20_000);
         ui.prompt.dispatchEvent(new Event('input'));
-        ui.prompt.focus();
+        focusComposer();
       }
       break;
     case 'pinned-file':
@@ -4155,6 +4319,8 @@ ui.dialogInput.addEventListener('keydown', (event) => {
 });
 document.addEventListener('keydown', (event) => handleExtensionCustomKeyboard(event, 1), true);
 document.addEventListener('keyup', (event) => handleExtensionCustomKeyboard(event, 3), true);
+document.addEventListener('keydown', (event) => handleExtensionEditorKeyboard(event, 1), true);
+document.addEventListener('keyup', (event) => handleExtensionEditorKeyboard(event, 3), true);
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !ui.promptTemplateLayer.hidden) closePromptTemplateForm();
   if (event.key === 'Escape' && !ui.dialogLayer.hidden) finishExtensionDialog(undefined);
@@ -4268,9 +4434,67 @@ ui.prompt.addEventListener('input', () => {
   ui.prompt.style.height = 'auto';
   ui.prompt.style.height = `${Math.min(ui.prompt.scrollHeight, 170)}px`;
   if (state.promptHistoryIndex < 0) state.promptHistoryDraft = ui.prompt.value;
+  if (!state.extensionEditorActive) {
+    state.extensionEditorText = ui.prompt.value;
+    post('extensionEditorSync', { text: ui.prompt.value });
+  }
   rememberDraft();
   updateMentionSearch();
   updateControls();
+});
+ui.extensionEditorView.addEventListener('pointerdown', (event) => {
+  if (!state.extensionEditorActive) return;
+  const mouse = extensionEditorMouseFromEvent(event, ui.extensionEditorView, 'press');
+  if (!mouse) return;
+  event.preventDefault();
+  try { ui.extensionEditorView.setPointerCapture(event.pointerId); } catch { /* Pointer capture is optional in the webview. */ }
+  focusComposer();
+  post('extensionEditorInput', { requestId: state.extensionEditorRequestId, mouse });
+});
+ui.extensionEditorView.addEventListener('pointerup', (event) => {
+  const mouse = extensionEditorMouseFromEvent(event, ui.extensionEditorView, 'release');
+  if (mouse && state.extensionEditorActive) post('extensionEditorInput', { requestId: state.extensionEditorRequestId, mouse });
+});
+ui.extensionEditorView.addEventListener('pointercancel', (event) => {
+  const mouse = extensionEditorMouseFromEvent(event, ui.extensionEditorView, 'release');
+  if (mouse && state.extensionEditorActive) post('extensionEditorInput', { requestId: state.extensionEditorRequestId, mouse });
+});
+ui.extensionEditorView.addEventListener('contextmenu', (event) => event.preventDefault());
+ui.extensionEditorView.addEventListener('pointermove', (event) => {
+  if (!state.extensionEditorActive) return;
+  const now = Date.now();
+  if (now - state.extensionCustomLastPointerAt < 40) return;
+  state.extensionCustomLastPointerAt = now;
+  const mouse = extensionEditorMouseFromEvent(event, ui.extensionEditorView, event.buttons ? 'drag' : 'move');
+  if (mouse) post('extensionEditorInput', { requestId: state.extensionEditorRequestId, mouse });
+});
+ui.extensionEditorView.addEventListener('click', (event) => {
+  const mouse = extensionEditorMouseFromEvent(event, ui.extensionEditorView, 'click');
+  if (mouse && state.extensionEditorActive) {
+    mouse.clickCount = Math.max(1, Math.min(3, Number(event.detail) || 1));
+    post('extensionEditorInput', { requestId: state.extensionEditorRequestId, mouse });
+  }
+});
+ui.extensionEditorView.addEventListener('wheel', (event) => {
+  const mouse = extensionEditorMouseFromEvent(event, ui.extensionEditorView, 'wheel');
+  if (!mouse || !state.extensionEditorActive) return;
+  event.preventDefault();
+  mouse.wheelDelta = Math.max(-20, Math.min(20, Math.trunc(event.deltaY / 40) || Math.sign(event.deltaY)));
+  post('extensionEditorInput', { requestId: state.extensionEditorRequestId, mouse });
+}, { passive: false });
+ui.extensionEditorView.addEventListener('paste', (event) => {
+  if (!state.extensionEditorActive) return;
+  const items = Array.from(event.clipboardData?.items || []);
+  const images = items.map((item) => item.getAsFile()).filter(Boolean);
+  if (images.length) {
+    event.preventDefault();
+    for (const file of images) attachImageFile(file);
+    return;
+  }
+  const text = event.clipboardData?.getData('text/plain') || '';
+  if (!text) return;
+  event.preventDefault();
+  post('extensionEditorPaste', { requestId: state.extensionEditorRequestId, text: text.slice(0, 50_000) });
 });
 ui.prompt.addEventListener('keydown', (event) => {
   if (!ui.mentionPanel.hidden) {
