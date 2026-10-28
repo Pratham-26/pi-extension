@@ -511,28 +511,34 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .preset-choice:hover:not(:disabled), .preset-add:hover:not(:disabled) { color: var(--text); border-color: var(--focus); }
 .preset-choice:disabled, .preset-add:disabled { opacity: .55; cursor: default; }
 .preset-add { border-style: dashed; }
-.composer-controls { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 3px; min-width: 0; margin: 0 0 5px; }
+.composer-controls { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto auto; align-items: center; gap: 2px 3px; min-width: 0; margin: 0 0 5px; }
 .control-select, .control-button {
-  height: 23px;
+  height: 22px;
   min-width: 0;
-  padding: 0 5px;
+  padding: 0 6px;
   border: 1px solid transparent;
   border-radius: 5px;
   color: var(--muted);
-  background: color-mix(in srgb, var(--text) 2%, transparent);
+  background: transparent;
   font-size: 10px;
 }
 .control-select { cursor: pointer; }
 .model-select { flex: 1 1 180px; width: auto; }
-.model-toggle { flex: 1 1 160px; width: auto; min-width: 110px; overflow: hidden; color: var(--text); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.model-toggle { width: auto; min-width: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .thinking-select { flex: 0 1 100px; width: 100px; max-width: 100px; }
 .control-button { flex: 0 0 auto; cursor: pointer; }
-.control-button:hover:not(:disabled), .control-select:hover:not(:disabled) { color: var(--text); border-color: var(--line); background: var(--surface-raised); }
-.control-button[aria-expanded="true"] { color: var(--text); border-color: var(--line); background: var(--surface-raised); }
+.control-button.model-toggle { min-width: 0; }
+.control-button:hover:not(:disabled), .control-select:hover:not(:disabled) { color: var(--text); border-color: color-mix(in srgb, var(--text) 12%, transparent); background: color-mix(in srgb, var(--text) 4%, transparent); }
+.control-button[aria-expanded="true"] { color: var(--text); border-color: color-mix(in srgb, var(--text) 14%, transparent); background: color-mix(in srgb, var(--text) 5%, transparent); }
+.control-button:focus-visible, .control-select:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
 .control-button:disabled, .control-select:disabled { opacity: .55; cursor: default; }
 .delivery-mode { margin-left: auto; }
 .model-cycle { display: grid; flex: 0 0 24px; place-items: center; width: 24px; padding: 0; }
 .model-cycle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+@media (max-width: 420px) {
+  .composer-controls { display: flex; flex-wrap: wrap; }
+  .control-button.model-toggle { flex: 1 1 130px; }
+}
 .control-popover {
   position: absolute;
   z-index: 8;

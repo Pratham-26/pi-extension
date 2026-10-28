@@ -95,6 +95,7 @@ try {
   const options = await optionsPromise;
   assert.equal(options.runtimeSettings.hideThinkingBlock, false, 'thinking should be visible by default');
   assert.equal(options.runtimeSettings.showCacheMissNotices, false, 'cache-miss notices should be off by default');
+  assert.equal(options.runtimeSettings.enableInstallTelemetry, true, 'Pi install/update telemetry should follow the documented default');
   assert.equal(options.runtimeSettings.sessionShareDestination, 'auto', 'the share destination should default to automatic');
 
   const changes = [
@@ -102,6 +103,7 @@ try {
     ['followUpMode', 'all'],
     ['hideThinkingBlock', true],
     ['showCacheMissNotices', true],
+    ['enableInstallTelemetry', false],
     ['sessionShareDestination', 'radius'],
   ];
   for (const [setting, value] of changes) {
@@ -116,6 +118,7 @@ try {
   assert.equal(persisted.followUpMode, 'all', 'follow-up mode should persist through Pi’s settings manager');
   assert.equal(persisted.hideThinkingBlock, true, 'thinking visibility should persist through Pi’s settings manager');
   assert.equal(persisted.showCacheMissNotices, true, 'cache-miss notice preference should persist through Pi’s settings manager');
+  assert.equal(persisted.enableInstallTelemetry, false, 'Pi install/update telemetry preference should persist through Pi’s settings manager');
   assert.equal(persisted.sessionShareDestination, 'radius', 'share destination should persist through Pi’s settings manager');
 
   const invalidSetting = waitForWorkerMessage((message) => message?.type === 'notice'
@@ -125,7 +128,7 @@ try {
   const unchanged = JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'));
   assert.equal(unchanged.sessionShareDestination, 'radius', 'invalid setting values must not reach Pi settings.json');
 
-  console.log('Runtime settings smoke check passed: five allowlisted Pi preferences were reported, saved, and read back; an invalid value was rejected without changing settings.json.');
+  console.log('Runtime settings smoke check passed: six allowlisted Pi preferences were reported, saved, and read back; an invalid value was rejected without changing settings.json.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   const resolvedTemporaryRoot = resolve(temporaryRoot);

@@ -2738,6 +2738,7 @@ function sendOptions(): void {
       sessionShareDestination: globalSettings?.sessionShareDestination === 'gist' || globalSettings?.sessionShareDestination === 'radius'
         ? globalSettings.sessionShareDestination
         : 'auto',
+      enableInstallTelemetry: globalSettings?.enableInstallTelemetry !== false,
     },
     providers: providers.filter((provider) => provider.supportsApiKey || provider.supportsOAuth),
     contextFiles,
@@ -4230,6 +4231,9 @@ async function handle(input: WorkerInput): Promise<void> {
         } else if (input.setting === 'showCacheMissNotices' && typeof input.value === 'boolean'
           && session.settingsManager?.setShowCacheMissNotices) {
           session.settingsManager.setShowCacheMissNotices(input.value);
+        } else if (input.setting === 'enableInstallTelemetry' && typeof input.value === 'boolean'
+          && session.settingsManager?.setEnableInstallTelemetry) {
+          session.settingsManager.setEnableInstallTelemetry(input.value);
         } else if (input.setting === 'sessionShareDestination'
           && (input.value === 'auto' || input.value === 'gist' || input.value === 'radius')
           && session.settingsManager?.setSessionShareDestination) {

@@ -429,9 +429,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     }, 2500);
     this.runningSessionPoller.unref?.();
     this.activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor) this.post({ type: 'dismiss-composer-popovers' });
       if (this.pinnedActiveFileEnabled && editor) this.publishPinnedActiveFile(editor);
     });
     this.selectionSubscription = vscode.window.onDidChangeTextEditorSelection((event) => {
+      if (event.textEditor === vscode.window.activeTextEditor
+        && event.kind === vscode.TextEditorSelectionChangeKind.Mouse) {
+        this.post({ type: 'dismiss-composer-popovers' });
+      }
       if (this.pinnedActiveFileEnabled && event.textEditor === vscode.window.activeTextEditor) this.publishPinnedActiveFile(event.textEditor);
     });
     this.updateExtensionStatusBar();
@@ -2062,7 +2067,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         const worker = this.worker;
         if (!worker) return;
         const valid = ((message.setting === 'autoCompaction' || message.setting === 'autoRetry'
-          || message.setting === 'hideThinkingBlock' || message.setting === 'showCacheMissNotices')
+          || message.setting === 'hideThinkingBlock' || message.setting === 'showCacheMissNotices'
+          || message.setting === 'enableInstallTelemetry')
           && typeof message.value === 'boolean')
           || (message.setting === 'cacheWarming'
             && (message.value === 'off' || message.value === 'streaming' || message.value === 'idle'))
@@ -5305,7 +5311,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtml(webview: vscode.Webview): string {
     const nonce = randomBytes(16).toString('base64');
-    const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'));
+    const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'))
+      .with({ query: `v=${Date.now()}` });
     const rendererUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview-renderers.js'));
     const draftStoreUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'draft-store.js'));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.js'));
@@ -5503,6 +5510,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <button id="restart-pi-runtime" class="text-button" type="button" title="Apply runtime setting changes after running and queued work is finished">Restart Pi runtime</button>
                 <label class="runtime-setting"><input id="auto-refresh-models" type="checkbox"><span>Refresh model catalogs at Pi startup</span></label>
                 <p class="runtime-settings-note">Requires confirmation. It may contact provider endpoints and run configured API-key commands; skipped in Pi offline mode. Applies after restarting Pi.</p>
+                <label class="runtime-setting"><input id="enable-install-telemetry" type="checkbox"><span>Allow Pi anonymous install/update reporting</span></label>
+                <p class="runtime-settings-note">Controls Pi install/update reports and selected provider attribution headers. It does not disable update checks; applies after restarting Pi.</p>
                 <label class="runtime-setting"><input id="auto-compaction" type="checkbox"><span>Automatic context compaction</span></label>
                 <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
                 <label class="runtime-setting"><input id="notification-sound" type="checkbox"><span>Local sound when Pi finishes or needs input while hidden</span></label>

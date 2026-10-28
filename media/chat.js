@@ -69,6 +69,7 @@ const state = {
     followUpMode: 'one-at-a-time',
     hideThinkingBlock: false,
     showCacheMissNotices: false,
+    enableInstallTelemetry: true,
     sessionShareDestination: 'auto',
   },
   models: [],
@@ -248,6 +249,7 @@ const ui = {
   followUpMode: el('follow-up-mode'),
   hideThinkingBlocks: el('hide-thinking-blocks'),
   showCacheMissNotices: el('show-cache-miss-notices'),
+  enableInstallTelemetry: el('enable-install-telemetry'),
   sessionShareDestination: el('session-share-destination'),
   autoRefreshModels: el('auto-refresh-models'),
   notificationSound: el('notification-sound'),
@@ -723,6 +725,7 @@ function updateControls() {
   ui.followUpMode.disabled = !state.hasSession || state.busy;
   ui.hideThinkingBlocks.disabled = !state.hasSession || state.busy;
   ui.showCacheMissNotices.disabled = !state.hasSession || state.busy;
+  ui.enableInstallTelemetry.disabled = !state.hasSession || state.busy;
   ui.sessionShareDestination.disabled = !state.hasSession || state.busy;
   ui.autoRefreshModels.checked = state.autoRefreshModelsEnabled;
   ui.notificationSound.checked = state.notificationSoundEnabled;
@@ -2806,6 +2809,7 @@ function renderModelChoices(data) {
     followUpMode: runtimeSettings.followUpMode === 'all' ? 'all' : 'one-at-a-time',
     hideThinkingBlock: runtimeSettings.hideThinkingBlock === true,
     showCacheMissNotices: runtimeSettings.showCacheMissNotices === true,
+    enableInstallTelemetry: runtimeSettings.enableInstallTelemetry !== false,
     sessionShareDestination: ['auto', 'gist', 'radius'].includes(runtimeSettings.sessionShareDestination)
       ? runtimeSettings.sessionShareDestination
       : 'auto',
@@ -2818,6 +2822,7 @@ function renderModelChoices(data) {
   ui.followUpMode.value = state.runtimeSettings.followUpMode;
   ui.hideThinkingBlocks.checked = state.runtimeSettings.hideThinkingBlock;
   ui.showCacheMissNotices.checked = state.runtimeSettings.showCacheMissNotices;
+  ui.enableInstallTelemetry.checked = state.runtimeSettings.enableInstallTelemetry;
   ui.sessionShareDestination.value = state.runtimeSettings.sessionShareDestination;
   if (wasHidingThinking !== state.runtimeSettings.hideThinkingBlock) renderMessages();
   state.mcpEnabled = data.mcpEnabled === true;
@@ -4581,6 +4586,9 @@ window.addEventListener('message', (event) => {
     case 'workspace':
       updateWorkspace(data.name, data.hasWorkspace);
       break;
+    case 'dismiss-composer-popovers':
+      closeComposerPopovers();
+      break;
     case 'queue-default-action':
       state.deliverAs = data.action === 'steer' ? 'steer' : 'followUp';
       updateControls();
@@ -5514,6 +5522,10 @@ ui.hideThinkingBlocks.addEventListener('change', () => {
 ui.showCacheMissNotices.addEventListener('change', () => {
   ui.showCacheMissNotices.disabled = true;
   post('updatePiSetting', { setting: 'showCacheMissNotices', value: ui.showCacheMissNotices.checked });
+});
+ui.enableInstallTelemetry.addEventListener('change', () => {
+  ui.enableInstallTelemetry.disabled = true;
+  post('updatePiSetting', { setting: 'enableInstallTelemetry', value: ui.enableInstallTelemetry.checked });
 });
 ui.sessionShareDestination.addEventListener('change', () => {
   ui.sessionShareDestination.disabled = true;
