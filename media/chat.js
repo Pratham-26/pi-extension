@@ -570,6 +570,16 @@ function renderMessages(shouldFollow = true) {
       branch.title = 'Create a new Pi session from this message';
       branch.addEventListener('click', () => post('forkSession', { entryId: message.entryId }));
       actions.append(branch);
+
+      if (!message.hasImages && (String(message.text || '').trim() || message.context)) {
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.className = 'branch-button';
+        edit.textContent = 'Edit & branch';
+        edit.title = 'Put this prompt and its text context back in the composer and continue from a new branch';
+        edit.addEventListener('click', () => post('editUserMessage', { entryId: message.entryId }));
+        actions.append(edit);
+      }
     }
     const quote = document.createElement('button');
     quote.type = 'button';
@@ -1524,6 +1534,15 @@ window.addEventListener('message', (event) => {
       break;
     case 'extension-editor-text':
       ui.prompt.value = data.append ? `${ui.prompt.value}${String(data.text || '')}` : String(data.text || '');
+      if (!data.append && typeof data.context === 'string' && data.context.trim()) {
+        state.attachments.push({
+          id: `restored-context-${Date.now()}`,
+          label: 'Restored prompt context',
+          path: 'transcript context',
+          context: data.context.slice(0, 100_000),
+        });
+        renderAttachments();
+      }
       ui.prompt.focus();
       updateControls();
       break;

@@ -449,6 +449,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'replaceQueue':
       case 'extensionUiResponse':
       case 'navigateTree':
+      case 'editUserMessage':
         this.worker?.postMessage(message);
         return;
       case 'refreshModels': {

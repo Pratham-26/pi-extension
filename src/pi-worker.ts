@@ -216,10 +216,11 @@ function installExtensionUi(current: SessionLike): void {
   current.extensionRunner?.setUIContext(ui, 'rpc');
 }
 
-function toUiMessage(message: { role?: string; content?: unknown }): { role: string; text: string; context?: string } | undefined {
+function toUiMessage(message: { role?: string; content?: unknown }): { role: string; text: string; context?: string; hasImages?: boolean } | undefined {
   if (message.role !== 'user' && message.role !== 'assistant') return undefined;
   const raw = contentText(message.content).trim();
   if (!raw) return undefined;
+  const hasImages = Array.isArray(message.content) && message.content.some((part: any) => part?.type === 'image');
 
   const start = '--- pi-extension-context:start ---';
   const end = '--- pi-extension-context:end ---';
@@ -228,9 +229,9 @@ function toUiMessage(message: { role?: string; content?: unknown }): { role: str
   if (message.role === 'user' && startIndex >= 0 && endIndex > startIndex) {
     const context = raw.slice(startIndex + start.length, endIndex).trim();
     const text = `${raw.slice(0, startIndex)}\n${raw.slice(endIndex + end.length)}`.trim();
-    return { role: message.role, text, context };
+    return { role: message.role, text, context, hasImages };
   }
-  return { role: message.role, text: raw };
+  return { role: message.role, text: raw, hasImages };
 }
 
 function getSessionBookmarks(): string[] {
@@ -701,6 +702,18 @@ async function handle(input: WorkerInput): Promise<void> {
         if (!input.entryId || busy || !session?.navigateTree) return;
         const result = await session.navigateTree(input.entryId, { summarize: false });
         if (!result.cancelled && result.editorText) send('extension-editor-text', { text: result.editorText });
+        snapshot();
+        return;
+      }
+      case 'editUserMessage': {
+        if (!input.entryId || busy || !session?.navigateTree || !session.sessionManager) return;
+        const entry = session.sessionManager.getEntries().find((candidate) => candidate.id === input.entryId);
+        if (entry?.type !== 'message' || entry.message?.role !== 'user') return;
+        const result = await session.navigateTree(input.entryId, { summarize: false });
+        if (result.cancelled) return;
+        const restored = toUiMessage(entry.message);
+        const text = restored?.text ?? contentText(entry.message.content);
+        send('extension-editor-text', { text, context: restored?.context });
         snapshot();
         return;
       }

@@ -4,7 +4,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 
 ## Current build
 
-- Persistent Pi sessions with search, pinning, colors, ordering, branching, deletion, and export
+- Persistent Pi sessions with search, pinning, colors, ordering, branching, edit-and-continue prompts, deletion, and export
 - Streamed assistant text, live tool cards, editable follow-up/steering queues, and stop controls
 - Searchable model catalog with provider sign-in, custom `models.json` editing, Pi settings access, confirmed catalog refresh, thinking levels, and presets
 - Per-session tool selection and skill invocation; prompt template argument forms, previews, create/edit, and resource diagnostics/reload
@@ -29,10 +29,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.6.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.7.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.6.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.7.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.
