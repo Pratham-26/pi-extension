@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { homedir } from 'node:os';
 import { access, lstat, mkdir, open as openFile, realpath, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
@@ -135,9 +136,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piChat.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.pi-chat-vscode')),
+    vscode.commands.registerCommand('piChat.chooseAgentDir', () => provider.chooseAgentDir()),
+    vscode.commands.registerCommand('piChat.restartRuntime', () => provider.restartPiRuntime()),
     vscode.commands.registerCommand('piChat.exportDiagnostics', () => provider.exportDiagnostics()),
     vscode.commands.registerCommand('piChat.openLogs', () => provider.openLogs()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.restartRuntime()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('piChat.agentDir')) provider.onAgentDirConfigurationChanged();
+    }),
     provider,
   );
 }
@@ -150,6 +156,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private worker?: Worker;
   private workerWorkspace?: string;
+  private workerAgentDirSetting = '';
+  private runtimeBusy = false;
+  private queuedWorkCount = 0;
   private webviewMessageSubscription?: vscode.Disposable;
   private sessionQuery = '';
   private sessionSearchAllWorkspaces = false;
@@ -307,9 +316,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   restartRuntime(): void {
     const previous = this.worker;
+    this.workerAgentDirSetting = '';
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
+    this.runtimeBusy = false;
+    this.queuedWorkCount = 0;
     this.pendingPiResourcePicker = undefined;
     this.workerWorkspace = undefined;
     this.knownSessionPaths.clear();
@@ -348,6 +360,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
+    this.queuedWorkCount = 0;
     this.pendingPiResourcePicker = undefined;
     this.failPendingMcpSetting(previous);
     if (previous) this.stopWorker(previous);
@@ -364,7 +377,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
     this.workerWorkspace = cwd;
     const workerUri = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'pi-worker.mjs');
+    const configuredAgentDir = vscode.workspace.getConfiguration('piChat').get<string>('agentDir', '').trim();
+    const workerEnv: NodeJS.Dict<string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (typeof value === 'string') workerEnv[key] = value;
+    }
+    if (configuredAgentDir) workerEnv.PI_CODING_AGENT_DIR = configuredAgentDir;
     const worker = new Worker(workerUri.fsPath, {
+      env: workerEnv,
       workerData: {
         cwd,
         autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
@@ -372,6 +392,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       },
     });
     this.worker = worker;
+    this.workerAgentDirSetting = configuredAgentDir;
+    this.runtimeBusy = false;
+    this.queuedWorkCount = 0;
     worker.on('message', (message: RuntimeMessage) => {
       if (this.worker !== worker) return;
       if (message.type === 'extension-ui-request') {
@@ -392,6 +415,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'extension-ui-reset') this.pendingExtensionUiRequestIds.clear();
       if (message.type === 'runtime-error') this.recordDiagnostic('Pi runtime error');
       else if (message.type === 'notice' && message.isError === true) this.recordDiagnostic('Pi operation error');
+      if (message.type === 'run-started') this.runtimeBusy = true;
+      else if (message.type === 'run-finished') this.runtimeBusy = false;
+      if (message.type === 'queue') {
+        const steering = Array.isArray(message.steering) ? message.steering.length : 0;
+        const followUp = Array.isArray(message.followUp) ? message.followUp.length : 0;
+        this.queuedWorkCount = Math.min(5000, steering + followUp);
+      }
       if (message.type === 'run-finished') void this.refreshGitChanges();
       if (message.type === 'snapshot' && typeof message.sessionFile === 'string') {
         this.activeSessionPath = message.sessionFile;
@@ -541,6 +571,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     worker.on('exit', (code: number) => {
       if (this.worker === worker) {
         this.worker = undefined;
+        this.runtimeBusy = false;
+        this.queuedWorkCount = 0;
         this.pendingExtensionUiRequestIds.clear();
         this.pendingPiResourcePicker = undefined;
         this.cancelProviderAuthPrompts(worker);
@@ -904,6 +936,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openPiSettings':
         await this.openPiSettings();
+        return;
+      case 'choosePiAgentDir':
+        await this.chooseAgentDir();
+        return;
+      case 'restartPiRuntime':
+        await this.restartPiRuntime();
         return;
       case 'openMcpConfig':
         await this.openMcpConfig();
@@ -2199,6 +2237,95 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
+  onAgentDirConfigurationChanged(): void {
+    const currentAgentDir = vscode.workspace.getConfiguration('piChat').get<string>('agentDir', '').trim();
+    if (currentAgentDir === this.workerAgentDirSetting) return;
+    this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
+      ? 'The Pi configuration folder setting changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
+      : 'The Pi configuration folder setting changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
+  }
+
+  async chooseAgentDir(): Promise<void> {
+    if (this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'Finish the current Pi run and queued work before changing its configuration folder.', isError: true });
+      return;
+    }
+
+    const configuration = vscode.workspace.getConfiguration('piChat');
+    const configuredPath = configuration.get<string>('agentDir', '').trim();
+    const environmentPath = process.env.PI_CODING_AGENT_DIR?.trim() ?? '';
+    const preferredPath = configuredPath || environmentPath || path.join(homedir(), '.pi', 'agent');
+    const expandedPreferredPath = preferredPath === '~'
+      ? homedir()
+      : /^~[\\/]/.test(preferredPath) ? path.join(homedir(), preferredPath.slice(2)) : preferredPath;
+    const selected = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: 'Use Pi configuration folder',
+      defaultUri: vscode.Uri.file(path.resolve(expandedPreferredPath)),
+      title: 'Choose Pi configuration folder',
+    });
+    const selectedUri = selected?.[0];
+    if (!selectedUri) return;
+    if (this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'Pi work started while the folder picker was open. Finish running and queued work before changing configuration.', isError: true });
+      return;
+    }
+
+    let targetPath = '';
+    try {
+      targetPath = await realpath(selectedUri.fsPath);
+      if (!path.isAbsolute(targetPath) || targetPath.length > 4096 || /[\u0000-\u001f\u007f]/.test(targetPath)) throw new Error('invalid path');
+      const stats = await vscode.workspace.fs.stat(vscode.Uri.file(targetPath));
+      if ((stats.type & vscode.FileType.Directory) === 0) throw new Error('not a folder');
+    } catch {
+      this.post({ type: 'notice', message: 'Choose an existing local folder for Pi configuration.', isError: true });
+      return;
+    }
+
+    const answer = await vscode.window.showWarningMessage(
+      `Use this Pi configuration folder?\n${targetPath}\nPi will read models, credentials, extensions, skills, prompts, and sessions from this folder. Enabled extensions can run code. The current chat will close.`,
+      { modal: true },
+      'Use this folder',
+    );
+    if (answer !== 'Use this folder') return;
+    if (this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'Pi work started while confirmation was open. Finish running and queued work before changing configuration.', isError: true });
+      return;
+    }
+
+    try {
+      await configuration.update('agentDir', targetPath, vscode.ConfigurationTarget.Global);
+      if (this.runtimeBusy || this.queuedWorkCount > 0) {
+        this.post({ type: 'notice', message: 'Pi configuration folder saved. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.' });
+      } else {
+        this.restartRuntime();
+        this.post({ type: 'notice', message: 'Pi configuration folder updated and Pi is restarting.' });
+      }
+    } catch {
+      this.post({ type: 'notice', message: 'Could not update the Pi configuration folder setting.', isError: true });
+    }
+  }
+
+  async restartPiRuntime(): Promise<void> {
+    if (this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'Finish the current Pi run and queued work before restarting the runtime.', isError: true });
+      return;
+    }
+    const answer = await vscode.window.showWarningMessage(
+      'Restart the Pi runtime? The current chat will close. No running or queued work will be interrupted.',
+      { modal: true },
+      'Restart Pi',
+    );
+    if (answer !== 'Restart Pi') return;
+    if (this.runtimeBusy || this.queuedWorkCount > 0) {
+      this.post({ type: 'notice', message: 'Pi work started while confirmation was open. Finish it before restarting.', isError: true });
+      return;
+    }
+    this.restartRuntime();
+  }
+
   private async openMcpConfig(): Promise<void> {
     if (!this.mcpConfigPath || !path.isAbsolute(this.mcpConfigPath)) {
       this.post({ type: 'notice', message: 'Pi did not provide an MCP configuration path. Open a chat, then try again.', isError: true });
@@ -2824,6 +2951,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div class="provider-actions"><span id="provider-status" class="provider-status"></span><button id="connect-provider" class="text-button" type="button">Connect</button><button id="runtime-settings-toggle" class="text-button" type="button" aria-expanded="false">Runtime</button><button id="edit-models-config" class="text-button" type="button" title="Edit Pi's custom models and providers">Models</button><button id="edit-pi-settings" class="text-button" type="button" title="Open Pi's user settings">Pi settings</button></div>
               <section id="runtime-settings" class="runtime-settings" aria-label="Pi runtime settings" hidden>
                 <div class="popover-heading"><strong>Pi runtime settings</strong><span>Saved in global Pi settings</span></div>
+                <button id="choose-pi-home" class="text-button" type="button" title="Change the Pi configuration directory and restart Pi when idle">Choose Pi configuration folder</button>
+                <button id="restart-pi-runtime" class="text-button" type="button" title="Apply runtime setting changes after running and queued work is finished">Restart Pi runtime</button>
                 <label class="runtime-setting"><input id="auto-compaction" type="checkbox"><span>Automatic context compaction</span></label>
                 <label class="runtime-setting"><input id="auto-retry" type="checkbox"><span>Automatic retry</span></label>
                 <label class="runtime-setting cache-warming-setting" for="cache-warming"><span>Cache warming</span><select id="cache-warming"><option value="off">Off</option><option value="streaming">While streaming</option><option value="idle">Between runs</option></select></label>

@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -64,6 +64,16 @@
         "category": "Pi Chat"
       },
       {
+        "command": "piChat.chooseAgentDir",
+        "title": "Pi Chat: Choose Pi Configuration Folder",
+        "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.restartRuntime",
+        "title": "Pi Chat: Restart Pi Runtime",
+        "category": "Pi Chat"
+      },
+      {
         "command": "piChat.exportDiagnostics",
         "title": "Pi Chat: Export Redacted Diagnostic Report",
         "category": "Pi Chat"
@@ -77,6 +87,12 @@
     "configuration": {
       "title": "Pi Chat",
       "properties": {
+        "piChat.agentDir": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Use this Pi configuration folder for models, credentials, resources, and sessions. Empty uses Pi's default or PI_CODING_AGENT_DIR. Restart the Pi runtime after editing this setting."
+        },
         "piChat.context.followSelection": {
           "type": "boolean",
           "default": true,
