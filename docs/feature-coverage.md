@@ -61,7 +61,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [~] Support queued extension select/confirm/input/editor dialogs, notices, status values, plain-text widgets, and composer text. Select/confirm/input honor Pi abort signals and positive timeout options (capped at 24 hours); the active dialog shows a countdown and cancellation removes only its matching queued or visible request. Concurrent dialog responses are matched by request ID, the queue and request payloads are bounded, pending dialogs are cleared when the Pi session changes, and unanswered requests are cancelled if the chat view closes. Bounded structured tool details and generic checklist cards render in live and saved sessions; arbitrary custom renderers/components and terminal cards remain unavailable.
 - [x] Show and open extension load-error sources and reload Pi resources.
 - [~] Browse registered Pi extension commands and request their argument suggestions; completion code runs only after a user click, and suggestions only fill the composer.
-- [~] Opt-in connections from Pi's MCP configuration, project trust gating, status/login/reconnect through `/mcp`, and generic tool cards; graphical server controls and per-server exposure edits remain in `mcp.json`.
+- [x] Opt-in connections from Pi's MCP configuration; list servers and manage enablement and per-server tool exposure in user settings or trusted workspace overrides; status, login, and reconnect through `/mcp`; generic MCP tool cards.
 - [~] Recognize structured single/parallel/chain subagent results; show bounded run metadata, task text, assistant text/tool-call transcripts, usage, and errors. Per-child stop and live activity controls remain unavailable.
 
 ## Git review, notifications, and privacy

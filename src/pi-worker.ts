@@ -1,7 +1,8 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { statSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { isPiPackageSource } from './package-source';
 import {
   createAgentSession,
@@ -32,6 +33,7 @@ type WorkerInput = {
   argumentPrefix?: string;
   requestId?: string;
   enabled?: boolean;
+  expectedEnabled?: boolean;
   value?: unknown;
   provider?: string;
   providerId?: string;
@@ -43,6 +45,8 @@ type WorkerInput = {
   disabledSkills?: string[];
   source?: string;
   scope?: string;
+  exposure?: string;
+  expectedExposure?: string;
   resourceChanges?: unknown[];
   disabledContextFiles?: unknown;
   autoNameSessions?: boolean;
@@ -135,8 +139,11 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; disabledContextFiles?: unknown } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; disabledContextFiles?: unknown; extensionRoot?: string } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
+const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbsolute(workerOptions.extensionRoot)
+  ? workerOptions.extensionRoot
+  : '';
 let mcpEnabled = workerOptions?.mcpEnabled === true;
 let autoNameSessions = workerOptions?.autoNameSessions !== false;
 function parseContextFilePaths(value: unknown): string[] | undefined {
@@ -1440,6 +1447,195 @@ async function manageConfiguredPackage(input: WorkerInput): Promise<void> {
   }
 }
 
+type McpExposure = 'codemode' | 'deferred' | 'direct' | 'hidden';
+type McpConfigApi = {
+  loadMcpConfig: (options: { agentDir: string; cwd: string; projectTrusted: boolean }) => any;
+  updateMcpServerConfig: (path: string, name: string, patch: { enabled?: boolean; exposure?: McpExposure }, options?: { override?: boolean }) => void;
+};
+let mcpConfigApiPromise: Promise<McpConfigApi> | undefined;
+
+async function getMcpConfigApi(): Promise<McpConfigApi> {
+  if (!extensionRoot) throw new Error('The Pi extension installation path is unavailable.');
+  if (!mcpConfigApiPromise) {
+    const modulePath = join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'extensions', 'mcp', 'config.js');
+    if (!existsSync(modulePath)) throw new Error('The Pi MCP configuration API is unavailable.');
+    mcpConfigApiPromise = import(pathToFileURL(modulePath).href) as Promise<McpConfigApi>;
+  }
+  return await mcpConfigApiPromise;
+}
+
+function resolveSafeMcpConfigPath(scope: 'global' | 'project'): string {
+  const rawAgentDir = getAgentDir();
+  if (!existsSync(rawAgentDir)) mkdirSync(rawAgentDir, { recursive: true, mode: 0o700 });
+  const agentDir = realpathSync(rawAgentDir);
+  let directory = agentDir;
+  if (scope === 'project') {
+    const workspaceRoot = realpathSync(cwd);
+    directory = join(workspaceRoot, '.pi');
+    try {
+      const info = lstatSync(directory);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe project Pi directory.');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      try { mkdirSync(directory, { mode: 0o700 }); } catch (createError) {
+        if ((createError as NodeJS.ErrnoException).code !== 'EEXIST') throw createError;
+      }
+      const info = lstatSync(directory);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe project Pi directory.');
+    }
+    if (realpathSync(directory) !== directory) throw new Error('Unsafe project Pi directory.');
+  }
+  const configPath = join(directory, 'mcp.json');
+  try {
+    const info = lstatSync(configPath);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink > 1 || realpathSync(configPath) !== configPath) {
+      throw new Error('Unsafe Pi MCP configuration file.');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  return configPath;
+}
+
+function isValidMcpRequestId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{24}$/.test(value);
+}
+
+async function listMcpServers(input: WorkerInput): Promise<void> {
+  if (!isValidMcpRequestId(input.requestId)) return;
+  try {
+    const api = await getMcpConfigApi();
+    const projectTrusted = session?.settingsManager?.isProjectTrusted() === true;
+    const loaded = api.loadMcpConfig({ agentDir: getAgentDir(), cwd, projectTrusted });
+    const userConfig = api.loadMcpConfig({ agentDir: getAgentDir(), cwd, projectTrusted: false });
+    const userServers = new Map((Array.isArray(userConfig.servers) ? userConfig.servers : []).map((entry: any) => [entry?.name, entry]));
+    const servers = (Array.isArray(loaded.servers) ? loaded.servers : []).slice(0, 500).flatMap((entry: any) => {
+      const name = entry?.name;
+      const config = entry?.config;
+      if (typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(name) || !config || typeof config !== 'object') return [];
+      const userEntry = entry.scope === 'global' ? userServers.get(name) as any : undefined;
+      return [{
+        name,
+        enabled: config.enabled !== false,
+        exposure: ['codemode', 'deferred', 'direct', 'hidden'].includes(config.exposure) ? config.exposure : 'codemode',
+        scope: entry.scope === 'project' ? 'project' : entry.scope === 'global' ? 'global' : 'extension',
+        hasOverride: typeof entry.override === 'string',
+        transport: typeof config.command === 'string' ? 'stdio' : typeof config.url === 'string' ? 'http' : 'unknown',
+        ...(userEntry?.config ? {
+          globalEnabled: userEntry.config.enabled !== false,
+          globalExposure: ['codemode', 'deferred', 'direct', 'hidden'].includes(userEntry.config.exposure) ? userEntry.config.exposure : 'codemode',
+        } : {}),
+      }];
+    });
+    send('mcp-server-list', { requestId: input.requestId, servers, projectTrusted, mcpEnabled });
+  } catch {
+    send('mcp-server-list', { requestId: input.requestId, servers: [], projectTrusted: false, mcpEnabled, error: 'Could not read the Pi MCP server list.' });
+  }
+}
+
+async function updateMcpServer(input: WorkerInput): Promise<void> {
+  const requestId = input.requestId;
+  const name = input.name;
+  const scope = input.scope;
+  const hasEnabled = typeof input.enabled === 'boolean';
+  const hasExposure = typeof input.exposure === 'string';
+  if (!isValidMcpRequestId(requestId) || typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(name)
+    || (scope !== 'global' && scope !== 'project') || hasEnabled === hasExposure
+    || (hasEnabled && typeof input.expectedEnabled !== 'boolean')
+    || (hasExposure && (!['codemode', 'deferred', 'direct', 'hidden'].includes(input.exposure!)
+      || !['codemode', 'deferred', 'direct', 'hidden'].includes(input.expectedExposure ?? '')))) return;
+  if (busy || authenticatingProvider || reloadingResources) {
+    send('mcp-server-update-result', { requestId, success: false, error: 'Finish the current Pi operation before changing an MCP server.' });
+    return;
+  }
+  const activeSession = session;
+  const projectTrusted = activeSession?.settingsManager?.isProjectTrusted() === true;
+  if (scope === 'project' && !projectTrusted) {
+    send('mcp-server-update-result', { requestId, success: false, error: 'Trust this workspace before saving a workspace-only MCP setting.' });
+    return;
+  }
+  try {
+    const api = await getMcpConfigApi();
+    if (session !== activeSession || busy || authenticatingProvider || reloadingResources) {
+      send('mcp-server-update-result', { requestId, success: false, error: 'The Pi session changed or became busy. Reopen the MCP manager and try again.' });
+      return;
+    }
+    const loaded = api.loadMcpConfig({ agentDir: getAgentDir(), cwd, projectTrusted });
+    const entry = (Array.isArray(loaded.servers) ? loaded.servers : []).find((item: any) => item?.name === name);
+    if (!entry || (scope === 'global' && entry.scope !== 'global') || (scope === 'project' && entry.scope === 'extension')) {
+      send('mcp-server-update-result', { requestId, success: false, error: 'That MCP server is no longer available in the selected settings scope.' });
+      return;
+    }
+    const userConfig = scope === 'global' ? api.loadMcpConfig({ agentDir: getAgentDir(), cwd, projectTrusted: false }) : undefined;
+    const targetEntry = scope === 'global'
+      ? (Array.isArray(userConfig?.servers) ? userConfig.servers : []).find((item: any) => item?.name === name)
+      : entry;
+    if (!targetEntry?.config) {
+      send('mcp-server-update-result', { requestId, success: false, error: 'That MCP server is no longer defined in the selected settings scope.' });
+      return;
+    }
+    const currentEnabled = targetEntry.config.enabled !== false;
+    const currentExposure = (targetEntry.config.exposure ?? 'codemode') as McpExposure;
+    if ((hasEnabled && input.expectedEnabled !== currentEnabled)
+      || (hasExposure && input.expectedExposure !== currentExposure)) {
+      send('mcp-server-update-result', { requestId, success: false, error: 'The MCP setting changed while the manager was open. Reopen it and try again.' });
+      return;
+    }
+    if (mcpEnabled && !activeSession?.reload) {
+      send('mcp-server-update-result', { requestId, success: false, error: 'The active Pi session cannot reload MCP resources.' });
+      return;
+    }
+    const configPath = resolveSafeMcpConfigPath(scope);
+    const override = scope === 'project' && entry.scope === 'global';
+    const patch = hasEnabled ? { enabled: input.enabled! } : { exposure: input.exposure as McpExposure };
+    const previousPatch = hasEnabled
+      ? { enabled: currentEnabled }
+      : { exposure: currentExposure };
+    let saved = false;
+    busy = true;
+    if (mcpEnabled) {
+      reloadingResources = true;
+      send('run-started', { canStop: false, activity: 'Updating MCP server settings' });
+    }
+    try {
+      saved = true;
+      api.updateMcpServerConfig(configPath, name, patch, { override });
+      if (mcpEnabled && activeSession) await activeSession.reload!();
+      send('mcp-server-update-result', { requestId, success: true, name, scope, reloaded: mcpEnabled });
+    } catch {
+      let configurationRestored = !saved;
+      let sessionRestored = !mcpEnabled;
+      if (saved) {
+        try {
+          api.updateMcpServerConfig(configPath, name, previousPatch, { override });
+          configurationRestored = true;
+          if (mcpEnabled && activeSession) await activeSession.reload!();
+          sessionRestored = true;
+        } catch {
+          // Report whether the file rollback succeeded separately from a failed reload.
+        }
+      }
+      send('mcp-server-update-result', {
+        requestId,
+        success: false,
+        error: configurationRestored && sessionRestored
+          ? 'Pi could not apply the MCP setting. The previous setting was restored.'
+          : configurationRestored
+            ? 'The previous MCP setting was saved, but Pi could not confirm the rollback reload. Reopen the session before reconnecting.'
+          : 'Pi could not apply the MCP setting or restore the previous value. Review the MCP configuration before reconnecting.',
+      });
+    } finally {
+      reloadingResources = false;
+      busy = false;
+      if (mcpEnabled) send('run-finished', { aborted: false, mcpConfiguration: true });
+      snapshot();
+      sendOptions();
+    }
+  } catch {
+    send('mcp-server-update-result', { requestId, success: false, error: 'Could not safely update the Pi MCP configuration.' });
+  }
+}
+
 function titleFromFirstPrompt(prompt: string): string {
   const normalized = prompt.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (normalized.length <= 64) return normalized;
@@ -1615,6 +1811,12 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       case 'getOptions':
         sendOptions();
+        return;
+      case 'listMcpServers':
+        await listMcpServers(input);
+        return;
+      case 'updateMcpServer':
+        await updateMcpServer(input);
         return;
       case 'setMcpEnabled': {
         const requestId = input.requestId;

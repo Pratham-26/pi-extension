@@ -7,7 +7,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Persistent Pi sessions with search across messages, thinking, and tool activity; opt-in search across all Pi workspaces; pinning, colors, ordering, cloning, branching, edit-and-continue prompts with text/context/image restoration, deletion, export, configurable local auto-naming, and optional latest-session restore
 - Streamed assistant text, bounded previews for user, assistant, and tool-result images, KaTeX math and Mermaid diagrams, collapsible thinking blocks, a focused transcript toggle, live and persisted tool-call/result cards with saved per-tool expansion preferences, line-level Pi-context edit diffs, editable follow-up/steering queues, and stop controls
 - Searchable model catalog with provider sign-in, custom `models.json` editing, Pi runtime controls, securely stored custom environment variables, per-workspace selection of discovered `AGENTS.md` context files, confirmed catalog refresh, thinking levels, and presets
-- Per-session tool selection, skill invocation, extension command suggestions, opt-in MCP servers, confirmed Pi package install/update/remove, and per-resource enable/disable controls; prompt template argument forms, previews, create/edit, and resource diagnostics/reload
+- Per-session tool selection, skill invocation, extension command suggestions, opt-in MCP servers with per-server enablement and exposure controls, confirmed Pi package install/update/remove, and per-resource enable/disable controls; prompt template argument forms, previews, create/edit, and resource diagnostics/reload
 - Workspace `@` file search, file/folder/image attachments with expandable text-context previews, selected-line and active-file context, a persistent active-file pin, diagnostics, Git status, and selected Git diff quoting; optional automatic diagnostics/Git context and numbered line ranges
 - Git branch and changed-file review, bounded diffs, editable commit-message/PR-description prompts, and confirmation-gated discard of tracked unstaged changes while preserving staged content
 - Create a Git worktree on a new local branch, review the destination and checkout-hook/filter warning, optionally copy explicitly selected ignored files without overwriting, and optionally open it in a separate VS Code window; remove clean worktrees with a separate confirmation
@@ -29,7 +29,9 @@ Use **Pi Chat: Manage Pi Runtime Environment Variables** to add or remove custom
 
 Pi's configured tools and extensions retain the same local permissions they have when Pi runs directly. This extension does not add an OS sandbox; use the **Read-only** or **None** tool presets when you want to limit agent actions.
 
-MCP connections are disabled by default. Enabling them requires confirmation because configured servers can run local commands or contact remote services. Project-local Pi resources remain behind Pi's workspace trust decision.
+MCP connections are disabled by default. Enabling a server requires confirmation because configured servers can run local commands or contact remote services. The MCP manager can change enablement and tool exposure in user settings or, after Pi trust, a workspace-only override. Project-local Pi resources remain behind Pi's workspace trust decision.
+
+The extension bundles the Pi SDK version listed in `package.json`. Updating a separately installed Pi CLI with `pi update` does not change the runtime bundled in this extension; install a newer extension build to update that SDK.
 
 ## Develop
 
@@ -41,10 +43,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.49.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.50.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.49.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.50.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.

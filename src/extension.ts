@@ -53,6 +53,17 @@ type ProviderSetup = {
   authLabel: string;
 };
 
+type McpServerChoice = {
+  name: string;
+  enabled: boolean;
+  exposure: 'codemode' | 'deferred' | 'direct' | 'hidden';
+  scope: 'global' | 'project';
+  hasOverride: boolean;
+  transport: 'stdio' | 'http' | 'unknown';
+  globalEnabled?: boolean;
+  globalExposure?: 'codemode' | 'deferred' | 'direct' | 'hidden';
+};
+
 type GitChangeRecord = {
   uri?: vscode.Uri;
   resourceUri?: vscode.Uri;
@@ -199,6 +210,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.restartRuntime', () => provider.restartPiRuntime()),
     vscode.commands.registerCommand('piChat.exportDiagnostics', () => provider.exportDiagnostics()),
     vscode.commands.registerCommand('piChat.openLogs', () => provider.openLogs()),
+    vscode.commands.registerCommand('piChat.manageMcpServers', () => provider.manageMcpServers()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.restartRuntime()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('piChat.agentDir')) provider.onAgentDirConfigurationChanged();
@@ -250,6 +262,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private settingsConfigPath = '';
   private mcpConfigPath = '';
   private pendingMcpSetting?: { worker: Worker; requestId: string; enabled: boolean; previous: boolean };
+  private pendingMcpServerRequests = new Map<string, { worker: Worker; resolve: (message: RuntimeMessage | undefined) => void; timer: NodeJS.Timeout }>();
+  private mcpServerManagementInFlight = false;
   private pendingPiResourcePicker?: { worker: Worker; requestId: string };
   private pendingExtensionUiRequestIds = new Set<string>();
   private providerAuthPromptCancels = new Map<string, { worker: Worker; cancel: () => void }>();
@@ -302,6 +316,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.settingsConfigPath = '';
     this.mcpConfigPath = '';
     this.failPendingMcpSetting(worker);
+    this.failPendingMcpServerRequests(worker);
     if (worker) this.stopWorker(worker);
   }
 
@@ -834,6 +849,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.latestSessionOpenAttempted = false;
     this.sessionInteractionStarted = false;
     this.failPendingMcpSetting(previous);
+    this.failPendingMcpServerRequests(previous);
     if (previous) this.stopWorker(previous);
     void this.ensureRuntime();
     this.publishPinnedActiveFile();
@@ -906,6 +922,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.clearRunningSessionLease();
     this.pendingPiResourcePicker = undefined;
     this.failPendingMcpSetting(previous);
+    this.failPendingMcpServerRequests(previous);
     if (previous) this.stopWorker(previous);
     this.knownSessionPaths.clear();
     this.sessionWorkspaceByPath.clear();
@@ -959,6 +976,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         env: workerEnv,
         workerData: {
           cwd,
+          extensionRoot: this.context.extensionUri.fsPath,
           autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
           mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
           disabledContextFiles: this.readDisabledContextFiles(),
@@ -1050,6 +1068,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         void this.handleMcpOpenUrl(message, worker);
       } else if (message.type === 'mcp-setting-applied' || message.type === 'mcp-setting-failed') {
         void this.handleMcpSettingResult(message, worker);
+      } else if (message.type === 'mcp-server-list' || message.type === 'mcp-server-update-result') {
+        this.resolveMcpServerRequest(message, worker);
       } else if (message.type === 'context-files-applied' || message.type === 'context-files-failed') {
         void this.handleContextFileSelectionResult(message, worker);
       } else if (message.type === 'session-exported') {
@@ -1205,6 +1225,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.cancelProviderAuthPrompts(worker);
       }
       this.failPendingMcpSetting(worker);
+      this.failPendingMcpServerRequests(worker);
       if (this.workerWorkspace === cwd && code !== 0) {
         this.recordDiagnostic('Pi worker exited unexpectedly');
         this.post({ type: 'runtime-error', message: `The Pi runtime exited with code ${code}.` });
@@ -1588,6 +1609,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openMcpConfig':
         await this.openMcpConfig();
+        return;
+      case 'manageMcpServers':
+        await this.manageMcpServers();
         return;
       case 'setMcpEnabled':
         await this.setMcpEnabled(message);
@@ -2735,6 +2759,193 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.pendingMcpSetting = { worker, requestId, enabled: message.enabled, previous: current };
     this.post({ type: 'mcp-setting-pending' });
     worker.postMessage({ type: 'setMcpEnabled', enabled: message.enabled, requestId });
+  }
+
+  async manageMcpServers(): Promise<void> {
+    if (this.mcpServerManagementInFlight) return;
+    const worker = this.worker;
+    if (!worker || !this.activeSessionPath) {
+      void vscode.window.showInformationMessage('Open a Pi session before managing MCP servers.');
+      return;
+    }
+    if (this.runtimeBusy || this.queuedWorkCount > 0) {
+      void vscode.window.showInformationMessage('Finish the current and queued Pi work before changing MCP servers.');
+      return;
+    }
+    this.mcpServerManagementInFlight = true;
+    try {
+      const response = await this.requestMcpServerWorker(worker, 'listMcpServers');
+      if (!response || this.worker !== worker) {
+        void vscode.window.showErrorMessage('Pi did not return the MCP server list. Try again.');
+        return;
+      }
+      if (response.error) {
+        void vscode.window.showErrorMessage(typeof response.error === 'string' ? response.error.slice(0, 300) : 'Could not read the Pi MCP server list.');
+        return;
+      }
+      const servers = Array.isArray(response.servers) ? response.servers.slice(0, 500).flatMap((value): McpServerChoice[] => {
+        if (!value || typeof value !== 'object') return [];
+        const item = value as Record<string, unknown>;
+        if (typeof item.name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(item.name)
+          || typeof item.enabled !== 'boolean'
+          || !['codemode', 'deferred', 'direct', 'hidden'].includes(String(item.exposure))
+          || (item.scope !== 'global' && item.scope !== 'project')
+          || !['stdio', 'http', 'unknown'].includes(String(item.transport))) return [];
+        return [{
+          name: item.name,
+          enabled: item.enabled,
+          exposure: item.exposure as McpServerChoice['exposure'],
+          scope: item.scope,
+          hasOverride: item.hasOverride === true,
+          transport: item.transport as McpServerChoice['transport'],
+          ...(typeof item.globalEnabled === 'boolean' ? { globalEnabled: item.globalEnabled } : {}),
+          ...(['codemode', 'deferred', 'direct', 'hidden'].includes(String(item.globalExposure))
+            ? { globalExposure: item.globalExposure as McpServerChoice['exposure'] }
+            : {}),
+        }];
+      }) : [];
+      if (servers.length === 0) {
+        void vscode.window.showInformationMessage('No configured MCP servers are available in this Pi session.');
+        return;
+      }
+      const selected = await vscode.window.showQuickPick(servers.map((server) => ({
+        label: server.name,
+        description: `${server.enabled ? 'Enabled' : 'Disabled'} · ${server.exposure} · ${server.scope === 'project' ? 'workspace config' : 'user config'}${server.hasOverride ? ' · workspace override' : ''} · ${server.transport}`,
+        server,
+      })), { placeHolder: 'Choose a configured MCP server', title: 'Pi Chat: Manage MCP Servers', matchOnDescription: true });
+      if (!selected || this.worker !== worker) return;
+
+      const action = await vscode.window.showQuickPick([
+        { label: selected.server.enabled ? 'Disable this server' : 'Enable this server', description: 'Save its connection state', action: 'enabled' as const },
+        { label: 'Change tool exposure…', description: 'Choose how Pi can make its tools available', action: 'exposure' as const },
+      ] as Array<vscode.QuickPickItem & { action: 'enabled' | 'exposure' }>, { placeHolder: `Choose a setting for ${selected.server.name}` });
+      if (!action || this.worker !== worker) return;
+
+      const trusted = response.projectTrusted === true;
+      const scopeChoices: Array<{ label: string; description: string; value: 'global' | 'project' }> = [];
+      if (selected.server.scope === 'project') {
+        scopeChoices.push({ label: 'This workspace', description: 'Change the project Pi MCP configuration', value: 'project' });
+      } else {
+        scopeChoices.push({
+          label: 'User configuration',
+          description: selected.server.hasOverride
+            ? `Change the global entry (currently ${selected.server.globalEnabled === false ? 'disabled' : 'enabled'} · ${selected.server.globalExposure ?? 'codemode'}); a workspace override may still take precedence`
+            : 'Apply this setting to Pi sessions using your global configuration',
+          value: 'global',
+        });
+        if (trusted) scopeChoices.push({
+          label: 'This workspace only',
+          description: `Save a project override for this trusted workspace (currently ${selected.server.enabled ? 'enabled' : 'disabled'} · ${selected.server.exposure})`,
+          value: 'project',
+        });
+      }
+      let scope = scopeChoices[0]?.value;
+      if (scopeChoices.length > 1) {
+        const choice = await vscode.window.showQuickPick(scopeChoices, { placeHolder: `Where should ${selected.server.name} change?` });
+        if (!choice || this.worker !== worker) return;
+        scope = choice.value;
+      }
+      if (!scope) return;
+
+      let patch: { enabled?: boolean; exposure?: McpServerChoice['exposure'] };
+      let expected: { expectedEnabled?: boolean; expectedExposure?: McpServerChoice['exposure'] };
+      let changeDescription: string;
+      if (action.action === 'enabled') {
+        const currentEnabled = scope === 'global' ? selected.server.globalEnabled ?? selected.server.enabled : selected.server.enabled;
+        const enabled = !currentEnabled;
+        patch = { enabled };
+        expected = { expectedEnabled: currentEnabled };
+        changeDescription = enabled ? 'enable the server' : 'disable the server';
+      } else {
+        const exposureOptions: Array<{ label: string; description: string; value: McpServerChoice['exposure'] }> = [
+          { label: 'Code mode', description: 'Available to Pi code mode scripts', value: 'codemode' },
+          { label: 'Deferred', description: 'Loaded when Pi searches for tools, then callable by the model', value: 'deferred' },
+          { label: 'Direct', description: 'Declared to the model like other tools', value: 'direct' },
+          { label: 'Hidden', description: 'Registered but unavailable to the model', value: 'hidden' },
+        ];
+        const exposure = await vscode.window.showQuickPick(exposureOptions, { placeHolder: `Choose tool exposure for ${selected.server.name}` });
+        if (!exposure || this.worker !== worker) return;
+        const currentExposure = scope === 'global' ? selected.server.globalExposure ?? selected.server.exposure : selected.server.exposure;
+        if (exposure.value === currentExposure) return;
+        patch = { exposure: exposure.value };
+        expected = { expectedExposure: currentExposure };
+        changeDescription = `change tool exposure to ${exposure.value}`;
+      }
+      const scopeLabel = scope === 'project' ? 'this workspace' : 'your user configuration';
+      const impact = patch.enabled === true
+        ? ' Enabling may launch a local server process or contact a remote service.'
+        : patch.exposure === 'direct'
+          ? ' Direct tools are available to the model.'
+          : patch.exposure === 'hidden'
+            ? ' Hidden tools cannot be called by the model.'
+            : '';
+      const confirmationLabel = 'Apply MCP setting';
+      const answer = await vscode.window.showWarningMessage(
+        `Confirm ${changeDescription} for MCP server “${selected.server.name}” in ${scopeLabel}?${impact}`,
+        { modal: true },
+        confirmationLabel,
+      );
+      if (answer !== confirmationLabel) return;
+      if (this.worker !== worker || this.runtimeBusy || this.queuedWorkCount > 0) {
+        void vscode.window.showInformationMessage('The Pi runtime changed or became busy. Reopen the MCP manager and try again.');
+        return;
+      }
+      const result = await this.requestMcpServerWorker(worker, 'updateMcpServer', {
+        name: selected.server.name,
+        scope,
+        ...expected,
+        ...patch,
+      });
+      if (!result || this.worker !== worker) {
+        void vscode.window.showErrorMessage('Pi did not confirm the MCP setting change.');
+        return;
+      }
+      if (result.success !== true) {
+        void vscode.window.showErrorMessage(typeof result.error === 'string' ? result.error.slice(0, 300) : 'Pi could not update that MCP setting.');
+        return;
+      }
+      const successMessage = `Updated ${selected.server.name} in ${scopeLabel}.${result.reloaded === true ? ' Pi reloaded MCP resources.' : ' The change takes effect when MCP is enabled or a new Pi session opens.'}`;
+      if (this.view?.visible) this.post({ type: 'notice', message: successMessage });
+      else void vscode.window.showInformationMessage(successMessage);
+    } finally {
+      this.mcpServerManagementInFlight = false;
+    }
+  }
+
+  private requestMcpServerWorker(worker: Worker, type: 'listMcpServers' | 'updateMcpServer', payload: Record<string, unknown> = {}): Promise<RuntimeMessage | undefined> {
+    const requestId = randomBytes(12).toString('hex');
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingMcpServerRequests.delete(requestId);
+        resolve(undefined);
+      }, type === 'updateMcpServer' ? 90_000 : 15_000);
+      this.pendingMcpServerRequests.set(requestId, { worker, resolve, timer });
+      try {
+        worker.postMessage({ type, ...payload, requestId });
+      } catch {
+        clearTimeout(timer);
+        this.pendingMcpServerRequests.delete(requestId);
+        resolve(undefined);
+      }
+    });
+  }
+
+  private resolveMcpServerRequest(message: RuntimeMessage, worker: Worker): void {
+    const requestId = typeof message.requestId === 'string' && /^[a-f0-9]{24}$/.test(message.requestId) ? message.requestId : '';
+    const pending = requestId ? this.pendingMcpServerRequests.get(requestId) : undefined;
+    if (!pending || pending.worker !== worker || this.worker !== worker) return;
+    clearTimeout(pending.timer);
+    this.pendingMcpServerRequests.delete(requestId);
+    pending.resolve(message);
+  }
+
+  private failPendingMcpServerRequests(worker?: Worker): void {
+    for (const [requestId, pending] of this.pendingMcpServerRequests) {
+      if (worker && pending.worker !== worker) continue;
+      clearTimeout(pending.timer);
+      this.pendingMcpServerRequests.delete(requestId);
+      pending.resolve(undefined);
+    }
   }
 
   private recordDiagnostic(category: DiagnosticCategory): void {
@@ -4054,8 +4265,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
                 <p class="runtime-settings-note">The selection is saved per workspace and applies to future prompts. Applying it reloads Pi resources; enabled extensions may run during reload.</p>
                 <div class="popover-heading extension-command-heading"><strong>MCP servers</strong><span>Configured connections are off until you enable them here</span></div>
                 <label class="runtime-setting"><input id="mcp-enabled" type="checkbox"><span>Connect configured MCP servers</span></label>
+                <button id="manage-mcp-servers" class="text-button" type="button" title="Manage configured server connections and tool exposure">Manage configured servers</button>
                 <button id="edit-mcp-config" class="text-button" type="button">Open global mcp.json</button>
-                <p class="runtime-settings-note">Enabled stdio entries can launch local programs; HTTP entries contact remote services. Pi’s project trust rules still apply. Use <code>/mcp</code> to inspect connections and sign in; edit the file and reload resources to change server settings.</p>
+                <p class="runtime-settings-note">Enabling a server can launch a local program or contact a remote service. Workspace settings require Pi project trust. Use <code>/mcp</code> to inspect connections and sign in.</p>
                 <button id="export-diagnostics" class="text-button" type="button">Export redacted diagnostic report</button>
                 <p class="runtime-settings-note">The report includes versions and generic error categories. It omits prompts, paths, file names, provider IDs, credentials, and environment variables.</p>
               </section>

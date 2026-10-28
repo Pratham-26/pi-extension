@@ -3540,6 +3540,7 @@ ui.editPiSettings.addEventListener('click', () => post('openPiSettings'));
 ui.choosePiAgentDir.addEventListener('click', () => post('choosePiAgentDir'));
 ui.restartPiRuntime.addEventListener('click', () => post('restartPiRuntime'));
 ui.editMcpConfig.addEventListener('click', () => post('openMcpConfig'));
+el('manage-mcp-servers').addEventListener('click', () => post('manageMcpServers'));
 el('export-diagnostics').addEventListener('click', () => post('exportDiagnostics'));
 ui.mcpEnabled.addEventListener('change', () => {
   state.mcpSettingPending = true;

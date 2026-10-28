@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -82,6 +82,11 @@
       {
         "command": "piChat.manageRuntimeEnvironment",
         "title": "Pi Chat: Manage Pi Runtime Environment Variables",
+        "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.manageMcpServers",
+        "title": "Pi Chat: Manage MCP Servers",
         "category": "Pi Chat"
       },
       {
