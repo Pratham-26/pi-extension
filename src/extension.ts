@@ -75,6 +75,9 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_CHARS = 40_000;
 const MAX_GIT_REVIEW_FILES = 500;
 const MAX_GIT_DIFF_CHARS = 500_000;
+const MAX_GIT_DRAFT_CHARS = 30_000;
+const MAX_GIT_DRAFT_FILES = 24;
+const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new PiChatViewProvider(context);
@@ -419,6 +422,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'quoteGitDiffSelection':
         this.quoteGitDiffSelection();
+        return;
+      case 'draftGitChanges':
+        await this.draftGitChanges(message.kind);
         return;
       case 'discardGitChange':
         await this.discardGitChange(message.path);
@@ -1268,6 +1274,121 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         context: content.slice(0, MAX_ATTACHMENT_CHARS),
       } satisfies Attachment,
     });
+  }
+
+  private async draftGitChanges(value: unknown): Promise<void> {
+    const kind = value === 'commit' || value === 'pullRequest' ? value : undefined;
+    if (!kind) return;
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      this.post({ type: 'notice', message: 'Open a workspace before preparing a Git draft.', isError: true });
+      return;
+    }
+    try {
+      const handle = await this.getGitRepository(workspace);
+      if (!handle) {
+        this.post({ type: 'notice', message: 'This workspace is not inside a Git repository.', isError: true });
+        return;
+      }
+      const { repository } = handle;
+      await repository.status?.();
+      const gitState = repository.state;
+      const changes = new Map<string, { uri: vscode.Uri; statuses: Set<string>; untracked: boolean }>();
+      let omittedPaths = false;
+      const collect = (records: GitChangeRecord[] | undefined, label: string, untracked = false) => {
+        for (const record of records ?? []) {
+          const uri = record.uri ?? record.resourceUri;
+          const relativePath = uri ? this.workspaceRelativePath(uri, workspace) : undefined;
+          if (!uri || !relativePath) continue;
+          if (!changes.has(relativePath) && changes.size >= MAX_GIT_REVIEW_FILES) {
+            omittedPaths = true;
+            continue;
+          }
+          const item = changes.get(relativePath) ?? { uri, statuses: new Set<string>(), untracked: false };
+          item.statuses.add(label);
+          item.untracked ||= untracked;
+          changes.set(relativePath, item);
+        }
+      };
+      collect(gitState.indexChanges, 'staged');
+      collect(gitState.workingTreeChanges, 'modified');
+      collect(gitState.untrackedChanges, 'untracked', true);
+      collect(gitState.mergeChanges, 'conflict');
+      if (!changes.size) {
+        this.post({ type: 'notice', message: 'There are no Git changes to include in a draft.' });
+        return;
+      }
+
+      const listedPaths = [...changes.entries()].slice(0, 12)
+        .map(([relativePath, item]) => `${JSON.stringify(relativePath.slice(0, 120))} (${[...item.statuses].join(', ')})`);
+      const header = [
+        `Git changes on branch: ${String(gitState.HEAD?.name ?? '(detached HEAD)').slice(0, 200)}`,
+        `Changed files: ${changes.size}${omittedPaths ? '+' : ''}`,
+        ...listedPaths,
+        ...(changes.size > listedPaths.length || omittedPaths ? ['Additional paths are omitted from this preview.'] : []),
+        '',
+        'Bounded diff and text preview follows. Content may include sensitive values; review it before sending.',
+      ].join('\n').slice(0, MAX_GIT_DRAFT_CHARS - 64);
+      const sections: string[] = [header];
+      let usedChars = header.length;
+      let truncated = omittedPaths;
+      for (const [relativePath, item] of [...changes.entries()].slice(0, MAX_GIT_DRAFT_FILES)) {
+        if (usedChars >= MAX_GIT_DRAFT_CHARS) { truncated = true; break; }
+        let detail = '';
+        if (item.untracked) {
+          try {
+            const stat = await vscode.workspace.fs.stat(item.uri);
+            if ((stat.type & vscode.FileType.SymbolicLink) !== 0) {
+              detail = '[Symbolic link; content omitted.]';
+            } else if ((stat.type & vscode.FileType.File) === 0) {
+              detail = '[Non-file untracked item; content omitted.]';
+            } else if (stat.size > MAX_UNTRACKED_DRAFT_BYTES) {
+              detail = '[Untracked file exceeds the preview size limit; content omitted.]';
+            } else {
+              const bytes = await vscode.workspace.fs.readFile(item.uri);
+              detail = bytes.includes(0)
+                ? '[Binary untracked file; content omitted.]'
+                : `Untracked file content:\n${Buffer.from(bytes).toString('utf8')}`;
+            }
+          } catch {
+            detail = '[Untracked file content could not be read.]';
+          }
+        } else {
+          const repositoryPath = this.relativePathFrom(repository.rootUri, item.uri);
+          if (repositoryPath) {
+            try {
+              const diff = await repository.diffWithHEAD?.(repositoryPath);
+              detail = typeof diff === 'string' && diff.trim() ? diff : '[No text diff available.]';
+            } catch {
+              detail = '[Diff could not be read.]';
+            }
+          }
+        }
+        const section = `\n\n--- ${JSON.stringify(relativePath.slice(0, 512))} (${[...item.statuses].join(', ')}) ---\n${detail}`;
+        const remaining = MAX_GIT_DRAFT_CHARS - usedChars;
+        sections.push(section.slice(0, remaining));
+        usedChars += Math.min(section.length, remaining);
+        if (section.length > remaining) { truncated = true; break; }
+      }
+      if (changes.size > MAX_GIT_DRAFT_FILES) truncated = true;
+      const combinedContext = sections.join('');
+      const truncationNotice = '\n\n[Git context truncated at the preview limit.]';
+      const boundedContext = truncated
+        ? `${combinedContext.slice(0, Math.max(0, MAX_GIT_DRAFT_CHARS - truncationNotice.length))}${truncationNotice}`
+        : combinedContext.slice(0, MAX_GIT_DRAFT_CHARS);
+      const attachment: Attachment = {
+        id: randomBytes(8).toString('hex'),
+        label: kind === 'commit' ? 'Git changes · commit draft' : 'Git changes · PR draft',
+        path: 'Git review',
+        context: boundedContext,
+      };
+      const draftPrompt = kind === 'commit'
+        ? 'Draft one concise Conventional Commit subject using the attached Git changes. Return only the subject line. Do not claim tests were run.'
+        : 'Draft a pull request description from the attached Git changes with Summary, Changes, Testing, and Risks sections. Say “Not run” for testing unless the attached context provides evidence. Do not invent results or claims.';
+      this.post({ type: 'attachment', attachment, draftPrompt });
+    } catch {
+      this.post({ type: 'notice', message: 'Could not prepare Git changes for a draft. Refresh the Git review and try again.', isError: true });
+    }
   }
 
   private async attachUris(rawUris: string[]): Promise<void> {
@@ -2140,6 +2261,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       <aside id="git-review-panel" class="history-panel git-review-panel" aria-label="Git changes" hidden>
         <div class="history-heading"><span>Git changes</span><div class="git-review-actions"><button id="quote-git-diff-selection" class="text-button" type="button" title="Attach selected lines from the open Git diff">Quote selection</button><button id="refresh-git-changes" class="icon-button small" type="button" title="Refresh Git changes" aria-label="Refresh Git changes">↻</button><button id="close-git-review" class="icon-button small" type="button" title="Close" aria-label="Close Git changes">×</button></div></div>
         <div id="git-change-summary" class="git-change-summary">Checking workspace…</div>
+        <div class="git-draft-actions"><button id="draft-git-commit" class="text-button" type="button" disabled>Draft commit message</button><button id="draft-git-pr" class="text-button" type="button" disabled>Draft PR description</button></div>
         <div id="git-change-list" class="session-list"></div>
         <div id="git-change-empty" class="session-empty" hidden>No Git changes in this workspace.</div>
       </aside>

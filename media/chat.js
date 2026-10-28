@@ -91,6 +91,8 @@ const ui = {
   gitChangeSummary: el('git-change-summary'),
   gitChangeList: el('git-change-list'),
   gitChangeEmpty: el('git-change-empty'),
+  gitDraftCommit: el('draft-git-commit'),
+  gitDraftPr: el('draft-git-pr'),
   empty: el('empty-state'),
   prompt: el('prompt'),
   send: el('send'),
@@ -1190,6 +1192,8 @@ function renderBookmarks() {
 
 function renderGitChanges() {
   ui.gitChangeList.replaceChildren();
+  ui.gitDraftCommit.disabled = !state.gitReviewAvailable || state.gitChanges.length === 0;
+  ui.gitDraftPr.disabled = !state.gitReviewAvailable || state.gitChanges.length === 0;
   if (!state.gitReviewAvailable) {
     ui.gitChangeSummary.textContent = state.gitSummary?.message || 'Git status is unavailable.';
     ui.gitChangeEmpty.hidden = true;
@@ -2054,6 +2058,13 @@ window.addEventListener('message', (event) => {
         ui.notice.hidden = true;
         renderAttachments();
       }
+      if (typeof data.draftPrompt === 'string') {
+        const current = ui.prompt.value;
+        const prompt = data.draftPrompt.slice(0, 2000);
+        ui.prompt.value = `${current}${current.trim() ? '\n\n' : ''}${prompt}`.slice(0, 20_000);
+        ui.prompt.dispatchEvent(new Event('input'));
+        ui.prompt.focus();
+      }
       break;
     case 'pinned-file':
       state.pinnedFileEnabled = Boolean(data.enabled);
@@ -2180,6 +2191,8 @@ ui.gitReviewToggle.addEventListener('click', () => {
 });
 el('refresh-git-changes').addEventListener('click', () => post('refreshGitChanges'));
 el('quote-git-diff-selection').addEventListener('click', () => post('quoteGitDiffSelection'));
+ui.gitDraftCommit.addEventListener('click', () => post('draftGitChanges', { kind: 'commit' }));
+ui.gitDraftPr.addEventListener('click', () => post('draftGitChanges', { kind: 'pullRequest' }));
 el('close-git-review').addEventListener('click', () => {
   ui.gitReviewPanel.hidden = true;
   ui.gitReviewToggle.setAttribute('aria-expanded', 'false');
