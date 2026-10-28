@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -77,6 +77,11 @@
       {
         "command": "piChat.chooseAgentDir",
         "title": "Pi Chat: Choose Pi Configuration Folder",
+        "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.manageRuntimeEnvironment",
+        "title": "Pi Chat: Manage Pi Runtime Environment Variables",
         "category": "Pi Chat"
       },
       {

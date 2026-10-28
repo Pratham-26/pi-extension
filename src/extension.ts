@@ -122,6 +122,26 @@ const MAX_RUNNING_SESSION_RECORDS = 200;
 const RUNNING_SESSION_RECORD_TTL_MS = 12_000;
 const MAX_GIT_BRANCHES_FOR_PICKER = 500;
 const GIT_WORKTREE_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+const RUNTIME_ENV_SECRET_PREFIX = 'piChat.runtimeEnv:';
+const MAX_RUNTIME_ENV_VARIABLES = 32;
+const MAX_RUNTIME_ENV_VALUE_CHARS = 4096;
+const MAX_RUNTIME_ENV_TOTAL_CHARS = 8192;
+const MAX_WINDOWS_WORKER_ENVIRONMENT_CHARS = 30_000;
+const RESERVED_RUNTIME_ENV_NAMES = new Set([
+  'PATH', 'PATHEXT', 'COMSPEC', 'SYSTEMROOT', 'WINDIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR', 'PI_CODING_AGENT_DIR', 'PI_OFFLINE',
+  'NODE_OPTIONS', 'NODE_PATH', 'NODE_TLS_REJECT_UNAUTHORIZED', 'ELECTRON_RUN_AS_NODE',
+  'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH',
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+]);
+
+function isAllowedRuntimeEnvironmentName(value: string): boolean {
+  return /^[A-Z_][A-Z0-9_]{0,127}$/.test(value)
+    && !RESERVED_RUNTIME_ENV_NAMES.has(value)
+    && !value.startsWith('GIT_CONFIG_')
+    && !value.startsWith('VSCODE_')
+    && !value.startsWith('ELECTRON_');
+}
 
 function readPiOfflineMode(): PiOfflineMode {
   const value = vscode.workspace.getConfiguration('piChat').get<string>('offlineMode', 'inherit');
@@ -175,6 +195,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.removeWorktree', () => provider.removeGitWorktreeSession()),
     vscode.commands.registerCommand('piChat.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.pi-chat-vscode')),
     vscode.commands.registerCommand('piChat.chooseAgentDir', () => provider.chooseAgentDir()),
+    vscode.commands.registerCommand('piChat.manageRuntimeEnvironment', () => provider.manageRuntimeEnvironment()),
     vscode.commands.registerCommand('piChat.restartRuntime', () => provider.restartPiRuntime()),
     vscode.commands.registerCommand('piChat.exportDiagnostics', () => provider.exportDiagnostics()),
     vscode.commands.registerCommand('piChat.openLogs', () => provider.openLogs()),
@@ -194,6 +215,8 @@ export function deactivate(): void {
 class PiChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private worker?: Worker;
+  private runtimeStartInFlight?: Promise<void>;
+  private runtimeStartGeneration = 0;
   private workerWorkspace?: string;
   private workerAgentDirSetting = '';
   private workerOfflineModeSetting: PiOfflineMode = 'inherit';
@@ -782,6 +805,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   restartRuntime(): void {
+    this.runtimeStartGeneration += 1;
     const previous = this.worker;
     this.workerAgentDirSetting = '';
     this.workerOfflineModeSetting = 'inherit';
@@ -815,7 +839,48 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.publishPinnedActiveFile();
   }
 
-  private async ensureRuntime(): Promise<void> {
+  private async readCustomRuntimeEnvironment(): Promise<NodeJS.Dict<string>> {
+    const names = (await this.context.secrets.keys())
+      .filter((key) => key.startsWith(RUNTIME_ENV_SECRET_PREFIX))
+      .map((key) => key.slice(RUNTIME_ENV_SECRET_PREFIX.length))
+      .filter(isAllowedRuntimeEnvironmentName)
+      .sort();
+    if (names.length > MAX_RUNTIME_ENV_VARIABLES) throw new Error('Too many stored runtime environment variables.');
+    const environment: NodeJS.Dict<string> = {};
+    let totalChars = 0;
+    for (const name of names) {
+      const value = await this.context.secrets.get(`${RUNTIME_ENV_SECRET_PREFIX}${name}`);
+      if (value === undefined) continue;
+      if (value.length > MAX_RUNTIME_ENV_VALUE_CHARS || value.includes('\0')) {
+        throw new Error(`The stored value for ${name} is invalid or too large.`);
+      }
+      totalChars += name.length + value.length + 1;
+      if (totalChars > MAX_RUNTIME_ENV_TOTAL_CHARS) throw new Error('Stored runtime environment values exceed the size limit.');
+      environment[name] = value;
+    }
+    return environment;
+  }
+
+  private ensureRuntime(): Promise<void> {
+    if (this.runtimeStartInFlight) {
+      const generation = this.runtimeStartGeneration;
+      const pending = this.runtimeStartInFlight;
+      return pending.then(() => {
+        if (generation !== this.runtimeStartGeneration) return this.ensureRuntime();
+      });
+    }
+
+    const generation = this.runtimeStartGeneration;
+    const start = this.startRuntime(generation);
+    const tracked = start.finally(() => {
+      if (this.runtimeStartInFlight === tracked) this.runtimeStartInFlight = undefined;
+      if (generation !== this.runtimeStartGeneration) void this.ensureRuntime();
+    });
+    this.runtimeStartInFlight = tracked;
+    return tracked;
+  }
+
+  private async startRuntime(generation: number): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
       this.post({ type: 'workspace', hasWorkspace: false });
@@ -834,6 +899,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
+    this.workerWorkspace = undefined;
     this.queuedWorkCount = 0;
     this.runtimeActivity = '';
     this.sessionListForRunningStatus = [];
@@ -852,7 +918,16 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.pendingMcpSetting = undefined;
     this.activeSessionPath = '';
 
-    this.workerWorkspace = cwd;
+    let customRuntimeEnvironment: NodeJS.Dict<string>;
+    try {
+      customRuntimeEnvironment = await this.readCustomRuntimeEnvironment();
+    } catch {
+      if (generation !== this.runtimeStartGeneration) return;
+      void vscode.window.showErrorMessage('Could not load the securely stored Pi runtime environment. The Pi worker was not started.');
+      return;
+    }
+    if (generation !== this.runtimeStartGeneration) return;
+
     const workerUri = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'pi-worker.mjs');
     const configuredAgentDir = vscode.workspace.getConfiguration('piChat').get<string>('agentDir', '').trim();
     const offlineMode = readPiOfflineMode();
@@ -860,18 +935,40 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     for (const [key, value] of Object.entries(process.env)) {
       if (typeof value === 'string') workerEnv[key] = value;
     }
+    for (const [name, value] of Object.entries(customRuntimeEnvironment)) {
+      if (value === undefined) continue;
+      if (process.platform === 'win32') {
+        for (const inheritedName of Object.keys(workerEnv)) {
+          if (inheritedName.toUpperCase() === name) delete workerEnv[inheritedName];
+        }
+      }
+      workerEnv[name] = value;
+    }
     if (configuredAgentDir) workerEnv.PI_CODING_AGENT_DIR = configuredAgentDir;
     if (offlineMode === 'offline') workerEnv.PI_OFFLINE = '1';
     else if (offlineMode === 'online') delete workerEnv.PI_OFFLINE;
-    const worker = new Worker(workerUri.fsPath, {
-      env: workerEnv,
-      workerData: {
-        cwd,
-        autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
-        mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
-        disabledContextFiles: this.readDisabledContextFiles(),
-      },
-    });
+    const environmentChars = Object.entries(workerEnv)
+      .reduce((total, [key, value]) => total + key.length + (value?.length ?? 0) + 2, 1);
+    if (process.platform === 'win32' && environmentChars > MAX_WINDOWS_WORKER_ENVIRONMENT_CHARS) {
+      void vscode.window.showErrorMessage('The Pi worker environment is too large for Windows. Reduce inherited or custom environment variables and restart.');
+      return;
+    }
+    let worker: Worker;
+    try {
+      worker = new Worker(workerUri.fsPath, {
+        env: workerEnv,
+        workerData: {
+          cwd,
+          autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
+          mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
+          disabledContextFiles: this.readDisabledContextFiles(),
+        },
+      });
+    } catch {
+      void vscode.window.showErrorMessage('Could not start the Pi worker. Check the runtime environment settings and extension installation.');
+      return;
+    }
+    this.workerWorkspace = cwd;
     this.worker = worker;
     this.workerAgentDirSetting = configuredAgentDir;
     this.workerOfflineModeSetting = offlineMode;
@@ -2938,6 +3035,106 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: 'offline-mode-setting', mode: readPiOfflineMode() });
       this.post({ type: 'notice', message: 'Could not update Pi startup network mode.', isError: true });
     }
+  }
+
+  async manageRuntimeEnvironment(): Promise<void> {
+    let names: string[];
+    try {
+      names = (await this.context.secrets.keys())
+        .filter((key) => key.startsWith(RUNTIME_ENV_SECRET_PREFIX))
+        .map((key) => key.slice(RUNTIME_ENV_SECRET_PREFIX.length))
+        .filter(isAllowedRuntimeEnvironmentName)
+        .sort();
+    } catch {
+      void vscode.window.showErrorMessage('Could not read Pi runtime environment variable names from VS Code SecretStorage.');
+      return;
+    }
+
+    type RuntimeEnvironmentChoice = vscode.QuickPickItem & { action: 'add' | 'existing'; name?: string };
+    const items: RuntimeEnvironmentChoice[] = [
+      { label: '$(add) Add a variable', description: 'Store a value securely for the Pi runtime', action: 'add' },
+      ...names.map((name): RuntimeEnvironmentChoice => ({
+        label: name,
+        description: 'Stored in VS Code SecretStorage',
+        action: 'existing',
+        name,
+      })),
+    ];
+    const selected = await vscode.window.showQuickPick(items, {
+      title: 'Pi runtime environment',
+      placeHolder: names.length ? 'Choose a variable to replace or remove' : 'Add a secure runtime variable',
+      ignoreFocusOut: true,
+    });
+    if (!selected) return;
+
+    let name = selected.name;
+    let operation: 'store' | 'remove' = 'store';
+    if (selected.action === 'add') {
+      if (names.length >= MAX_RUNTIME_ENV_VARIABLES) {
+        void vscode.window.showErrorMessage(`Pi runtime environment is limited to ${MAX_RUNTIME_ENV_VARIABLES} variables.`);
+        return;
+      }
+      const enteredName = await vscode.window.showInputBox({
+        title: 'Add a Pi runtime variable',
+        prompt: 'Use an uppercase environment name such as OPENAI_API_KEY. Runtime-control and process-loader variables are blocked.',
+        placeHolder: 'OPENAI_API_KEY',
+        ignoreFocusOut: true,
+        validateInput: (input) => input.length > 128 || !isAllowedRuntimeEnvironmentName(input.trim())
+          ? 'Use an allowed uppercase environment name. PATH, NODE_OPTIONS, and runtime-control variables are reserved.'
+          : undefined,
+      });
+      if (enteredName === undefined) return;
+      name = enteredName.trim();
+      if (!isAllowedRuntimeEnvironmentName(name)) return;
+    } else {
+      if (!name || !isAllowedRuntimeEnvironmentName(name)) return;
+      const action = await vscode.window.showQuickPick([
+        { label: 'Replace value', action: 'store' as const },
+        { label: 'Remove variable', action: 'remove' as const },
+      ], { title: name, placeHolder: 'Choose what to do with this stored variable', ignoreFocusOut: true });
+      if (!action) return;
+      operation = action.action;
+    }
+
+    let value: string | undefined;
+    if (operation === 'store') {
+      value = await vscode.window.showInputBox({
+        title: `Set ${name}`,
+        prompt: 'The value is hidden and will be stored in VS Code SecretStorage. Pi, its tools, and loaded extensions can read it from the worker environment.',
+        password: true,
+        ignoreFocusOut: true,
+        validateInput: (input) => input.length > MAX_RUNTIME_ENV_VALUE_CHARS
+          ? `Values are limited to ${MAX_RUNTIME_ENV_VALUE_CHARS} characters.`
+          : input.includes('\0') ? 'Environment values cannot contain a null character.' : undefined,
+      });
+      if (value === undefined) return;
+    }
+
+    const confirmation = operation === 'store'
+      ? await vscode.window.showWarningMessage(
+        `Store ${name} in VS Code SecretStorage? Its value will override the inherited environment value for this name inside Pi, its tools, and loaded extensions after the next runtime start. Use “Pi Chat: Restart Pi Runtime” when you are ready to apply it.`,
+        { modal: true },
+        'Store securely',
+      )
+      : await vscode.window.showWarningMessage(
+        `Remove ${name} from VS Code SecretStorage? The active Pi worker keeps its current value until it stops. A later runtime will use the inherited environment value, if one exists.`,
+        { modal: true },
+        'Remove variable',
+      );
+    if (confirmation !== (operation === 'store' ? 'Store securely' : 'Remove variable')) return;
+
+    const secretKey = `${RUNTIME_ENV_SECRET_PREFIX}${name}`;
+    try {
+      if (operation === 'store') await this.context.secrets.store(secretKey, value ?? '');
+      else await this.context.secrets.delete(secretKey);
+    } catch {
+      void vscode.window.showErrorMessage('Could not update this value in VS Code SecretStorage.');
+      return;
+    }
+
+    void vscode.window.showInformationMessage(operation === 'store'
+      ? `${name} was saved securely. Restart the Pi runtime when you are ready to apply it.`
+      : `${name} was removed from SecretStorage. The active worker keeps its old value until it stops.`);
   }
 
   async chooseAgentDir(): Promise<void> {
