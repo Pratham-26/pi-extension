@@ -2327,6 +2327,13 @@ function getSessionBookmarks(): string[] {
     : [];
 }
 
+function isUserMessageEntry(entryId: unknown): entryId is string {
+  if (typeof entryId !== 'string' || entryId.length === 0 || entryId.length > 256
+    || /[\u0000-\u001f\u007f]/.test(entryId)) return false;
+  return Boolean(session?.sessionManager?.getEntries().some((entry) => entry.id === entryId
+    && entry.type === 'message' && entry.message?.role === 'user'));
+}
+
 function snapshot(): void {
   const activeSession = session;
   if (!activeSession) return;
@@ -4368,7 +4375,7 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'forkSession': {
-        if (!input.entryId || busy || !session?.sessionManager) return;
+        if (busy || !session?.sessionManager || !isUserMessageEntry(input.entryId)) return;
         const carriedBookmarks = getSessionBookmarks();
         const branchedPath = session.sessionManager.createBranchedSession(input.entryId);
         if (!branchedPath) throw new Error('Pi could not create a branch from that message.');
@@ -4387,14 +4394,14 @@ async function handle(input: WorkerInput): Promise<void> {
         return;
       }
       case 'navigateTree': {
-        if (!input.entryId || busy || !session?.navigateTree) return;
+        if (busy || !session?.navigateTree || !isUserMessageEntry(input.entryId)) return;
         const result = await session.navigateTree(input.entryId, { summarize: false });
         if (!result.cancelled && result.editorText) send('extension-editor-text', { text: result.editorText });
         snapshot();
         return;
       }
       case 'editUserMessage': {
-        if (!input.entryId || busy || !session?.navigateTree || !session.sessionManager) return;
+        if (busy || !session?.navigateTree || !session.sessionManager || !isUserMessageEntry(input.entryId)) return;
         const entry = session.sessionManager.getEntries().find((candidate) => candidate.id === input.entryId);
         if (entry?.type !== 'message' || entry.message?.role !== 'user') return;
         const result = await session.navigateTree(input.entryId, { summarize: false });
