@@ -2266,6 +2266,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <button id="git-review-toggle" class="icon-button" type="button" title="Review Git changes" aria-label="Review Git changes" aria-expanded="false" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v12a4 4 0 0 0 4 4h8"/><path d="m14 15 4 4-4 4"/><circle cx="6" cy="3" r="2"/></svg>
         </button>
+        <button id="focus-transcript-toggle" class="icon-button" type="button" title="Hide tool activity" aria-label="Hide tool activity" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-6 9-6 9 6 9 6-3.2 6-9 6-9-6-9-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+        </button>
         <button id="bookmark-toggle" class="text-button header-action" type="button" title="Show bookmarked messages" aria-expanded="false">★</button>
         <button id="export-session" class="text-button header-action" type="button" title="Export session">Export</button>
         <button id="open-settings" class="icon-button" type="button" title="Pi Chat settings" aria-label="Pi Chat settings">

@@ -540,6 +540,7 @@ button:focus-visible, textarea:focus-visible {
 .text-button { padding: 4px 5px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; }
 .text-button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
 .header-action { flex: 0 0 auto; padding: 4px 6px; font-size: 10px; }
+.icon-button[aria-pressed="true"] { color: var(--text); background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .send-button { width: 28px; height: 28px; padding: 0; border-radius: 6px; color: var(--accent-text); background: var(--accent); }
 .send-button:hover:not(:disabled) { filter: brightness(1.08); }
 .send-button:disabled { color: var(--muted); background: color-mix(in srgb, var(--text) 10%, transparent); cursor: default; }

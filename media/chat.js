@@ -12,6 +12,7 @@ const state = {
   toolExpansion: Object.fromEntries(Object.entries(persistedWebviewState.toolExpansion || {})
     .filter(([name, open]) => typeof name === 'string' && name.length > 0 && name.length <= 128 && typeof open === 'boolean')
     .slice(-200)),
+  focusedTranscript: persistedWebviewState.focusedTranscript === true,
   promptHistoryIndex: -1,
   promptHistoryDraft: '',
   mentionQuery: '',
@@ -125,6 +126,7 @@ const ui = {
   history: el('history-panel'),
   historyToggle: el('history-toggle'),
   branchHistoryToggle: el('branch-history-toggle'),
+  focusTranscriptToggle: el('focus-transcript-toggle'),
   branchPanel: el('branch-panel'),
   branchList: el('branch-list'),
   branchEmpty: el('branch-empty'),
@@ -185,12 +187,25 @@ const ui = {
   pinActiveFile: el('pin-active-file'),
 };
 
+function syncFocusTranscriptToggle() {
+  const active = state.focusedTranscript;
+  ui.focusTranscriptToggle.title = active ? 'Show tool activity' : 'Hide tool activity';
+  ui.focusTranscriptToggle.setAttribute('aria-label', ui.focusTranscriptToggle.title);
+  ui.focusTranscriptToggle.setAttribute('aria-pressed', String(active));
+}
+
+syncFocusTranscriptToggle();
+
 function post(type, payload = {}) {
   vscode.postMessage({ type, ...payload });
 }
 
 function persistWebviewState() {
-  vscode.setState({ drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion });
+  vscode.setState({ drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript });
+}
+
+function isTranscriptMessageVisible(message) {
+  return !state.focusedTranscript || message.role !== 'tool';
 }
 
 function toolExpansionPreference(toolName, isError = false) {
@@ -798,6 +813,7 @@ function renderMessages(shouldFollow = true) {
   ui.messageList.replaceChildren();
   for (let messageIndex = 0; messageIndex < state.messages.length; messageIndex += 1) {
     const message = state.messages[messageIndex];
+    if (!isTranscriptMessageVisible(message)) continue;
     if (message.role === 'tool') {
       const node = message.node instanceof HTMLElement ? message.node : createHistoricalToolCard(message);
       message.node = node;
@@ -999,7 +1015,7 @@ function renderMessages(shouldFollow = true) {
 
   renderBookmarks();
   updateChatSearch();
-  ui.empty.hidden = state.messages.length > 0;
+  ui.empty.hidden = state.messages.some(isTranscriptMessageVisible);
   if (shouldFollow && nearBottom) ui.messageArea.scrollTop = ui.messageArea.scrollHeight;
   updateControls();
 }
@@ -1279,6 +1295,7 @@ function updateChatSearch(moveToCurrent = false) {
   state.chatSearchHits = [];
   if (query) {
     state.messages.forEach((message, index) => {
+      if (!isTranscriptMessageVisible(message)) return;
       const content = message.role === 'tool' && message.node instanceof HTMLElement
         ? message.node.textContent || ''
         : `${message.text || ''}\n${message.thinking || ''}\n${message.context || ''}`;
@@ -2729,7 +2746,16 @@ window.addEventListener('message', (event) => {
       output.className = 'tool-output';
       output.textContent = typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}';
       detail.append(summary, output);
-      const toolMessage = { role: 'tool', toolCallId: String(data.id || '').slice(0, 256), result: '', details: undefined, node: detail };
+      const toolMessage = {
+        role: 'tool',
+        toolCallId: String(data.id || '').slice(0, 256),
+        toolName,
+        argsPreview: typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}',
+        result: '',
+        details: undefined,
+        isError: false,
+        node: detail,
+      };
       state.messages.push(toolMessage);
       const currentTools = state.toolMessagesBySession.get(state.sessionPath) || [];
       currentTools.push(toolMessage);
@@ -2741,24 +2767,29 @@ window.addEventListener('message', (event) => {
     case 'tool-update':
     case 'tool-end': {
       const toolId = String(data.id || '').slice(0, 256);
-      const card = [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === toolId);
+      const toolMessage = [...state.messages].reverse().find((message) => message.role === 'tool' && message.toolCallId === toolId);
+      const card = [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === toolId)
+        || (toolMessage?.node instanceof HTMLElement ? toolMessage.node : undefined);
+      const result = data.result;
+      const text = typeof result === 'string' ? result : JSON.stringify(result ?? '', null, 2);
+      if (toolMessage) {
+        toolMessage.result = text.slice(-12000);
+        toolMessage.details = data.details;
+      }
       if (card) {
         const output = card.querySelector('.tool-output');
-        const result = data.result;
-        const text = typeof result === 'string' ? result : JSON.stringify(result ?? '', null, 2);
         if (output) output.textContent = text.slice(-12000);
         appendStructuredToolDetails(card, data.details, data.type === 'tool-update');
-        const toolMessage = [...state.messages].reverse().find((message) => message.role === 'tool' && message.toolCallId === toolId);
-        if (toolMessage) {
-          toolMessage.result = text.slice(-12000);
-          toolMessage.details = data.details;
-        }
         if (data.type === 'tool-end') {
           card.classList.toggle('tool-error', Boolean(data.isError));
           const toolName = String(data.name || card.dataset.toolName || 'tool').slice(0, 128);
           card.dataset.toolName = toolName;
           card.querySelector('summary').textContent = `${data.isError ? 'Failed' : 'Finished'} ${toolName}`;
           card.open = toolExpansionPreference(toolName, Boolean(data.isError));
+          if (toolMessage) {
+            toolMessage.toolName = toolName;
+            toolMessage.isError = Boolean(data.isError);
+          }
         }
       }
       break;
@@ -2829,6 +2860,12 @@ ui.gitDraftPr.addEventListener('click', () => post('draftGitChanges', { kind: 'p
 el('close-git-review').addEventListener('click', () => {
   ui.gitReviewPanel.hidden = true;
   ui.gitReviewToggle.setAttribute('aria-expanded', 'false');
+});
+ui.focusTranscriptToggle.addEventListener('click', () => {
+  state.focusedTranscript = !state.focusedTranscript;
+  syncFocusTranscriptToggle();
+  persistWebviewState();
+  renderMessages(false);
 });
 ui.bookmarkToggle.addEventListener('click', () => {
   const open = ui.bookmarkPanel.hidden;
