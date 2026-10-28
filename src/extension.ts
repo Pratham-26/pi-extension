@@ -106,6 +106,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private webviewMessageSubscription?: vscode.Disposable;
   private sessionQuery = '';
   private activeSessionPath = '';
+  private openLatestSessionOnStart: boolean;
+  private latestSessionOpenAttempted = false;
+  private sessionInteractionStarted = false;
   private knownSessionPaths = new Set<string>();
   private knownPromptPaths = new Set<string>();
   private knownResourcePaths = new Set<string>();
@@ -122,6 +125,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
+    this.openLatestSessionOnStart = vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('openLatestOnStart', false);
     this.activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (this.pinnedActiveFileEnabled && editor) this.publishPinnedActiveFile(editor);
     });
@@ -169,6 +173,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   async newSession(): Promise<void> {
+    this.sessionInteractionStarted = true;
     if (!this.worker) await this.ensureRuntime();
     this.worker?.postMessage({
       type: 'newSession',
@@ -177,6 +182,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   async cloneSession(): Promise<void> {
+    this.sessionInteractionStarted = true;
     if (!this.worker) await this.ensureRuntime();
     this.worker?.postMessage({ type: 'cloneSession' });
   }
@@ -230,6 +236,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.settingsConfigPath = '';
     this.mcpConfigPath = '';
     this.activeSessionPath = '';
+    this.latestSessionOpenAttempted = false;
+    this.sessionInteractionStarted = false;
     this.failPendingMcpSetting(previous);
     if (previous) this.stopWorker(previous);
     void this.ensureRuntime();
@@ -328,6 +336,18 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             || (orderIndex.get(String(a['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(String(b['path'] ?? '')) ?? Number.MAX_SAFE_INTEGER)
             || Number(b['modified'] ?? 0) - Number(a['modified'] ?? 0));
         this.post({ ...message, sessions });
+        if (this.openLatestSessionOnStart && !this.latestSessionOpenAttempted) {
+          this.latestSessionOpenAttempted = true;
+          if (!this.sessionInteractionStarted && !this.activeSessionPath) {
+            const latest = sessions
+              .filter((item) => this.isKnownSessionPath(item['path']))
+              .reduce<Record<string, unknown> | undefined>((current, item) =>
+                !current || Number(item['modified'] ?? 0) > Number(current['modified'] ?? 0) ? item : current, undefined);
+            if (latest && typeof latest['path'] === 'string') {
+              this.worker?.postMessage({ type: 'openSession', path: latest['path'] });
+            }
+          }
+        }
       } else if (message.type === 'options') {
         this.availableProviders = Array.isArray(message.providers)
           ? (message.providers as Array<Record<string, unknown>>).slice(0, 200).flatMap((provider) => {
@@ -433,9 +453,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         await this.exportDiagnostics();
         return;
       case 'newSession':
+        this.sessionInteractionStarted = true;
         await this.newSession();
         return;
       case 'cloneSession':
+        this.sessionInteractionStarted = true;
         if (this.worker) this.worker.postMessage({ type: 'cloneSession' });
         return;
       case 'openSettings':
@@ -535,6 +557,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       case 'openSession':
+        this.sessionInteractionStarted = true;
         if (this.isKnownSessionPath(message.path)) this.worker?.postMessage({ type: 'openSession', path: message.path });
         else this.post({ type: 'notice', message: 'That session is not in the current workspace session list.', isError: true });
         return;
@@ -542,6 +565,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         this.worker?.postMessage({ type: 'stop' });
         return;
       case 'send': {
+        this.sessionInteractionStarted = true;
         if (typeof message.text !== 'string') return;
         const text = message.text.trim().slice(0, 100_000);
         const attachments = this.validateAttachments(message.attachments);

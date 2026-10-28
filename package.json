@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -96,6 +96,11 @@
           "type": "boolean",
           "default": true,
           "description": "Name an unnamed Pi session from its first non-command prompt without making an extra provider request."
+        },
+        "piChat.sessions.openLatestOnStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the most recently updated Pi session for this workspace when the chat view starts. Pi project resources remain subject to the existing trust prompt."
         },
         "piChat.mcp.enabled": {
           "type": "boolean",
