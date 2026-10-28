@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.44",
+  "version": "0.1.45",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -57,6 +57,12 @@
         "title": "Clone Active Pi Chat",
         "category": "Pi Chat",
         "icon": "$(copy)"
+      },
+      {
+        "command": "piChat.createWorktree",
+        "title": "Pi Chat: Create Git Worktree",
+        "category": "Pi Chat",
+        "icon": "$(git-branch)"
       },
       {
         "command": "piChat.openSettings",
@@ -161,6 +167,11 @@
         },
         {
           "command": "piChat.cloneSession",
+          "when": "view == piChat.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "piChat.createWorktree",
           "when": "view == piChat.chatView",
           "group": "navigation"
         },

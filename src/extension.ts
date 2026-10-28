@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { execFile } from 'node:child_process';
 import { access, lstat, mkdir, open as openFile, opendir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
@@ -61,8 +62,11 @@ type GitRepositoryLike = {
 };
 
 type GitApiLike = {
+  git?: { path?: string };
   repositories: GitRepositoryLike[];
 };
+
+type GitCommandResult = { stdout: string; stderr: string; exitCode: number };
 
 type GitFileStatus = {
   path: string;
@@ -104,6 +108,46 @@ const MAX_UNTRACKED_DRAFT_BYTES = 16_000;
 const MAX_RUNNING_SESSION_RECORD_BYTES = 8_192;
 const MAX_RUNNING_SESSION_RECORDS = 200;
 const RUNNING_SESSION_RECORD_TTL_MS = 12_000;
+const MAX_GIT_BRANCHES_FOR_PICKER = 500;
+const GIT_WORKTREE_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+
+function runGitCommand(gitPath: string, cwd: string, args: string[], timeout: number): Promise<GitCommandResult> {
+  const allowedEnvironmentKeys = new Set([
+    'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+    'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL',
+  ]);
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && allowedEnvironmentKeys.has(key.toUpperCase())) env[key] = value;
+  }
+  env.GIT_TERMINAL_PROMPT = '0';
+  return new Promise((resolve, reject) => {
+    execFile(gitPath, args, {
+      cwd,
+      env,
+      encoding: 'utf8',
+      shell: false,
+      windowsHide: true,
+      timeout,
+      maxBuffer: 2 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error && typeof (error as NodeJS.ErrnoException).code !== 'number') {
+        reject(error);
+        return;
+      }
+      resolve({
+        stdout: String(stdout),
+        stderr: String(stderr),
+        exitCode: error ? Number((error as NodeJS.ErrnoException).code) : 0,
+      });
+    });
+  });
+}
+
+function isPathInside(parentPath: string, candidatePath: string): boolean {
+  const relative = path.relative(parentPath, candidatePath);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
 
 function readPiOfflineMode(): PiOfflineMode {
   const value = vscode.workspace.getConfiguration('piChat').get<string>('offlineMode', 'inherit');
@@ -153,6 +197,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('piChat.newSession', () => provider.newSession()),
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
+    vscode.commands.registerCommand('piChat.createWorktree', () => provider.createGitWorktreeSession()),
     vscode.commands.registerCommand('piChat.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.pi-chat-vscode')),
     vscode.commands.registerCommand('piChat.chooseAgentDir', () => provider.chooseAgentDir()),
     vscode.commands.registerCommand('piChat.restartRuntime', () => provider.restartPiRuntime()),
@@ -301,6 +346,182 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionInteractionStarted = true;
     if (!this.worker) await this.ensureRuntime();
     this.worker?.postMessage({ type: 'cloneSession' });
+  }
+
+  async createGitWorktreeSession(): Promise<void> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace || workspace.uri.scheme !== 'file') {
+      void vscode.window.showErrorMessage('Open a local workspace folder before creating a Git worktree.');
+      return;
+    }
+
+    try {
+      const handle = await this.getGitRepository(workspace);
+      if (!handle) {
+        void vscode.window.showErrorMessage('The current workspace is not inside a Git repository.');
+        return;
+      }
+      const gitPath = handle.api.git?.path || 'git';
+      const repositoryPath = await realpath(handle.repository.rootUri.fsPath);
+      const branchResult = await runGitCommand(gitPath, repositoryPath, [
+        'for-each-ref', `--count=${MAX_GIT_BRANCHES_FOR_PICKER}`, '--sort=-committerdate', '--format=%(refname)', 'refs/heads',
+      ], 15_000);
+      if (branchResult.exitCode !== 0) {
+        void vscode.window.showErrorMessage('Could not list local Git branches for this worktree.');
+        return;
+      }
+      const branches = [...new Set(branchResult.stdout.split(/\r?\n/)
+        .map((ref) => ref.trim())
+        .filter((ref) => ref.startsWith('refs/heads/') && ref.length > 'refs/heads/'.length)
+        .map((ref) => ref.slice('refs/heads/'.length)))];
+      const currentBranch = handle.repository.state.HEAD?.name;
+      if (currentBranch && !branches.includes(currentBranch)) branches.unshift(currentBranch);
+      branches.sort((a, b) => (a === currentBranch ? -1 : b === currentBranch ? 1 : 0));
+      if (branches.length === 0) {
+        void vscode.window.showErrorMessage('Create an initial commit and branch before creating a Pi worktree.');
+        return;
+      }
+
+      const baseBranch = await vscode.window.showQuickPick(
+        branches.map((branch) => ({ label: branch, description: branch === currentBranch ? 'Current branch' : undefined })),
+        { placeHolder: `Choose from up to ${MAX_GIT_BRANCHES_FOR_PICKER} recent local branches; the current branch is included when available` },
+      );
+      if (!baseBranch) return;
+      const baseRef = `refs/heads/${baseBranch.label}`;
+
+      const branchName = await vscode.window.showInputBox({
+        title: 'Create Git worktree',
+        prompt: 'Enter a new local branch name for the Pi worktree.',
+        placeHolder: 'feature/my-change',
+        ignoreFocusOut: true,
+        validateInput: (value) => {
+          if (!value || value !== value.trim()) return 'Enter a branch name without leading or trailing spaces.';
+          if (value.length > 120 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value)) {
+            return 'Use up to 120 letters, numbers, dots, underscores, hyphens, or slashes; start with a letter or number.';
+          }
+          return undefined;
+        },
+      });
+      if (!branchName) return;
+
+      const branchValidation = await runGitCommand(gitPath, repositoryPath, ['check-ref-format', '--branch', branchName], 15_000);
+      if (branchValidation.exitCode !== 0) {
+        void vscode.window.showErrorMessage('Git rejected that branch name. Choose another name and try again.');
+        return;
+      }
+      const branchRef = `refs/heads/${branchName}`;
+      const branchExists = await runGitCommand(gitPath, repositoryPath, ['show-ref', '--verify', '--quiet', branchRef], 15_000);
+      if (branchExists.exitCode === 0) {
+        void vscode.window.showErrorMessage(`The local branch "${branchName}" already exists.`);
+        return;
+      }
+      if (branchExists.exitCode !== 1) {
+        void vscode.window.showErrorMessage('Could not verify that the requested branch name is available.');
+        return;
+      }
+
+      const parentSelection = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        defaultUri: vscode.Uri.file(path.dirname(repositoryPath)),
+        openLabel: 'Choose worktree parent folder',
+      });
+      if (!parentSelection?.[0] || parentSelection[0].scheme !== 'file') return;
+      const parentPath = await realpath(parentSelection[0].fsPath);
+      if (/[\u0000-\u001f\u007f]/.test(repositoryPath) || /[\u0000-\u001f\u007f]/.test(parentPath)) {
+        void vscode.window.showErrorMessage('The selected repository or destination path contains unsupported control characters.');
+        return;
+      }
+      if (isPathInside(repositoryPath, parentPath)) {
+        void vscode.window.showErrorMessage('Choose a worktree parent folder outside the current repository.');
+        return;
+      }
+
+      const repoName = path.basename(repositoryPath).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.-]+/, '').slice(0, 60) || 'repo';
+      const targetName = `${repoName}-${branchName.replaceAll('/', '-')}`;
+      const targetPath = path.join(parentPath, targetName);
+      if (targetPath.length > 4096 || isPathInside(repositoryPath, targetPath) || isPathInside(targetPath, repositoryPath)) {
+        void vscode.window.showErrorMessage('The selected worktree location is not a safe path. Choose another parent folder.');
+        return;
+      }
+      try {
+        await lstat(targetPath);
+        void vscode.window.showErrorMessage('The worktree destination already exists. Choose another parent folder.');
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+
+      const confirmation = await vscode.window.showWarningMessage(
+        `Create a new Git worktree?\n\nRepository: ${repositoryPath}\nStarting branch: ${baseBranch.label}\nNew branch: ${branchName}\nDestination: ${targetPath}\n\nGit checkout hooks and configured file filters may run. This will not run project setup commands or modify the current worktree.`,
+        { modal: true },
+        'Create worktree',
+      );
+      if (confirmation !== 'Create worktree') return;
+
+      if (await realpath(handle.repository.rootUri.fsPath) !== repositoryPath || await realpath(parentPath) !== parentPath) {
+        void vscode.window.showErrorMessage('The repository or destination folder changed. Start the worktree operation again.');
+        return;
+      }
+      const baseBranchRecheck = await runGitCommand(gitPath, repositoryPath, ['show-ref', '--verify', '--quiet', baseRef], 15_000);
+      if (baseBranchRecheck.exitCode !== 0) {
+        void vscode.window.showErrorMessage('The selected starting branch is no longer available. Start the worktree operation again.');
+        return;
+      }
+      const branchRecheck = await runGitCommand(gitPath, repositoryPath, ['show-ref', '--verify', '--quiet', branchRef], 15_000);
+      if (branchRecheck.exitCode === 0) {
+        void vscode.window.showErrorMessage(`The local branch "${branchName}" was created elsewhere. Choose another name.`);
+        return;
+      }
+      if (branchRecheck.exitCode !== 1) {
+        void vscode.window.showErrorMessage('Could not recheck branch availability. Start the worktree operation again.');
+        return;
+      }
+      try {
+        await lstat(targetPath);
+        void vscode.window.showErrorMessage('The worktree destination was created elsewhere. Choose another parent folder.');
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+
+      let result: GitCommandResult;
+      try {
+        result = await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: 'Creating Git worktree for Pi Chat',
+          cancellable: false,
+        }, () => runGitCommand(gitPath, repositoryPath, ['worktree', 'add', '-b', branchName, targetPath, baseRef], GIT_WORKTREE_COMMAND_TIMEOUT_MS));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+          void vscode.window.showErrorMessage(`Git exceeded the five-minute timeout. It may have left a partial worktree at ${targetPath}; inspect it and Git's worktree list before retrying.`);
+          return;
+        }
+        throw error;
+      }
+      if (result.exitCode !== 0) {
+        const detail = result.stderr.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 400);
+        void vscode.window.showErrorMessage(`Git could not create the worktree. Check ${targetPath} and Git's worktree list before retrying.${detail ? ` ${detail}` : ''}`);
+        return;
+      }
+
+      const open = await vscode.window.showInformationMessage(`Git worktree created at ${targetPath}.`, 'Open in New Window');
+      if (open === 'Open in New Window') {
+        try {
+          const opened = await vscode.commands.executeCommand<boolean>('vscode.openFolder', vscode.Uri.file(targetPath), { forceNewWindow: true });
+          if (opened === false) void vscode.window.showInformationMessage(`Worktree created at ${targetPath}; open that folder in VS Code to start a Pi chat.`);
+        } catch {
+          void vscode.window.showInformationMessage(`Worktree created at ${targetPath}; open that folder in VS Code to start a Pi chat.`);
+        }
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const detail = code === 'ETIMEDOUT'
+        ? 'Git did not finish before the five-minute timeout.'
+        : error instanceof Error ? error.message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) : 'Unknown error.';
+      void vscode.window.showErrorMessage(`Could not create a Git worktree. ${detail}`);
+    }
   }
 
   async exportDiagnostics(): Promise<void> {

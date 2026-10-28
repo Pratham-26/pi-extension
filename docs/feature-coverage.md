@@ -38,7 +38,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [~] Transcript search includes visible thinking and tool output; session search indexes names, messages, assistant thinking, tool calls, and tool outputs in the current workspace by default, with an opt-in all-workspaces search. Foreign sessions load in the matching workspace so Pi applies that folder's tool paths and trust rules.
 - [~] Open the latest session when the chat view starts is optional; multiple independent chat editor tabs, persisted tab restore, and new chat beside a file are unavailable.
 - [x] Save a local title from the first non-command prompt without an extra provider request; configurable through `piChat.sessions.autoName`.
-- [ ] Git worktree sessions, setup commands, ignored-file copying, and safe worktree removal.
+- [~] Create a Git worktree for a new local branch from a selected local base branch, choose an external destination, confirm before checkout hooks or configured file filters can run, and optionally open it in a new VS Code window. Automatic setup commands, ignored-file copying, safe worktree removal, and sandboxed worktree cleanup remain unavailable.
 - [~] Group running sessions and expose live activity/queue status in the session list for sessions visible to the current workspace or opt-in all-workspaces search. Short-lived local records contain hashed identifiers, not prompts, titles, or paths; running sessions cannot be renamed or deleted. Cross-device status and independent editor-tab restore remain unavailable.
 
 ## Workspace context
