@@ -3,6 +3,7 @@
 .rea/**
 .rea
 src/**
+scripts/**
 docs/**
 !docs/feature-coverage.md
 PRODUCT.md

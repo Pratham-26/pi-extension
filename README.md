@@ -20,6 +20,10 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 
 See [the feature coverage checklist](docs/feature-coverage.md) for implemented and planned capabilities. Voice dictation is out of scope. Direct shell execution from the composer is unavailable because the automatic security review rejected that execution path.
 
+## Local verification
+
+Run `npm run smoke:worker` to open a real Pi SDK worker with a temporary configuration and a loopback-only mock model. The check selects a model, streams one response, verifies the persisted session transcript, and removes its temporary data. It uses Pi offline mode, an empty tool set, and a temporary config; it does not read the user's Pi credentials or call an external provider.
+
 Set `piChat.sessions.openLatestOnStart` in VS Code Settings to reopen the latest session for the active workspace when the chat view starts. It defaults to `false`.
 
 The extension instantiates the bundled Pi SDK directly in a worker thread; it does not launch the Pi CLI and speak the CLI's RPC protocol. The `piChat.extensionUiMode` setting controls the UI mode exposed to loaded Pi extensions. The webview uses a restrictive Content Security Policy and renders Pi output as text or a safe Markdown subset; external links are limited to HTTPS and loopback HTTP. It does not add telemetry or route requests through a hosted service. Live session indicators are shared between local VS Code windows using short-lived records with hashed session identifiers and generic activity labels; prompts, titles, and file paths are not stored in those records.
