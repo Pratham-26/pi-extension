@@ -413,6 +413,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'openGitDiff':
         await this.openGitDiff(message.path);
         return;
+      case 'quoteGitDiffSelection':
+        this.quoteGitDiffSelection();
+        return;
       case 'discardGitChange':
         await this.discardGitChange(message.path);
         return;
@@ -1238,6 +1241,29 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       this.post({ type: 'notice', message: `Could not discard this Git change. ${error instanceof Error ? error.message.slice(0, 300) : ''}`, isError: true });
     }
+  }
+
+  private quoteGitDiffSelection(): void {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'diff' || editor.selection.isEmpty) {
+      this.post({ type: 'notice', message: 'Select lines in an opened Git diff before quoting them.' });
+      return;
+    }
+    const selected = editor.document.getText(editor.selection).trim();
+    if (!selected) {
+      this.post({ type: 'notice', message: 'The selected Git diff lines are empty.' });
+      return;
+    }
+    const content = this.formatFileContext('Git diff selection', selected);
+    this.post({
+      type: 'attachment',
+      attachment: {
+        id: randomBytes(8).toString('hex'),
+        label: 'Git diff · selected lines',
+        path: 'Git diff selection',
+        context: content.slice(0, MAX_ATTACHMENT_CHARS),
+      } satisfies Attachment,
+    });
   }
 
   private async attachUris(rawUris: string[]): Promise<void> {
@@ -2108,7 +2134,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <div id="queue-empty" class="session-empty">No queued messages.</div>
       </aside>
       <aside id="git-review-panel" class="history-panel git-review-panel" aria-label="Git changes" hidden>
-        <div class="history-heading"><span>Git changes</span><div class="git-review-actions"><button id="refresh-git-changes" class="icon-button small" type="button" title="Refresh Git changes" aria-label="Refresh Git changes">↻</button><button id="close-git-review" class="icon-button small" type="button" title="Close" aria-label="Close Git changes">×</button></div></div>
+        <div class="history-heading"><span>Git changes</span><div class="git-review-actions"><button id="quote-git-diff-selection" class="text-button" type="button" title="Attach selected lines from the open Git diff">Quote selection</button><button id="refresh-git-changes" class="icon-button small" type="button" title="Refresh Git changes" aria-label="Refresh Git changes">↻</button><button id="close-git-review" class="icon-button small" type="button" title="Close" aria-label="Close Git changes">×</button></div></div>
         <div id="git-change-summary" class="git-change-summary">Checking workspace…</div>
         <div id="git-change-list" class="session-list"></div>
         <div id="git-change-empty" class="session-empty" hidden>No Git changes in this workspace.</div>

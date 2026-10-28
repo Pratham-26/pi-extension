@@ -49,7 +49,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Automatically attach a selected-line reference or follow the active file, controlled by extension settings.
 - [~] Manual file attachments include bounded text content; automatic editor context uses file/line references. Image context is sent as image content.
 - [x] Automatic diagnostics/Git toggles, active-file following, active-file pinning with selected-line updates, and arbitrary line ranges.
-- [ ] Quote diff lines, quote transcript passages with persistent jump-back references, and show full attached context as compact chips.
+- [~] Quote selected Git diff lines into the composer; transcript quotes lack persistent jump-back references, and attached context is not expandable from its chips.
 
 ## Pi tools, skills, prompts, extensions, and packages
 

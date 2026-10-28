@@ -2100,6 +2100,7 @@ ui.gitReviewToggle.addEventListener('click', () => {
   }
 });
 el('refresh-git-changes').addEventListener('click', () => post('refreshGitChanges'));
+el('quote-git-diff-selection').addEventListener('click', () => post('quoteGitDiffSelection'));
 el('close-git-review').addEventListener('click', () => {
   ui.gitReviewPanel.hidden = true;
   ui.gitReviewToggle.setAttribute('aria-expanded', 'false');
