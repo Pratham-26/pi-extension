@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -11,100 +10,14 @@ const workerPath = join(repositoryRoot, 'dist', 'pi-worker.mjs');
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'pi-chat-worker-smoke-'));
 const workspacePath = join(temporaryRoot, 'workspace');
 const agentDir = join(temporaryRoot, 'agent');
-await Promise.all([mkdir(workspacePath), mkdir(agentDir)]);
+const extensionDir = join(agentDir, 'extensions');
+const providerCallsPath = join(temporaryRoot, 'provider-calls.jsonl');
+await Promise.all([mkdir(workspacePath), mkdir(extensionDir, { recursive: true }), writeFile(providerCallsPath, '')]);
 
-let requestCount = 0;
-let requestAuth = '';
-let requestPath = '';
-let requestModel = '';
-let requestStream;
-let server;
 let worker;
 const messages = [];
 let streamedAssistantText = '';
 let assistantUpdateCount = 0;
-
-function respondJson(response, status, body) {
-  response.writeHead(status, { 'content-type': 'application/json' });
-  response.end(JSON.stringify(body));
-}
-
-async function readRequestBody(request, maxBytes = 1_000_000) {
-  const chunks = [];
-  let bytes = 0;
-  for await (const chunk of request) {
-    bytes += chunk.length;
-    if (bytes > maxBytes) throw new Error('Mock model request exceeded the smoke-test size limit.');
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-function openAiCompletion(model, content) {
-  return {
-    id: 'chatcmpl-local-smoke',
-    object: 'chat.completion',
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
-    usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
-  };
-}
-
-async function handleModelRequest(request, response) {
-  requestCount += 1;
-  requestAuth = String(request.headers.authorization || '');
-  requestPath = new URL(request.url || '/', 'http://127.0.0.1').pathname;
-  if (request.method !== 'POST' || !requestPath.endsWith('/chat/completions')) {
-    respondJson(response, 404, { error: { message: 'Unexpected local smoke-test route.' } });
-    return;
-  }
-  if (requestAuth !== 'Bearer pi-chat-local-smoke-key') {
-    respondJson(response, 401, { error: { message: 'Unexpected local smoke-test credential.' } });
-    return;
-  }
-
-  let body;
-  try {
-    body = JSON.parse(await readRequestBody(request));
-  } catch {
-    respondJson(response, 400, { error: { message: 'Invalid local smoke-test request.' } });
-    return;
-  }
-  requestModel = typeof body.model === 'string' ? body.model : '';
-  requestStream = body.stream;
-  if (!Array.isArray(body.messages) || !JSON.stringify(body.messages).includes('LOCAL_SMOKE_REQUEST')) {
-    respondJson(response, 400, { error: { message: 'The prompt did not reach the local model.' } });
-    return;
-  }
-
-  const model = requestModel || 'smoke-model';
-  if (body.stream !== true) {
-    respondJson(response, 200, openAiCompletion(model, 'LOCAL_SMOKE_OK'));
-    return;
-  }
-
-  response.writeHead(200, {
-    'content-type': 'text/event-stream; charset=utf-8',
-    'cache-control': 'no-cache',
-    connection: 'keep-alive',
-  });
-  const sendChunk = (delta, finishReason = null, usage) => {
-    response.write(`data: ${JSON.stringify({
-      id: 'chatcmpl-local-smoke',
-      object: 'chat.completion.chunk',
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{ index: 0, delta, finish_reason: finishReason }],
-      ...(usage ? { usage } : {}),
-    })}\n\n`);
-  };
-  sendChunk({ role: 'assistant', content: 'LOCAL_' });
-  sendChunk({ content: 'SMOKE_OK' });
-  sendChunk({}, 'stop', { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
-  response.write('data: [DONE]\n\n');
-  response.end();
-}
 
 function waitForWorkerMessage(predicate, label, timeoutMs = 15_000) {
   return new Promise((resolveMessage, reject) => {
@@ -132,7 +45,7 @@ function waitForWorkerMessage(predicate, label, timeoutMs = 15_000) {
         const diagnostic = detail || Object.keys(message || {}).filter((key) => key !== 'messages').join(',');
         return `${String(message?.type || 'unknown')}${diagnostic ? `: ${String(diagnostic).slice(0, 160)}` : ''}`;
       }).join(' | ');
-      finish(new Error(`Timed out waiting for ${label}. Local model requests: ${requestCount}; route: ${requestPath || 'none'}; streaming: ${String(requestStream)}; model: ${requestModel || 'none'}; assistant updates: ${assistantUpdateCount}; output: ${streamedAssistantText.slice(0, 120)}; auth header: ${requestAuth ? 'received' : 'not received'}. Recent worker events: ${recentEvents || '(none)'}.`));
+      finish(new Error(`Timed out waiting for ${label}. Assistant updates: ${assistantUpdateCount}; output: ${streamedAssistantText.slice(0, 120)}. Recent worker events: ${recentEvents || '(none)'}.`));
     }, timeoutMs);
     worker.on('message', onMessage);
     worker.once('error', onError);
@@ -140,25 +53,53 @@ function waitForWorkerMessage(predicate, label, timeoutMs = 15_000) {
 }
 
 try {
-  server = createServer((request, response) => {
-    void handleModelRequest(request, response).catch(() => {
-      if (!response.headersSent) respondJson(response, 500, { error: { message: 'Local smoke model failed.' } });
-      else response.destroy();
-    });
+  const streamModuleUrl = pathToFileURL(join(repositoryRoot, 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'event-stream.js')).href;
+  const extensionSource = `
+import { appendFileSync } from 'node:fs';
+import { createAssistantMessageEventStream } from ${JSON.stringify(streamModuleUrl)};
+const callLogPath = ${JSON.stringify(providerCallsPath)};
+const usage = () => ({ input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+function textOf(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.flatMap((part) => part && part.type === 'text' && typeof part.text === 'string' ? [part.text] : []).join('\\n');
+}
+export default function (pi) {
+  pi.registerProvider('pi-chat-smoke', {
+    name: 'Pi Chat Local Smoke',
+    baseUrl: 'https://smoke.invalid/v1',
+    apiKey: 'pi-chat-local-smoke-key',
+    api: 'openai-completions',
+    models: [{ id: 'smoke-model', name: 'Local Smoke Model', reasoning: false, input: ['text'], contextWindow: 4096, maxTokens: 64 }],
+    streamSimple(model, context) {
+      const systemText = context.messages.filter((message) => message.role === 'system').map((message) => textOf(message.content)).join('\\n');
+      const userText = context.messages.filter((message) => message.role === 'user').map((message) => textOf(message.content)).join('\\n');
+      const kind = systemText.includes('Create exactly three concise') ? 'suggestion-recovery'
+        : systemText.includes('Suggest three concise') ? 'suggestion-primary' : 'main';
+      const text = kind === 'main' ? 'LOCAL_SMOKE_OK'
+        : kind === 'suggestion-primary' ? '1. Identify one missing edge case in the implementation.'
+          : '2. Suggest a focused regression test for the behavior.';
+      appendFileSync(callLogPath, JSON.stringify({ kind, hasSmokePrompt: userText.includes('LOCAL_SMOKE_REQUEST') }) + '\\n', { encoding: 'utf8', mode: 0o600 });
+      const stream = createAssistantMessageEventStream();
+      const message = { role: 'assistant', content: [{ type: 'text', text: '' }], api: model.api, provider: model.provider, model: model.id, usage: usage(), stopReason: 'pending', timestamp: Date.now() };
+      stream.push({ type: 'start', partial: message });
+      stream.push({ type: 'text_start', contentIndex: 0, partial: message });
+      message.content[0].text = text;
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: text, partial: message });
+      stream.push({ type: 'text_end', contentIndex: 0, content: text, partial: message });
+      message.stopReason = 'stop';
+      stream.push({ type: 'done', reason: 'stop', message });
+      return stream;
+    },
   });
-  await new Promise((resolveListen, rejectListen) => {
-    server.once('error', rejectListen);
-    server.listen(0, '127.0.0.1', resolveListen);
-  });
-  const address = server.address();
-  assert.ok(address && typeof address === 'object' && Number.isInteger(address.port), 'local mock endpoint should bind to loopback');
-
-  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+}
+`;
+  await writeFile(join(extensionDir, 'local-smoke.ts'), extensionSource, 'utf8');
   await writeFile(join(agentDir, 'models.json'), JSON.stringify({
     providers: {
       'pi-chat-smoke': {
         name: 'Pi Chat Local Smoke',
-        baseUrl,
+        baseUrl: 'https://smoke.invalid/v1',
         api: 'openai-completions',
         apiKey: 'pi-chat-local-smoke-key',
         authHeader: true,
@@ -252,10 +193,8 @@ try {
   assert.ok(savedTranscript, 'the streamed assistant reply should be persisted in the session snapshot');
   assert.ok(assistantUpdateCount >= 2, 'the reply should reach the worker as multiple streaming updates');
   assert.ok(streamedAssistantText.includes('LOCAL_SMOKE_OK'), 'the streamed worker output should contain the local reply');
-  assert.equal(requestCount, 1, 'the test should make exactly one request to its loopback model');
-  assert.equal(requestAuth, 'Bearer pi-chat-local-smoke-key', 'the configured model credential should reach only the local endpoint');
-  assert.equal(requestStream, true, 'the worker should request a streaming model response');
-  assert.equal(requestModel, 'smoke-model', 'the selected Pi model should reach the local endpoint');
+  let providerCalls = (await readFile(providerCallsPath, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(providerCalls, [{ kind: 'main', hasSmokePrompt: true }], 'the worker should stream through the isolated in-process provider without network access');
 
   const latestAssistant = savedTranscript.messages.findLast((entry) => entry.role === 'assistant' && typeof entry.entryId === 'string');
   assert.ok(latestAssistant, 'the saved assistant reply should expose an entry ID for follow-up suggestions');
@@ -264,9 +203,11 @@ try {
     && message.requestId === suggestionRequestId, 'follow-up suggestion result');
   worker.postMessage({ type: 'suggestFollowUps', entryId: latestAssistant.entryId, requestId: suggestionRequestId });
   const suggestionResult = await suggestionResultPromise;
-  assert.equal(suggestionResult.fallback, true, 'malformed local model output should be identified as a fallback');
+  assert.equal(suggestionResult.fallback, true, 'partial local model output should be identified as a fallback');
   assert.equal(suggestionResult.suggestions.length, 3, 'partial model output should be completed with usable general prompts');
-  assert.equal(requestCount, 3, 'follow-up generation should make a primary request and one recovery request');
+  providerCalls = (await readFile(providerCallsPath, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(providerCalls.map((call) => call.kind), ['main', 'suggestion-primary', 'suggestion-recovery'],
+    'the follow-up feature should retry partial model output once through Pi’s provider runtime');
 
   const sessionFile = savedTranscript.sessionFile;
   assert.equal(typeof sessionFile, 'string', 'the smoke session should expose its persisted path');
@@ -309,10 +250,9 @@ try {
   const freshSessionToolOptions = await freshSessionToolOptionsPromise;
   assert.deepEqual(freshSessionToolOptions.activeTools, ['read'], 'new chats should use the configured default tool set');
 
-  console.log('Worker smoke check passed: assistant reply streamed and persisted; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
+  console.log('Worker smoke check passed: in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool defaults applied only to new sessions.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
-  if (server) await new Promise((resolveClose) => server.close(() => resolveClose()));
   const resolvedTemporaryRoot = resolve(temporaryRoot);
   if (dirname(resolvedTemporaryRoot) !== resolve(tmpdir()) || !resolvedTemporaryRoot.startsWith(resolve(tmpdir()) + (process.platform === 'win32' ? '\\' : '/'))) {
     throw new Error('Refusing to remove smoke-test data outside the system temporary directory.');

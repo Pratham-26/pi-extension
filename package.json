@@ -314,7 +314,7 @@
     "compile:draft-store": "esbuild src/draft-store.js --bundle --platform=browser --target=es2022 --format=iife --global-name=PiChatDraftStore --outfile=dist/draft-store.js",
     "typecheck": "tsc --noEmit",
     "smoke:drafts": "npm run compile:draft-store && node scripts/smoke-drafts.mjs",
-    "smoke:worker": "node scripts/smoke-worker.mjs",
+    "smoke:worker": "npm run compile:worker && node scripts/smoke-worker.mjs",
     "smoke:runtime-settings": "npm run compile:worker && node scripts/smoke-runtime-settings.mjs",
     "smoke:sessions": "node scripts/smoke-session-order.mjs",
     "smoke:prompts": "node scripts/smoke-prompt-suggestions.mjs",
