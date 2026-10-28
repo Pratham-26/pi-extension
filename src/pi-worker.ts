@@ -14,8 +14,10 @@ import {
   createToolSearchExtension,
   DefaultResourceLoader,
   DefaultPackageManager,
+  type BashOperations,
   type ExtensionAPI,
   type InlineExtension,
+  type UserBashEventResult,
   getAgentDir,
   hasTrustRequiringProjectResources,
   ProjectTrustStore,
@@ -73,6 +75,8 @@ type WorkerInput = {
   images?: Array<{ data: string; mimeType: string }>;
 };
 
+type PiBashResult = Extract<UserBashEventResult, { result: unknown }>['result'];
+
 type SessionLike = {
   sessionId?: string;
   sessionFile?: string;
@@ -112,6 +116,7 @@ type SessionLike = {
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
   sessionManager?: {
+    getCwd: () => string;
     getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; customType?: string; content?: unknown; display?: boolean; timestamp?: number; command?: string; output?: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; excludeFromContext?: boolean; fullOutputPath?: string; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
     getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown; command?: string; output?: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; excludeFromContext?: boolean; fullOutputPath?: string; timestamp?: number } }>;
     getLeafId: () => string | null;
@@ -138,6 +143,7 @@ type SessionLike = {
   exportToJsonl?: () => string;
   extensionRunner?: {
     setUIContext: (ui: any, mode?: 'tui' | 'rpc' | 'json' | 'print') => void;
+    emitUserBash?: (event: { type: 'user_bash'; command: string; excludeFromContext: boolean; cwd: string }) => Promise<UserBashEventResult | undefined>;
     emit?: (event: { type: 'session_shutdown'; reason: 'quit' | 'reload' }) => Promise<unknown>;
     getMessageRenderer?: (customType: string) => ((message: unknown, options: { expanded: boolean; outputPad: number }, theme: unknown) => unknown) | undefined;
     getEntryRenderer?: (customType: string) => ((entry: unknown, options: { expanded: boolean }, theme: unknown) => unknown) | undefined;
@@ -167,13 +173,14 @@ type SessionLike = {
   refreshContext?: () => void;
   subscribe: (listener: (event: any) => void) => () => void;
   prompt: (text: string, options?: { images?: Array<{ type: 'image'; data: string; mimeType: string }> }) => Promise<void>;
-  executeBash?: (command: string, onChunk?: (chunk: string) => void, options?: { excludeFromContext?: boolean; id?: string }) => Promise<{
+  executeBash?: (command: string, onChunk?: (chunk: string) => void, options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations }) => Promise<{
     output: string;
     exitCode: number | undefined;
     cancelled: boolean;
     truncated: boolean;
     fullOutputPath?: string;
   }>;
+  recordBashResult: (command: string, result: PiBashResult, options?: { excludeFromContext?: boolean }) => void;
   abortBash?: () => void;
   isStreaming?: boolean;
   abort: () => Promise<void>;
@@ -4827,7 +4834,27 @@ async function handle(input: WorkerInput): Promise<void> {
           sessionPath: session.sessionFile,
         });
         try {
-          await session.executeBash(command, undefined, { excludeFromContext, id: commandId });
+          if (!session.extensionRunner?.emitUserBash) {
+            throw new Error('This Pi runtime cannot apply configured shell-command handlers.');
+          }
+          const eventResult = await session.extensionRunner.emitUserBash({
+            type: 'user_bash',
+            command,
+            excludeFromContext,
+            cwd: session.sessionManager?.getCwd() ?? cwd,
+          });
+          if (eventResult && 'result' in eventResult && eventResult.result) {
+            const output = eventResult.result.output;
+            const visibleOutput = output.length > MAX_TOOL_UI_CHARS ? output.slice(-MAX_TOOL_UI_CHARS) : output;
+            if (visibleOutput) send('bash-execution-update', { id: commandId, delta: visibleOutput });
+            session.recordBashResult(command, eventResult.result, { excludeFromContext });
+          } else {
+            await session.executeBash(command, undefined, {
+              excludeFromContext,
+              id: commandId,
+              operations: eventResult?.operations,
+            });
+          }
         } finally {
           shellCommandRunning = false;
           busy = false;

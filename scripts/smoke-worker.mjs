@@ -21,6 +21,7 @@ const extraPromptPath = join(temporaryRoot, 'extra-smoke-prompt.md');
 const extraThemePath = join(temporaryRoot, 'extra-smoke-theme.json');
 const appendedPromptPath = join(temporaryRoot, 'appended-system-prompt.md');
 const providerCallsPath = join(temporaryRoot, 'provider-calls.jsonl');
+const bashCallsPath = join(temporaryRoot, 'bash-calls.jsonl');
 await Promise.all([
   mkdir(projectPath, { recursive: true }),
   mkdir(extensionDir, { recursive: true }),
@@ -30,6 +31,7 @@ await Promise.all([
 ]);
 await Promise.all([
   writeFile(providerCallsPath, ''),
+  writeFile(bashCallsPath, ''),
   writeFile(extraExtensionPath, `export default function (pi) {
   pi.registerCommand('extra-smoke-command', {
     description: 'Explicitly added extension for the isolated smoke check.',
@@ -92,6 +94,7 @@ try {
 import { appendFileSync } from 'node:fs';
 import { createAssistantMessageEventStream } from ${JSON.stringify(streamModuleUrl)};
 const callLogPath = ${JSON.stringify(providerCallsPath)};
+const bashCallLogPath = ${JSON.stringify(bashCallsPath)};
 const usage = () => ({ input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 function textOf(content) {
   if (typeof content === 'string') return content;
@@ -123,6 +126,8 @@ export default function (pi) {
       appendFileSync(callLogPath, JSON.stringify({
         kind,
         hasSmokePrompt: userText.includes('LOCAL_SMOKE_REQUEST'),
+        includedBashOutputCount: userText.split('USER_BASH_RESULT:included').length - 1,
+        excludedBashOutputCount: userText.split('USER_BASH_RESULT:excluded').length - 1,
         hasCustomSystemPrompt: systemText.includes('CUSTOM_SYSTEM_PROMPT_MARKER'),
         hasAppendedPromptText: systemText.includes('APPENDED_SYSTEM_PROMPT_TEXT_MARKER'),
         hasAppendedPromptFile: systemText.includes('APPENDED_SYSTEM_PROMPT_FILE_MARKER'),
@@ -138,6 +143,21 @@ export default function (pi) {
       stream.push({ type: 'done', reason: 'stop', message });
       return stream;
     },
+  });
+  pi.on('user_bash', (event) => {
+    const match = /^PI_CHAT_USER_BASH_SMOKE (included|excluded)$/.exec(event.command);
+    if (!match) return;
+    const output = 'USER_BASH_RESULT:' + match[1];
+    appendFileSync(bashCallLogPath, JSON.stringify({ command: event.command, excludeFromContext: event.excludeFromContext, cwd: event.cwd }) + '\\n', { encoding: 'utf8', mode: 0o600 });
+    return {
+      operations: {
+        async exec(_command, _cwd, { onData, signal }) {
+          if (signal?.aborted) throw new Error('aborted');
+          onData(Buffer.from(output));
+          return { exitCode: 0 };
+        },
+      },
+    };
   });
 }
 `;
@@ -274,6 +294,39 @@ export default function (pi) {
   worker.postMessage({ type: 'setModel', provider: 'pi-chat-smoke', modelId: 'smoke-model' });
   await modelSnapshot;
 
+  for (const shellCase of [
+    { command: 'PI_CHAT_USER_BASH_SMOKE included', excludeFromContext: false, output: 'USER_BASH_RESULT:included' },
+    { command: 'PI_CHAT_USER_BASH_SMOKE excluded', excludeFromContext: true, output: 'USER_BASH_RESULT:excluded' },
+  ]) {
+    const shellStartedPromise = waitForWorkerMessage((message) => message?.type === 'run-started'
+      && message.shellCommand === true && message.command === shellCase.command, 'Pi shell-command start');
+    const shellOutputPromise = waitForWorkerMessage((message) => message?.type === 'bash-execution-update'
+      && typeof message.delta === 'string' && message.delta.includes(shellCase.output), 'Pi shell-command output');
+    const shellFinishedPromise = waitForWorkerMessage((message) => message?.type === 'run-finished'
+      && message.shellCommand === true, 'Pi shell-command completion');
+    const shellSnapshotPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
+      && Array.isArray(message.messages)
+      && message.messages.some((entry) => entry.role === 'bashExecution'
+        && entry.command === shellCase.command
+        && entry.output.includes(shellCase.output)
+        && entry.excludeFromContext === shellCase.excludeFromContext), 'persisted Pi shell-command result');
+    worker.postMessage({ type: 'runShellCommand', command: shellCase.command, excludeFromContext: shellCase.excludeFromContext });
+    const [shellStarted, shellOutput, shellFinished, shellSnapshot] = await Promise.all([
+      shellStartedPromise,
+      shellOutputPromise,
+      shellFinishedPromise,
+      shellSnapshotPromise,
+    ]);
+    assert.equal(shellStarted.canStop, true, 'Pi shell commands should expose cancellation');
+    assert.equal(shellFinished.agentRun, false, 'Pi shell commands should not report an agent turn');
+    assert.ok(shellOutput && shellSnapshot, 'Pi shell commands should stream output and persist the result');
+  }
+  const bashHookCalls = (await readFile(bashCallsPath, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(bashHookCalls.map(({ command, excludeFromContext, cwd }) => ({ command, excludeFromContext, cwd })), [
+    { command: 'PI_CHAT_USER_BASH_SMOKE included', excludeFromContext: false, cwd: projectPath },
+    { command: 'PI_CHAT_USER_BASH_SMOKE excluded', excludeFromContext: true, cwd: projectPath },
+  ], 'Pi shell commands should invoke the configured user_bash hook with context mode and session cwd');
+
   const runFinished = waitForWorkerMessage((message) => message?.type === 'run-finished', 'turn completion');
   const savedTranscriptPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
     && Array.isArray(message.messages)
@@ -291,6 +344,8 @@ export default function (pi) {
   assert.deepEqual(providerCalls, [{
     kind: 'main',
     hasSmokePrompt: true,
+    includedBashOutputCount: 1,
+    excludedBashOutputCount: 0,
     hasCustomSystemPrompt: true,
     hasAppendedPromptText: true,
     hasAppendedPromptFile: true,
@@ -386,7 +441,7 @@ export default function (pi) {
   const [fallbackNotice, fallbackOptions] = await Promise.all([fallbackNoticePromise, fallbackOptionsPromise]);
   assert.ok(fallbackNotice && fallbackOptions, 'an unavailable preset model should leave the new chat on Pi’s configured model default');
 
-  console.log('Worker smoke check passed: prompt overrides, explicit resources, and theme discovery controls worked; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; session tool choices survived a restart; new-chat tool and model preset defaults applied only to new sessions.');
+  console.log('Worker smoke check passed: prompt overrides, explicit resources, and theme discovery controls worked; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; user shell hooks streamed and persisted output with both context modes; session tool choices survived a restart; new-chat tool and model preset defaults applied only to new sessions.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   const resolvedTemporaryRoot = resolve(temporaryRoot);
