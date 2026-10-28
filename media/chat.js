@@ -391,6 +391,30 @@ function appendInlineText(parent, text) {
   }
 }
 
+function createCodeBlock(source, language = '') {
+  const block = document.createElement('div');
+  block.className = 'code-block';
+  const toolbar = document.createElement('div');
+  toolbar.className = 'code-toolbar';
+  const languageLabel = document.createElement('span');
+  languageLabel.className = 'code-language';
+  languageLabel.textContent = language || 'Code';
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'text-button code-copy';
+  copy.textContent = source.length <= 100_000 ? 'Copy' : 'Too large to copy';
+  copy.title = source.length <= 100_000 ? 'Copy code to clipboard' : 'Code block exceeds the 100,000 character clipboard limit';
+  copy.disabled = source.length > 100_000;
+  copy.addEventListener('click', () => post('copyText', { text: source }));
+  toolbar.append(languageLabel, copy);
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.textContent = source;
+  pre.append(code);
+  block.append(toolbar, pre);
+  return block;
+}
+
 function renderMarkdown(container, text) {
   container.replaceChildren();
   const lines = String(text || '').split('\n');
@@ -420,20 +444,7 @@ function renderMarkdown(container, text) {
         codeLines = [];
         language = fence[1];
       } else {
-        const block = document.createElement('div');
-        block.className = 'code-block';
-        if (language) {
-          const languageLabel = document.createElement('div');
-          languageLabel.className = 'code-language';
-          languageLabel.textContent = language;
-          block.append(languageLabel);
-        }
-        const pre = document.createElement('pre');
-        const code = document.createElement('code');
-        code.textContent = codeLines.join('\n');
-        pre.append(code);
-        block.append(pre);
-        container.append(block);
+        container.append(createCodeBlock(codeLines.join('\n'), language));
         codeLines = undefined;
         language = '';
       }
@@ -479,14 +490,7 @@ function renderMarkdown(container, text) {
   }
 
   if (codeLines) {
-    const block = document.createElement('div');
-    block.className = 'code-block';
-    const pre = document.createElement('pre');
-    const code = document.createElement('code');
-    code.textContent = codeLines.join('\n');
-    pre.append(code);
-    block.append(pre);
-    container.append(block);
+    container.append(createCodeBlock(codeLines.join('\n'), language));
   }
   flushParagraph();
   flushList();

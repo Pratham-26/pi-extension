@@ -311,6 +311,20 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         });
         return;
       }
+      case 'copyText': {
+        if (typeof message.text !== 'string') return;
+        if (message.text.length > 100_000) {
+          this.post({ type: 'notice', message: 'That code block is too large to copy from the chat.', isError: true });
+          return;
+        }
+        try {
+          await vscode.env.clipboard.writeText(message.text);
+          this.post({ type: 'notice', message: 'Code copied to the clipboard.' });
+        } catch (error) {
+          this.post({ type: 'notice', message: error instanceof Error ? error.message : 'Could not write to the clipboard.', isError: true });
+        }
+        return;
+      }
       case 'setModel':
       case 'setThinkingLevel':
       case 'setTools':

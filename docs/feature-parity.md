@@ -26,7 +26,7 @@ This checklist follows Pendant's published [guide](https://pendant.sh/guide/) as
 - [x] Export the active session as HTML or JSONL.
 - [~] Render a safe Markdown subset; full Markdown, math, Mermaid, image output, thinking blocks, and extension renderers are not supported.
 - [~] Tool cards show live activity; historical tool cards, edit diffs, exploration grouping, focused transcript mode, and per-tool expansion settings are not restored/rendered.
-- [~] Copy actions for code blocks, symbol links, and prompt suggestions are missing; message quoting, bookmark lists, and context compaction are available.
+- [~] Code blocks can be copied; symbol links and model-generated prompt suggestions are missing. Message quoting, bookmark lists, and context compaction are available.
 - [ ] Redacted diagnostic/bug-report export.
 - [ ] Run shell commands from `!` messages. The required direct command execution was rejected by the automatic security review, so this remains unavailable.
 
