@@ -83,14 +83,14 @@ type SessionLike = {
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
   sessionManager?: {
-    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean }; targetId?: string; replacement?: { content?: unknown } | null }>;
     getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown } }>;
     getLeafId: () => string | null;
     appendCustomEntry: (customType: string, data?: unknown) => string;
     createBranchedSession: (leafId: string) => string | undefined;
     appendSessionInfo: (name: string) => string;
     appendContextEdit?: (targetId: string, replacement: { content: unknown } | null) => string;
-    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    buildContextEntries: () => Array<{ type?: string; id: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean }; targetId?: string; replacement?: { content?: unknown } | null }>;
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
@@ -397,8 +397,33 @@ function snapshot(): void {
   for (const entry of branchEntries) {
     if (entry.type === 'context_edit' && typeof entry.targetId === 'string') contextEdits.set(entry.targetId, entry.replacement ?? null);
   }
-  const messages = branchEntries.flatMap((entry) => {
-    if (entry.type !== 'message' || !entry.message || (entry.message.role !== 'user' && entry.message.role !== 'assistant')) return [];
+  const toolCalls = new Map<string, { name: string; argsPreview: string }>();
+  for (const entry of branchEntries) {
+    if (entry.type !== 'message' || entry.message?.role !== 'assistant' || !Array.isArray(entry.message.content)) continue;
+    for (const part of entry.message.content as Array<Record<string, unknown>>) {
+      if (part.type !== 'toolCall' || typeof part.id !== 'string' || !part.id || part.id.length > 256) continue;
+      toolCalls.set(part.id, {
+        name: typeof part.name === 'string' ? part.name.slice(0, 128) : 'tool',
+        argsPreview: toolArgsPreview(part.arguments),
+      });
+    }
+  }
+  type SnapshotMessage = { role: string; text?: string; [key: string]: unknown };
+  const messages: SnapshotMessage[] = branchEntries.flatMap((entry): SnapshotMessage[] => {
+    if (entry.type !== 'message' || !entry.message) return [];
+    if (entry.message.role === 'toolResult') {
+      const toolCallId = typeof entry.message.toolCallId === 'string' ? entry.message.toolCallId.slice(0, 256) : '';
+      const call = toolCalls.get(toolCallId);
+      return [{
+        role: 'tool',
+        toolCallId,
+        toolName: typeof entry.message.toolName === 'string' ? entry.message.toolName.slice(0, 128) : call?.name ?? 'tool',
+        argsPreview: call?.argsPreview ?? '{}',
+        result: toolOutput(entry.message),
+        isError: entry.message.isError === true,
+      }];
+    }
+    if (entry.message.role !== 'user' && entry.message.role !== 'assistant') return [];
     const display = toUiMessage(entry.message);
     if (!display) return [];
     if (!contextEdits.has(entry.id)) return [{ ...display, entryId: entry.id }];

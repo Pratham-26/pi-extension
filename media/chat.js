@@ -789,9 +789,11 @@ function renderMessages(shouldFollow = true) {
   ui.messageList.replaceChildren();
   for (let messageIndex = 0; messageIndex < state.messages.length; messageIndex += 1) {
     const message = state.messages[messageIndex];
-    if (message.role === 'tool' && message.node instanceof HTMLElement) {
-      message.node.dataset.messageIndex = String(messageIndex);
-      ui.messageList.append(message.node);
+    if (message.role === 'tool') {
+      const node = message.node instanceof HTMLElement ? message.node : createHistoricalToolCard(message);
+      message.node = node;
+      node.dataset.messageIndex = String(messageIndex);
+      ui.messageList.append(node);
       continue;
     }
     if (message.role !== 'user' && message.role !== 'assistant') continue;
@@ -958,6 +960,29 @@ function renderMessages(shouldFollow = true) {
   ui.empty.hidden = state.messages.length > 0;
   if (shouldFollow && nearBottom) ui.messageArea.scrollTop = ui.messageArea.scrollHeight;
   updateControls();
+}
+
+function createHistoricalToolCard(message) {
+  const detail = document.createElement('details');
+  detail.className = `tool-card historical-tool-card${message.isError ? ' tool-error' : ''}`;
+  detail.open = Boolean(message.isError);
+  detail.dataset.toolId = String(message.toolCallId || '').slice(0, 256);
+  const summary = document.createElement('summary');
+  const toolName = String(message.toolName || 'tool').slice(0, 128);
+  summary.textContent = `${message.isError ? 'Failed' : 'Finished'} ${toolName}`;
+  detail.append(summary);
+  const argsPreview = typeof message.argsPreview === 'string' ? message.argsPreview.slice(0, 12000) : '';
+  if (argsPreview && argsPreview !== '{}') {
+    const args = document.createElement('pre');
+    args.className = 'tool-output tool-arguments';
+    args.textContent = `Arguments\n${argsPreview}`;
+    detail.append(args);
+  }
+  const output = document.createElement('pre');
+  output.className = 'tool-output';
+  output.textContent = String(message.result || '').slice(-12000);
+  detail.append(output);
+  return detail;
 }
 
 function updateChatSearch(moveToCurrent = false) {
@@ -2089,9 +2114,19 @@ function applySnapshot(data) {
   state.model = data.model || '';
   const messages = Array.isArray(data.messages) ? [...data.messages] : [];
   const toolMessages = state.toolMessagesBySession.get(state.sessionPath) || [];
+  const recordedToolCalls = new Set(messages.filter((message) => message.role === 'tool')
+    .map((message) => typeof message.toolCallId === 'string' ? message.toolCallId : '')
+    .filter(Boolean));
+  const unrecordedLiveTools = toolMessages.filter((message) => {
+    const id = typeof message.toolCallId === 'string'
+      ? message.toolCallId
+      : message.node instanceof HTMLElement ? message.node.dataset.toolId : '';
+    return !id || !recordedToolCalls.has(id);
+  });
+  state.toolMessagesBySession.set(state.sessionPath, unrecordedLiveTools);
   const lastAssistant = messages.findLastIndex((message) => message.role === 'assistant');
-  if (lastAssistant >= 0) messages.splice(lastAssistant, 0, ...toolMessages);
-  else messages.push(...toolMessages);
+  if (lastAssistant >= 0) messages.splice(lastAssistant, 0, ...unrecordedLiveTools);
+  else messages.push(...unrecordedLiveTools);
   state.messages = messages;
   state.busy = Boolean(data.busy);
   state.contextUsage = data.contextUsage;
@@ -2279,7 +2314,7 @@ window.addEventListener('message', (event) => {
       output.className = 'tool-output';
       output.textContent = typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}';
       detail.append(summary, output);
-      const toolMessage = { role: 'tool', node: detail };
+      const toolMessage = { role: 'tool', toolCallId: String(data.id || '').slice(0, 256), node: detail };
       state.messages.push(toolMessage);
       const currentTools = state.toolMessagesBySession.get(state.sessionPath) || [];
       currentTools.push(toolMessage);

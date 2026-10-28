@@ -477,6 +477,7 @@ button:focus-visible, textarea:focus-visible {
 .tool-card[open] summary { color: var(--text); border-bottom: 1px solid var(--line); }
 .tool-card.tool-error summary { color: var(--danger); }
 .tool-output { max-height: 220px; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; line-height: 1.45; }
+.tool-arguments { border-bottom: 1px solid var(--line); color: var(--vscode-editor-foreground, var(--text)); }
 .composer textarea {
   display: block;
   width: 100%;
