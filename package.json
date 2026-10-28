@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.99",
+  "version": "0.1.100",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -307,11 +307,13 @@
     }
   },
   "scripts": {
-    "compile": "npm run compile:extension && npm run compile:worker && npm run compile:webview",
+    "compile": "npm run compile:extension && npm run compile:worker && npm run compile:webview && npm run compile:draft-store",
     "compile:extension": "esbuild src/extension.ts --bundle --platform=node --target=node22 --external:vscode --main-fields=module,main --outfile=dist/extension.js",
     "compile:worker": "esbuild src/pi-worker.ts --bundle --platform=node --target=node22 --format=esm --external:@earendil-works/pi-coding-agent --outfile=dist/pi-worker.mjs",
     "compile:webview": "esbuild src/webview-renderers.js --bundle --platform=browser --target=es2022 --format=iife --minify --legal-comments=linked --outfile=dist/webview-renderers.js",
+    "compile:draft-store": "esbuild src/draft-store.js --bundle --platform=browser --target=es2022 --format=iife --global-name=PiChatDraftStore --outfile=dist/draft-store.js",
     "typecheck": "tsc --noEmit",
+    "smoke:drafts": "npm run compile:draft-store && node scripts/smoke-drafts.mjs",
     "smoke:worker": "node scripts/smoke-worker.mjs",
     "smoke:sessions": "node scripts/smoke-session-order.mjs",
     "smoke:prompts": "node scripts/smoke-prompt-suggestions.mjs",

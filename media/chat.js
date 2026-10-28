@@ -1,5 +1,6 @@
 /* global acquireVsCodeApi */
 const vscode = acquireVsCodeApi();
+const draftStore = window.PiChatDraftStore;
 const persistedWebviewState = vscode.getState() || {};
 const state = {
   hasWorkspace: false,
@@ -17,6 +18,12 @@ const state = {
   groupRunningSessions: false,
   sessionSortOrder: 'manual',
   drafts: persistedWebviewState.drafts && typeof persistedWebviewState.drafts === 'object' ? persistedWebviewState.drafts : {},
+  savedDrafts: draftStore.normalizeStore({}),
+  savedDraftsReady: false,
+  savedDraftSaveRequestId: '',
+  pendingDraftSave: undefined,
+  draftUndo: undefined,
+  draftUndoTimer: undefined,
   promptHistory: persistedWebviewState.promptHistory && typeof persistedWebviewState.promptHistory === 'object' ? persistedWebviewState.promptHistory : {},
   toolExpansion: Object.fromEntries(Object.entries(persistedWebviewState.toolExpansion || {})
     .filter(([name, open]) => typeof name === 'string' && name.length > 0 && name.length <= 128 && typeof open === 'boolean')
@@ -193,6 +200,12 @@ const ui = {
   renameSession: el('rename-session'),
   railSessions: el('rail-sessions'),
   attachments: el('attachments'),
+  draftsToggle: el('drafts-toggle'),
+  draftsPanel: el('drafts-panel'),
+  draftsList: el('drafts-list'),
+  saveDraft: el('save-draft'),
+  draftUndo: el('draft-undo'),
+  undoDraft: el('undo-draft'),
   mentionPanel: el('mention-panel'),
   model: el('model-label'),
   modelToggle: el('model-toggle'),
@@ -329,6 +342,36 @@ function persistWebviewState() {
   vscode.setState({ sessionPath: state.sessionPath, drafts: state.drafts, promptHistory: state.promptHistory, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces });
 }
 
+function persistSavedDrafts() {
+  const requestId = createRequestId();
+  state.savedDraftSaveRequestId = requestId;
+  post('saveSavedDrafts', { requestId, drafts: state.savedDrafts });
+  return requestId;
+}
+
+function finishSavedDraftWrite(requestId, succeeded) {
+  if (requestId !== state.savedDraftSaveRequestId) return;
+  state.savedDraftSaveRequestId = '';
+  const pending = state.pendingDraftSave;
+  state.pendingDraftSave = undefined;
+  if (!succeeded) {
+    if (pending) state.savedDrafts = pending.previousStore;
+    showNotice('Draft changes are available until this view closes, but could not be saved to local extension storage.', true);
+  } else if (pending && currentSessionKey() === pending.key && ui.prompt.value === pending.text
+    && state.attachments.length === pending.attachments.length
+    && state.attachments.every((attachment, index) => attachment === pending.attachments[index])) {
+    ui.prompt.value = '';
+    ui.prompt.style.height = 'auto';
+    state.attachments = [];
+    state.expandedContextId = '';
+    syncPromptToWorker();
+    rememberDraft();
+    renderAttachments();
+  }
+  renderDraftsPanel();
+  updateControls();
+}
+
 function isTranscriptMessageVisible(message) {
   return !state.focusedTranscript || message.role !== 'tool';
 }
@@ -363,10 +406,144 @@ function currentSessionKey() {
 
 function rememberDraft() {
   const key = currentSessionKey();
-  const draft = String(ui.prompt.value || '').slice(0, 20000);
+  const draft = String(ui.prompt.value || '').slice(0, 100_000);
   if (draft) state.drafts[key] = draft;
   else delete state.drafts[key];
   persistWebviewState();
+}
+
+function closeDraftsPanel() {
+  ui.draftsPanel.hidden = true;
+  ui.draftsToggle.setAttribute('aria-expanded', 'false');
+}
+
+function renderDraftsPanel() {
+  const key = currentSessionKey();
+  const drafts = draftStore.getDrafts(state.savedDrafts, key);
+  ui.draftsToggle.textContent = drafts.length ? `Drafts ${drafts.length}` : 'Drafts';
+  ui.draftsToggle.setAttribute('aria-label', drafts.length ? `Saved drafts, ${drafts.length}` : 'Saved drafts');
+  ui.draftsToggle.title = drafts.length ? `${drafts.length} saved drafts for this session` : 'Saved drafts for this session';
+  ui.draftsToggle.setAttribute('aria-expanded', String(!ui.draftsPanel.hidden));
+  ui.draftsToggle.disabled = !state.savedDraftsReady;
+  const draftWritePending = Boolean(state.savedDraftSaveRequestId);
+  ui.saveDraft.disabled = !state.savedDraftsReady || draftWritePending || (!ui.prompt.value.trim() && !state.attachments.length);
+  ui.draftsList.replaceChildren();
+  if (!drafts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'draft-empty';
+    empty.textContent = 'No saved drafts for this session.';
+    ui.draftsList.append(empty);
+  }
+  drafts.forEach((draft, index) => {
+    const row = document.createElement('div');
+    row.className = 'draft-row';
+    const content = document.createElement('div');
+    content.className = 'draft-row-content';
+    const preview = document.createElement('div');
+    preview.className = 'draft-row-preview';
+    preview.textContent = draft.text.replace(/\s+/g, ' ').trim().slice(0, 140)
+      || draft.attachments.map((attachment) => attachment.label).join(', ').slice(0, 140)
+      || 'Empty draft';
+    const metadata = document.createElement('div');
+    metadata.className = 'draft-row-meta';
+    const attachmentCount = draft.attachments.length;
+    const savedAt = new Date(draft.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    metadata.textContent = `${attachmentCount ? `${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'} · ` : ''}${savedAt}`;
+    content.append(preview, metadata);
+    const actions = document.createElement('div');
+    actions.className = 'draft-row-actions';
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'text-button';
+    restore.textContent = 'Restore';
+    restore.title = 'Restore this draft; swap it with the current composer when occupied';
+    restore.disabled = draftWritePending;
+    restore.addEventListener('click', () => restoreSavedDraft(index));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'text-button';
+    remove.textContent = 'Delete';
+    remove.title = 'Delete this saved draft';
+    remove.disabled = draftWritePending;
+    remove.addEventListener('click', () => deleteSavedDraft(index));
+    actions.append(restore, remove);
+    row.append(content, actions);
+    ui.draftsList.append(row);
+  });
+  const undoVisible = state.draftUndo?.key === key;
+  ui.draftUndo.hidden = !undoVisible;
+}
+
+function saveCurrentDraft() {
+  const key = currentSessionKey();
+  const draft = draftStore.makeDraft(ui.prompt.value, state.attachments);
+  if (!draft || !state.savedDraftsReady) return;
+  const result = draftStore.saveDraft(state.savedDrafts, key, draft);
+  if (!result.ok) {
+    showNotice(result.reason === 'storage'
+      ? 'Saved drafts reached the local storage limit. Delete an older draft before saving more.'
+      : 'This draft could not be saved.', true);
+    return;
+  }
+  const previousStore = state.savedDrafts;
+  state.savedDrafts = result.store;
+  state.pendingDraftSave = { key, text: ui.prompt.value, attachments: [...state.attachments], previousStore };
+  persistSavedDrafts();
+  renderDraftsPanel();
+}
+
+function restoreSavedDraft(index) {
+  const key = currentSessionKey();
+  const current = draftStore.makeDraft(ui.prompt.value, state.attachments);
+  const result = draftStore.restoreDraft(state.savedDrafts, key, index, current);
+  if (!result.ok) {
+    showNotice(result.reason === 'storage'
+      ? 'There is not enough local storage to swap these drafts.'
+      : 'That saved draft is no longer available.', true);
+    return;
+  }
+  state.savedDrafts = result.store;
+  persistSavedDrafts();
+  state.draftUndo = undefined;
+  clearTimeout(state.draftUndoTimer);
+  ui.prompt.value = result.draft.text;
+  ui.prompt.style.height = 'auto';
+  state.attachments = result.draft.attachments.map((attachment) => ({ ...attachment }));
+  state.expandedContextId = '';
+  ui.prompt.dispatchEvent(new Event('input'));
+  syncPromptToWorker();
+  renderAttachments();
+  renderDraftsPanel();
+}
+
+function deleteSavedDraft(index) {
+  const key = currentSessionKey();
+  const result = draftStore.deleteDraft(state.savedDrafts, key, index);
+  if (!result.ok) return;
+  state.savedDrafts = result.store;
+  persistSavedDrafts();
+  state.draftUndo = { key, draft: result.draft, index: result.index };
+  clearTimeout(state.draftUndoTimer);
+  state.draftUndoTimer = setTimeout(() => {
+    state.draftUndo = undefined;
+    renderDraftsPanel();
+  }, 8_000);
+  renderDraftsPanel();
+}
+
+function undoDeletedDraft() {
+  const undo = state.draftUndo;
+  if (!undo || undo.key !== currentSessionKey()) return;
+  const result = draftStore.undoDelete(state.savedDrafts, undo.key, undo.draft, undo.index);
+  if (!result.ok) {
+    showNotice('There is not enough local storage to undo this deletion.', true);
+    return;
+  }
+  state.savedDrafts = result.store;
+  persistSavedDrafts();
+  state.draftUndo = undefined;
+  clearTimeout(state.draftUndoTimer);
+  renderDraftsPanel();
 }
 
 function rememberPrompt(text) {
@@ -480,7 +657,9 @@ function updateWorkspace(name, hasWorkspace) {
 function updateControls() {
   const hasText = Boolean(ui.prompt.value.trim() || state.attachments.length || state.pinnedFile);
   const hasQueuedWork = state.queue.steering.length + state.queue.followUp.length > 0;
+  ui.draftsToggle.disabled = !state.savedDraftsReady;
   ui.send.disabled = !state.hasWorkspace || !hasText;
+  ui.saveDraft.disabled = !state.savedDraftsReady || Boolean(state.savedDraftSaveRequestId) || (!ui.prompt.value.trim() && !state.attachments.length);
   ui.prompt.disabled = !state.hasWorkspace || state.switchingSession;
   ui.extensionEditorView.tabIndex = state.hasWorkspace && !state.switchingSession ? 0 : -1;
   ui.extensionEditorView.setAttribute('aria-disabled', String(!state.hasWorkspace || state.switchingSession));
@@ -4276,21 +4455,33 @@ function beginAssistantMessage() {
 function applySnapshot(data) {
   const nextSessionPath = data.sessionFile || '';
   if (nextSessionPath !== state.sessionPath) {
+    let savedDraftsChanged = false;
     state.promptSuggestions = undefined;
     const previousKey = state.sessionPath || '__new';
-    const currentDraft = String(ui.prompt.value || '').slice(0, 20000);
+    const currentDraft = String(ui.prompt.value || '').slice(0, 100_000);
     if (currentDraft) state.drafts[previousKey] = currentDraft;
-    if (previousKey === '__new' && currentDraft && !state.drafts[nextSessionPath]) state.drafts[nextSessionPath] = currentDraft;
-    if (!state.drafts[nextSessionPath] && state.drafts.__new) state.drafts[nextSessionPath] = state.drafts.__new;
-    if (!state.promptHistory[nextSessionPath] && state.promptHistory.__new) state.promptHistory[nextSessionPath] = state.promptHistory.__new;
-    delete state.drafts.__new;
-    delete state.promptHistory.__new;
+    if (nextSessionPath && previousKey === '__new') {
+      if (currentDraft && !state.drafts[nextSessionPath]) state.drafts[nextSessionPath] = currentDraft;
+      if (!state.drafts[nextSessionPath] && state.drafts.__new) state.drafts[nextSessionPath] = state.drafts.__new;
+      if (!state.promptHistory[nextSessionPath] && state.promptHistory.__new) state.promptHistory[nextSessionPath] = state.promptHistory.__new;
+      if (state.savedDrafts.__new) {
+        const existingDrafts = draftStore.getDrafts(state.savedDrafts, nextSessionPath);
+        state.savedDrafts = { ...state.savedDrafts, [nextSessionPath]: [...existingDrafts, ...state.savedDrafts.__new].slice(0, draftStore.MAX_DRAFTS_PER_SESSION) };
+        savedDraftsChanged = true;
+      }
+      delete state.drafts.__new;
+      delete state.promptHistory.__new;
+      delete state.savedDrafts.__new;
+    }
     state.sessionPath = nextSessionPath;
-    ui.prompt.value = state.drafts[nextSessionPath] || '';
+    ui.prompt.value = state.drafts[nextSessionPath] || state.drafts.__new || '';
     state.extensionEditorText = ui.prompt.value;
     syncPromptToWorker();
     state.switchingSession = false;
     state.promptHistoryIndex = -1;
+    closeDraftsPanel();
+    renderDraftsPanel();
+    if (savedDraftsChanged) persistSavedDrafts();
     persistWebviewState();
   }
   state.hasSession = Boolean(data.sessionId || data.sessionFile);
@@ -4333,6 +4524,25 @@ function applySnapshot(data) {
 window.addEventListener('message', (event) => {
   const data = event.data || {};
   switch (data.type) {
+    case 'saved-drafts': {
+      state.savedDrafts = draftStore.normalizeStore(data.drafts);
+      state.savedDraftsReady = true;
+      if (state.sessionPath && state.savedDrafts.__new) {
+        const current = draftStore.getDrafts(state.savedDrafts, state.sessionPath);
+        state.savedDrafts = { ...state.savedDrafts, [state.sessionPath]: [...current, ...state.savedDrafts.__new].slice(0, draftStore.MAX_DRAFTS_PER_SESSION) };
+        delete state.savedDrafts.__new;
+        persistSavedDrafts();
+      }
+      renderDraftsPanel();
+      updateControls();
+      break;
+    }
+    case 'saved-drafts-saved':
+      finishSavedDraftWrite(data.requestId, true);
+      break;
+    case 'saved-drafts-save-failed':
+      finishSavedDraftWrite(data.requestId, false);
+      break;
     case 'workspace':
       updateWorkspace(data.name, data.hasWorkspace);
       break;
@@ -5063,6 +5273,15 @@ ui.packageSearchButton.addEventListener('click', () => {
 ui.popularPackagesButton.addEventListener('click', () => startPackageSearch('', true));
 el('prompt-template-cancel').addEventListener('click', closePromptTemplateForm);
 el('prompt-template-use').addEventListener('click', usePromptTemplate);
+ui.draftsToggle.addEventListener('click', () => {
+  const open = ui.draftsPanel.hidden;
+  closeComposerPopovers();
+  ui.draftsPanel.hidden = !open;
+  ui.draftsToggle.setAttribute('aria-expanded', String(open));
+  renderDraftsPanel();
+});
+ui.saveDraft.addEventListener('click', saveCurrentDraft);
+ui.undoDraft.addEventListener('click', undoDeletedDraft);
 el('send').addEventListener('click', () => sendPrompt());
 el('stop').addEventListener('click', () => post('stop'));
 ui.dialogSubmit.addEventListener('click', () => {
@@ -5090,6 +5309,11 @@ document.addEventListener('keyup', (event) => handleExtensionEditorKeyboard(even
 document.addEventListener('keydown', (event) => handleExtensionWidgetKeyboard(event, 1), true);
 document.addEventListener('keyup', (event) => handleExtensionWidgetKeyboard(event, 3), true);
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !ui.draftsPanel.hidden) {
+    closeDraftsPanel();
+    ui.draftsToggle.focus();
+    event.preventDefault();
+  }
   if (event.key === 'Escape' && (!ui.modelPopover.hidden || !ui.toolsPopover.hidden || !ui.skillsPopover.hidden)) {
     const activeToggle = [ui.modelToggle, ui.toolsToggle, ui.skillsToggle]
       .find((toggle) => toggle.getAttribute('aria-expanded') === 'true');
@@ -5128,6 +5352,7 @@ function closeComposerPopovers() {
   ui.runtimeSettings.hidden = true;
   ui.runtimeSettingsToggle.setAttribute('aria-expanded', 'false');
   ui.composerControls.classList.remove('popover-open');
+  closeDraftsPanel();
 }
 
 function syncComposerPopoverOpenState() {
@@ -5141,13 +5366,16 @@ function dismissComposerPopoversFromOutside(event) {
     [ui.toolsPopover, ui.toolsToggle],
     [ui.skillsPopover, ui.skillsToggle],
   ].filter(([popover]) => !popover.hidden);
-  if (!openPopovers.length) return;
+  const draftPanelOpen = !ui.draftsPanel.hidden;
+  if (!openPopovers.length && !draftPanelOpen) return;
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
   const target = event.target;
   const isInside = (element) => eventPath.includes(element)
     || (target instanceof Node && element.contains(target));
   if (openPopovers.some(([popover, toggle]) => isInside(popover) || isInside(toggle))) return;
-  closeComposerPopovers();
+  if (draftPanelOpen && (isInside(ui.draftsPanel) || isInside(ui.draftsToggle))) return;
+  if (openPopovers.length) closeComposerPopovers();
+  else closeDraftsPanel();
 }
 
 function dismissComposerPopoversWhenPointerLeavesWebview(event) {

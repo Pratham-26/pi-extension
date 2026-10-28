@@ -14,7 +14,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Create a Git worktree on a new local branch, review the destination and checkout-hook/filter warning, optionally copy explicitly selected ignored files without overwriting, and optionally open it in a separate VS Code window; remove clean worktrees with a separate confirmation
 - Cumulative active-session token and cost totals from Pi's recorded usage
 - A bounded local diagnostic log with timestamps and generic error categories (**Pi Chat: Open Local Diagnostic Log**), plus a redacted report with software versions and generic error categories only
-- Transcript search across messages, visible thinking, and tool output; quote-to-prompt with jump-back references; persistent bookmarks; branch-safe omit/edit/restore controls and bounded inline revision history for model context; prompt history/drafts; and a context-usage meter with confirmed Pi compaction
+- Transcript search across messages, visible thinking, and tool output; quote-to-prompt with jump-back references; persistent bookmarks; branch-safe omit/edit/restore controls and bounded inline revision history for model context; prompt history, session-scoped saved drafts with attachment restore and delete undo; and a context-usage meter with confirmed Pi compaction
 - Copy controls for assistant code blocks, workspace definition links on inline symbols in finished replies, and on-demand model-generated follow-up prompts that fill the composer without sending automatically
 - Queued Pi extension dialogs with request-matched responses, abort signals, optional deadlines with countdowns, bounded static widgets and interactive text-only widget cards with keyboard/pointer input, selectable Pi extension UI mode, header/footer components, text-only interactive extension components with keyboard/pointer input and cancellation, custom editor components rendered through a bounded text bridge with routed input and composer synchronization, safe structured tool details, checklist results, supported subagent transcripts and usage, and hidden-view VS Code notifications
 
@@ -24,11 +24,11 @@ See [the feature coverage checklist](docs/feature-coverage.md) for implemented a
 
 Run `npm run smoke:worker` to open a real Pi SDK worker with a temporary configuration and a loopback-only mock model. The check selects a model, streams one response, verifies the persisted session transcript, and removes its temporary data. It uses Pi offline mode, an empty tool set, and a temporary config; it does not read the user's Pi credentials or call an external provider.
 
-Run `npm run smoke:sessions` to verify pinned priority, saved manual order, recent/title sorting, and the recent-order fallback without modifying Pi session files.
+Run `npm run smoke:sessions` to verify pinned priority, saved manual order, recent/title sorting, and the recent-order fallback without modifying Pi session files. Run `npm run smoke:drafts` to exercise saved-draft session isolation, text/image context, swap restore, delete undo, retention limits, persisted-data validation, and storage bounds.
 
 Set `piChat.sessions.openLatestOnStart` in VS Code Settings to reopen the latest session for the active workspace when the chat view starts. It defaults to `false`.
 
-The extension instantiates the bundled Pi SDK directly in a worker thread; it does not launch the Pi CLI and speak the CLI's RPC protocol. The `piChat.extensionUiMode` setting controls the UI mode exposed to loaded Pi extensions. The webview uses a restrictive Content Security Policy and renders Pi output as text or a safe Markdown subset; external links are limited to HTTPS and loopback HTTP. It does not add telemetry or route requests through a hosted service. Live session indicators are shared between local VS Code windows using short-lived records with hashed session identifiers and generic activity labels; prompts, titles, and file paths are not stored in those records.
+The extension instantiates the bundled Pi SDK directly in a worker thread; it does not launch the Pi CLI and speak the CLI's RPC protocol. The `piChat.extensionUiMode` setting controls the UI mode exposed to loaded Pi extensions. The webview uses a restrictive Content Security Policy and renders Pi output as text or a safe Markdown subset; external links are limited to HTTPS and loopback HTTP. It does not add telemetry or route requests through a hosted service. Saved draft contents stay in local VS Code extension storage and are only sent to Pi when you submit them. Live session indicators are shared between local VS Code windows using short-lived records with hashed session identifiers and generic activity labels; prompts, titles, and file paths are not stored in those records.
 
 Use **Pi Chat: Choose Pi Configuration Folder** to select another machine-local Pi configuration directory. The picker restarts Pi after confirmation when there is no running or queued work. If you change `piChat.agentDir` or `piChat.offlineMode` directly in VS Code Settings, use **Pi Chat: Restart Pi Runtime** to apply the change; the command refuses while Pi work is active. Offline mode disables automatic startup network operations, but it does not block model API requests.
 
@@ -50,10 +50,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.90.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.100.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.90.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.100.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.

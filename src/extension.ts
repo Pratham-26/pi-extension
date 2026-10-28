@@ -6,6 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { isPiPackageSource } from './package-source';
+import * as draftStore from './draft-store';
 import { appendDiagnosticLog, DIAGNOSTIC_LOG_FILENAME, type DiagnosticCategory } from './diagnostic-log';
 import {
   copyIgnoredFileSafely,
@@ -414,6 +415,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private readonly outputChannel: vscode.OutputChannel;
   private readonly extensionStatuses = new Map<string, string>();
   private logWriteQueue: Promise<void> = Promise.resolve();
+  private savedDraftsWrite: Promise<void> = Promise.resolve();
 
   constructor(private readonly context: vscode.ExtensionContext, private readonly extensionStatusBarItem?: vscode.StatusBarItem) {
     this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
@@ -1531,6 +1533,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'ready':
         this.sessionSearchAllWorkspaces = message.allWorkspaces === true;
+        await this.savedDraftsWrite;
+        this.post({ type: 'saved-drafts', drafts: draftStore.normalizeStore(this.context.globalState.get<unknown>('piChat.savedDrafts')) });
         this.post({ type: 'extension-widget-pins', keys: this.getPinnedExtensionWidgetKeys() });
         this.postExtensionStatusPreferences();
         await this.ensureRuntime();
@@ -1539,6 +1543,23 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         await this.refreshGitChanges();
         this.publishPinnedActiveFile();
         return;
+      case 'saveSavedDrafts': {
+        const requestId = typeof message.requestId === 'string' && /^[a-f0-9]{24}$/.test(message.requestId)
+          ? message.requestId
+          : '';
+        if (!requestId) return;
+        const drafts = draftStore.normalizeStore(message.drafts);
+        this.savedDraftsWrite = this.savedDraftsWrite.then(async () => {
+          try {
+            await this.context.globalState.update('piChat.savedDrafts', Object.fromEntries(Object.entries(drafts)));
+            this.post({ type: 'saved-drafts-saved', requestId });
+          } catch {
+            this.post({ type: 'saved-drafts-save-failed', requestId });
+          }
+        });
+        await this.savedDraftsWrite;
+        return;
+      }
       case 'searchPiPackages':
         await this.searchPiPackages(message);
         return;
@@ -5279,6 +5300,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const nonce = randomBytes(16).toString('base64');
     const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.css'));
     const rendererUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview-renderers.js'));
+    const draftStoreUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'draft-store.js'));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'chat.js'));
     const csp = [
       "default-src 'none'",
@@ -5540,6 +5562,11 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               </div>
             </section>
           </div>
+          <section id="drafts-panel" class="drafts-panel" aria-label="Saved drafts" hidden>
+            <div class="drafts-panel-heading"><strong>Saved drafts</strong><button id="save-draft" class="text-button" type="button" title="Save the current message and attachments, then clear the composer">Save &amp; clear</button></div>
+            <div id="drafts-list" class="drafts-list"></div>
+            <div id="draft-undo" class="draft-undo" hidden><span>Draft deleted</span><button id="undo-draft" class="text-button" type="button">Undo</button></div>
+          </section>
           <div id="extension-editor-view" class="extension-editor-view" role="textbox" aria-label="Pi extension editor" aria-multiline="true" tabindex="0" hidden></div>
           <textarea id="prompt" rows="1" aria-label="Message Pi" placeholder="Ask Pi anything"></textarea>
           <div class="composer-bottom">
@@ -5553,6 +5580,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <button id="attach-folder" class="text-button" type="button" title="Attach a folder">Folder</button>
               <button id="attach-diagnostics" class="text-button" type="button" title="Attach problems from the active file">Problems</button>
               <button id="attach-git" class="text-button" type="button" title="Attach Git status">Git</button>
+              <button id="drafts-toggle" class="text-button drafts-toggle" type="button" aria-expanded="false" aria-controls="drafts-panel">Drafts</button>
             </div>
             <button id="send" class="send-button" type="button" title="Send message" aria-label="Send message">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
@@ -5571,6 +5599,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     </section>
   </div>
   <script nonce="${nonce}" src="${rendererUri}"></script>
+  <script nonce="${nonce}" src="${draftStoreUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
