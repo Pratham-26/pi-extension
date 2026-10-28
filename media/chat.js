@@ -49,6 +49,10 @@ const state = {
   skills: [],
   prompts: [],
   resourceDiagnostics: [],
+  packages: [],
+  packagesAvailable: false,
+  projectTrusted: false,
+  packageStatus: '',
   promptTemplateForm: undefined,
   tools: [],
   activeTools: [],
@@ -159,6 +163,13 @@ const ui = {
   extensionCommandSuggestions: el('extension-command-suggestions'),
   promptList: el('prompt-list'),
   resourceDiagnostics: el('resource-diagnostics'),
+  packageList: el('package-list'),
+  packageEmpty: el('package-empty'),
+  packageStatus: el('package-status'),
+  packageSource: el('package-source'),
+  packageScope: el('package-scope'),
+  installPackage: el('install-package'),
+  updatePackages: el('update-packages'),
   newPromptTemplate: el('new-prompt-template'),
   reloadResources: el('reload-pi-resources'),
   deliveryMode: el('delivery-mode'),
@@ -323,8 +334,13 @@ function updateControls() {
   for (const button of ui.messageList.querySelectorAll('.context-action')) button.disabled = state.busy;
   ui.newPromptTemplate.disabled = !state.hasWorkspace || state.busy;
   ui.reloadResources.disabled = !state.hasSession || state.busy;
+  ui.packageSource.disabled = !state.hasSession || state.busy;
+  ui.packageScope.disabled = !state.hasSession || state.busy;
+  ui.installPackage.disabled = !state.hasSession || state.busy || !ui.packageSource.value.trim();
+  ui.updatePackages.disabled = !state.hasSession || state.busy || state.packages.length === 0;
+  ui.packageList.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
   ui.toolsToggle.disabled = !state.hasSession || state.busy || state.tools.length === 0;
-  ui.skillsToggle.disabled = !state.hasSession || (state.skills.length === 0 && state.prompts.length === 0 && state.extensionCommands.length === 0);
+  ui.skillsToggle.disabled = !state.hasSession;
   ui.toolsPopover.querySelectorAll('input').forEach((input) => { input.disabled = state.busy; });
   ui.skillsPopover.querySelectorAll('.skill-auto-toggle').forEach((input) => {
     const skill = state.skills.find((item) => item.name === input.getAttribute('data-skill-name'));
@@ -1409,6 +1425,40 @@ function renderResourceDiagnostics() {
   ui.resourceDiagnostics.append(details);
 }
 
+function renderPackages() {
+  ui.packageList.replaceChildren();
+  ui.packageStatus.textContent = state.packageStatus;
+  const projectScope = ui.packageScope.querySelector('option[value="project"]');
+  projectScope.disabled = !state.projectTrusted;
+  if (!state.projectTrusted && ui.packageScope.value === 'project') ui.packageScope.value = 'user';
+  ui.packageEmpty.textContent = !state.packagesAvailable
+    ? 'Package manager is unavailable until a Pi session is ready.'
+    : !state.projectTrusted ? 'No visible user packages. Trust this workspace to manage project-scoped packages.' : 'No configured Pi packages.';
+  for (const item of state.packages) {
+    if (!item || typeof item.source !== 'string' || (item.scope !== 'user' && item.scope !== 'project')) continue;
+    const row = document.createElement('div');
+    row.className = 'package-row';
+    const details = document.createElement('div');
+    details.className = 'package-details';
+    const source = document.createElement('strong');
+    source.textContent = item.source.slice(0, 512);
+    source.title = item.source.slice(0, 512);
+    const scope = document.createElement('small');
+    scope.textContent = `${item.scope === 'project' ? 'Project' : 'User'} scope${item.filtered ? ' · resource filters' : ''}`;
+    details.append(source, scope);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'session-action';
+    remove.textContent = 'Remove';
+    remove.title = `Remove this package from ${item.scope} Pi settings`;
+    remove.addEventListener('click', () => post('managePackage', { action: 'remove', source: item.source, scope: item.scope }));
+    row.append(details, remove);
+    ui.packageList.append(row);
+  }
+  ui.packageEmpty.hidden = state.packages.length > 0;
+  updateControls();
+}
+
 function addPromptOption(parent, prompt) {
   const row = document.createElement('div');
   row.className = 'prompt-option-row';
@@ -1801,6 +1851,19 @@ window.addEventListener('message', (event) => {
       ui.gitReviewToggle.setAttribute('aria-expanded', 'true');
       post('refreshGitChanges');
       break;
+    case 'packages':
+      state.packagesAvailable = data.available === true;
+      state.projectTrusted = data.projectTrusted === true;
+      state.packages = Array.isArray(data.packages)
+        ? data.packages.slice(0, 200).filter((item) => item && typeof item.source === 'string' && (item.scope === 'user' || item.scope === 'project'))
+        : [];
+      state.packageStatus = '';
+      renderPackages();
+      break;
+    case 'package-progress':
+      state.packageStatus = String(data.message || 'Managing Pi packages…').slice(0, 240);
+      renderPackages();
+      break;
     case 'sessions':
       state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
       renderSessions();
@@ -1966,6 +2029,7 @@ window.addEventListener('message', (event) => {
       if (state.streamIndex >= 0 && state.messages[state.streamIndex]) state.messages[state.streamIndex].streaming = false;
       state.streamIndex = -1;
       setBusy(false);
+      if (data.packageOperation) state.packageStatus = '';
       state.queue = { steering: [], followUp: [] };
       renderQueue();
       renderMessages();
@@ -2100,6 +2164,19 @@ el('attach-diagnostics').addEventListener('click', () => post('attachDiagnostics
 el('attach-git').addEventListener('click', () => post('attachGit'));
 ui.newPromptTemplate.addEventListener('click', () => post('createPromptTemplate'));
 ui.reloadResources.addEventListener('click', () => post('reloadResources'));
+ui.packageSource.addEventListener('input', updateControls);
+ui.packageSource.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !ui.installPackage.disabled) {
+    event.preventDefault();
+    post('installPackage', { source: ui.packageSource.value.slice(0, 512), scope: ui.packageScope.value });
+  }
+});
+ui.installPackage.addEventListener('click', () => post('installPackage', {
+  source: ui.packageSource.value.slice(0, 512),
+  scope: ui.packageScope.value,
+}));
+ui.updatePackages.addEventListener('click', () => post('managePackage', { action: 'update' }));
+el('refresh-packages').addEventListener('click', () => post('listPackages'));
 el('prompt-template-cancel').addEventListener('click', closePromptTemplateForm);
 el('prompt-template-use').addEventListener('click', usePromptTemplate);
 el('send').addEventListener('click', () => sendPrompt());
@@ -2199,6 +2276,7 @@ ui.skillsToggle.addEventListener('click', () => {
   ui.skillsToggle.setAttribute('aria-expanded', String(open));
   ui.toolsToggle.setAttribute('aria-expanded', 'false');
   ui.modelToggle.setAttribute('aria-expanded', 'false');
+  if (open) post('listPackages');
 });
 document.querySelectorAll('[data-tool-preset]').forEach((button) => {
   button.addEventListener('click', () => {

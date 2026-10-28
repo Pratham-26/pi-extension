@@ -254,6 +254,22 @@ button:focus-visible, textarea:focus-visible {
 .resource-diagnostic strong { color: var(--danger); font-size: 10px; }
 .resource-diagnostic p { margin: 3px 0 0; color: var(--text); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
 .resource-diagnostic small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+.package-heading { display: flex; align-items: center; justify-content: space-between; margin: 6px 0 4px; padding: 8px 6px 5px; border-top: 1px solid var(--line); font-size: 11px; }
+.package-heading-actions { display: flex; align-items: center; gap: 4px; }
+.package-heading-actions .text-button { padding: 3px 4px; }
+.package-install-form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px; padding: 0 6px; }
+.package-install-form input, .package-install-form select { min-width: 0; padding: 5px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 10px; }
+.package-install-form select { max-width: 84px; }
+.package-install-form button { padding: 4px 6px; }
+.package-safety-note { margin: 5px 6px; color: var(--muted); font-size: 9px; line-height: 1.4; }
+.package-status { min-height: 0; padding: 0 6px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+.package-list { display: flex; flex-direction: column; gap: 2px; padding: 0 6px 5px; }
+.package-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; padding: 5px 6px; border: 1px solid var(--line); border-radius: 4px; }
+.package-details { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.package-details strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 500; }
+.package-details small { color: var(--muted); font-size: 9px; }
+.package-row .session-action { flex: 0 0 auto; }
+.package-empty { padding: 5px 6px; color: var(--muted); font-size: 9px; }
 .prompt-template-dialog { max-height: 90%; }
 .prompt-template-fields { display: flex; flex-direction: column; gap: 7px; max-height: 34vh; overflow: auto; }
 .prompt-template-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 10px; }

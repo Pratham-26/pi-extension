@@ -7,7 +7,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Persistent Pi sessions with search, pinning, colors, ordering, cloning, branching, edit-and-continue prompts, deletion, and export
 - Streamed assistant text, live tool cards, editable follow-up/steering queues, and stop controls
 - Searchable model catalog with provider sign-in, custom `models.json` editing, Pi runtime controls, confirmed catalog refresh, thinking levels, and presets
-- Per-session tool selection, skill invocation, extension command suggestions, and opt-in MCP servers from Pi configuration; prompt template argument forms, previews, create/edit, and resource diagnostics/reload
+- Per-session tool selection, skill invocation, extension command suggestions, opt-in MCP servers, and confirmed Pi package install/update/remove with user/project scope; prompt template argument forms, previews, create/edit, and resource diagnostics/reload
 - Workspace `@` file search, file/folder/image attachments, selected-line and active-file context, a persistent active-file pin, diagnostics, and Git status; optional automatic diagnostics/Git context and numbered line ranges
 - Git branch and changed-file review, bounded diffs, and confirmation-gated discard of tracked unstaged changes while preserving staged content
 - Transcript search, quote-to-prompt, persistent bookmarks, branch-safe omit/edit/restore controls for model context, prompt history/drafts, and a context-usage meter with confirmed Pi compaction
@@ -32,10 +32,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.13.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.14.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.13.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.14.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.

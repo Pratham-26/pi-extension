@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { access, lstat, open as openFile, realpath } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
+import { isPiPackageSource } from './package-source';
 
 type Attachment = {
   id: string;
@@ -360,6 +361,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'ready':
         await this.ensureRuntime();
         this.worker?.postMessage({ type: 'listSessions' });
+        this.worker?.postMessage({ type: 'listPackages' });
         await this.refreshGitChanges();
         this.publishPinnedActiveFile();
         return;
@@ -585,6 +587,33 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           'Reload Pi resources',
         );
         if (answer === 'Reload Pi resources') this.worker?.postMessage({ type: 'reloadResources' });
+        return;
+      }
+      case 'installPackage':
+      case 'managePackage': {
+        const worker = this.worker;
+        if (!worker) return;
+        const action = message.type === 'installPackage' ? 'install' : message.action;
+        const source = typeof message.source === 'string' ? message.source.trim() : '';
+        const scope = message.scope === 'project' ? 'project' : message.scope === 'user' ? 'user' : undefined;
+        if (!['install', 'remove', 'update'].includes(String(action))) return;
+        if (source.length > 512 || /[\u0000-\u001f\u007f]/.test(source)) return;
+        if ((action === 'install' && (!source || !scope)) || (action === 'remove' && (!source || !scope))) return;
+        if ((action === 'install' || action === 'remove') && !isPiPackageSource(source)) {
+          this.post({ type: 'notice', message: 'Use npm:, git:, https://, or an explicit local path as the package source.', isError: true });
+          return;
+        }
+        const scopeLabel = scope === 'project' ? 'project Pi settings' : 'global Pi settings';
+        const prompt = action === 'install'
+          ? `Install ${source} to ${scopeLabel}? Package installers may run code, and enabled extensions can execute inside Pi. Review the source before continuing.`
+          : action === 'remove'
+            ? `Remove ${source} from ${scopeLabel} and delete its managed install?`
+            : 'Update configured Pi packages? This contacts package registries or Git remotes and may change code that runs inside Pi.';
+        const label = action === 'install' ? 'Install package' : action === 'remove' ? 'Remove package' : 'Update packages';
+        const answer = await vscode.window.showWarningMessage(prompt, { modal: true }, label);
+        if (answer === label && this.worker === worker) {
+          worker.postMessage({ type: 'managePackage', action, source, scope });
+        }
         return;
       }
       case 'openPromptTemplate':
@@ -2090,7 +2119,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             <button id="model-toggle" class="control-button model-toggle" type="button" aria-expanded="false" aria-label="Choose model" title="Choose model" disabled>Choose model</button>
             <select id="thinking-choice" class="control-select thinking-select" aria-label="Reasoning level" title="Reasoning level" hidden disabled></select>
             <button id="tools-toggle" class="control-button" type="button" aria-expanded="false" disabled>Tools</button>
-            <button id="skills-toggle" class="control-button" type="button" aria-expanded="false" disabled>Skills / prompts</button>
+            <button id="skills-toggle" class="control-button" type="button" aria-expanded="false" disabled>Resources</button>
             <button id="delivery-mode" class="control-button delivery-mode" type="button" aria-label="Queued message mode" title="Click to switch between queue and steer" hidden>Queue next</button>
             <section id="model-popover" class="control-popover model-popover" aria-label="Choose a model" hidden>
               <div class="model-search-row"><input id="model-search" class="session-search" type="search" aria-label="Search models" placeholder="Search models, providers, or vision"><button id="refresh-models" class="icon-button small" type="button" title="Refresh models; may contact providers and run configured API-key commands" aria-label="Refresh model catalog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.8-3L4 10M4 5v5h5M4 13a8 8 0 0 0 14.8 3L20 14m0 5v-5h-5"/></svg></button></div>
@@ -2126,6 +2155,12 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div class="popover-heading prompt-heading"><strong>Prompt templates</strong><div class="prompt-heading-actions"><button id="new-prompt-template" class="text-button" type="button" title="Create a project prompt template">New</button><button id="reload-pi-resources" class="text-button" type="button" title="Reload extensions, skills, prompts, and themes">Reload</button></div></div>
               <div id="prompt-list" class="option-list"></div>
               <div id="resource-diagnostics" class="resource-diagnostics"></div>
+              <div class="package-heading"><strong>Pi packages</strong><div class="package-heading-actions"><button id="refresh-packages" class="text-button" type="button" title="Refresh the configured package list">Refresh</button><button id="update-packages" class="text-button" type="button" title="Update configured packages">Update all</button></div></div>
+              <div class="package-install-form"><input id="package-source" type="text" maxlength="512" aria-label="Package source" placeholder="npm:@scope/package or git:host/path"><select id="package-scope" aria-label="Package installation scope"><option value="user">User</option><option value="project">Project</option></select><button id="install-package" class="text-button" type="button">Install</button></div>
+              <p class="package-safety-note">Review package sources before installing. Package managers may run code, and enabled extensions can execute inside Pi. Project scope requires workspace trust.</p>
+              <div id="package-status" class="package-status" aria-live="polite"></div>
+              <div id="package-list" class="package-list"></div>
+              <div id="package-empty" class="package-empty">Package manager is unavailable until a Pi session is ready.</div>
             </section>
           </div>
           <textarea id="prompt" rows="1" aria-label="Message Pi" placeholder="Ask Pi anything"></textarea>

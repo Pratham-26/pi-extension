@@ -1,12 +1,14 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
+import { isPiPackageSource } from './package-source';
 import {
   createAgentSession,
   createCodemodeExtension,
   createMcpExtension,
   createToolSearchExtension,
   DefaultResourceLoader,
+  DefaultPackageManager,
   getAgentDir,
   hasTrustRequiringProjectResources,
   ProjectTrustStore,
@@ -37,6 +39,8 @@ type WorkerInput = {
   presetName?: string;
   toolNames?: string[];
   disabledSkills?: string[];
+  source?: string;
+  scope?: string;
   steering?: string[];
   followUp?: string[];
   deliverAs?: 'steer' | 'followUp';
@@ -94,7 +98,7 @@ type SessionLike = {
   autoRetryEnabled?: boolean;
   setAutoRetryEnabled?: (enabled: boolean) => void;
   setCacheWarmingMode?: (mode: 'off' | 'streaming' | 'idle') => void;
-  settingsManager?: { getCacheWarmingMode?: () => 'off' | 'streaming' | 'idle' };
+  settingsManager?: SettingsManager;
   getUserMessagesForForking?: () => Array<{ entryId: string; text: string }>;
   navigateTree?: (targetId: string, options?: { summarize?: boolean }) => Promise<{ editorText?: string; cancelled: boolean }>;
   exportToHtml?: () => Promise<string>;
@@ -130,6 +134,7 @@ const cwd = String(workerOptions?.cwd ?? process.cwd());
 let mcpEnabled = workerOptions?.mcpEnabled === true;
 const MAX_TOOL_UI_CHARS = 100_000;
 let session: SessionLike | undefined;
+let packageManager: DefaultPackageManager | undefined;
 let unsubscribe: (() => void) | undefined;
 let busy = false;
 let compacting = false;
@@ -648,6 +653,89 @@ async function listSessions(query = sessionQuery): Promise<void> {
   }
 }
 
+function sendConfiguredPackages(): void {
+  const projectTrusted = session?.settingsManager?.isProjectTrusted() === true;
+  const packages = packageManager?.listConfiguredPackages()
+    .filter((item) => item.scope === 'user' || projectTrusted)
+    .slice(0, 200).map((item) => ({
+    source: String(item.source).slice(0, 512),
+    scope: item.scope,
+    filtered: item.filtered === true,
+  })) ?? [];
+  send('packages', { available: Boolean(packageManager), projectTrusted, packages });
+}
+
+async function manageConfiguredPackage(input: WorkerInput): Promise<void> {
+  if (busy) {
+    send('notice', { message: 'Wait for the current Pi operation to finish before managing packages.' });
+    return;
+  }
+  const manager = packageManager;
+  const activeSession = session;
+  const action = input.action;
+  const source = typeof input.source === 'string' ? input.source.trim() : '';
+  const scope = input.scope === 'project' ? 'project' : input.scope === 'user' ? 'user' : undefined;
+  if (!manager || !activeSession) {
+    send('notice', { message: 'Open a Pi session before managing packages.' });
+    sendConfiguredPackages();
+    return;
+  }
+  if (action !== 'install' && action !== 'remove' && action !== 'update') return;
+  if (source.length > 512 || /[\u0000-\u001f\u007f]/.test(source)
+    || ((action === 'install' || action === 'remove') && (!source || !scope || !isPiPackageSource(source)))) {
+    send('notice', { message: 'The package source or scope is invalid.' });
+    return;
+  }
+  if (scope === 'project' && activeSession.settingsManager?.isProjectTrusted() !== true) {
+    send('notice', { message: 'Project package changes are available only after you trust this workspace.' });
+    return;
+  }
+
+  busy = true;
+  reloadingResources = true;
+  send('run-started', { canStop: false, activity: 'Managing Pi packages' });
+  const sessionSettings = activeSession.settingsManager;
+  const updatingUserPackagesOnly = action === 'update' && sessionSettings?.isProjectTrusted() !== true;
+  let operationManager = manager;
+  try {
+    if (updatingUserPackagesOnly && sessionSettings) {
+      operationManager = new DefaultPackageManager({
+        cwd,
+        agentDir: getAgentDir(),
+        settingsManager: SettingsManager.inMemory(sessionSettings.getGlobalSettings(), { projectTrusted: false }),
+      });
+    }
+    operationManager.setProgressCallback((event) => {
+      send('package-progress', { message: String(event.message ?? `${event.action} ${event.source}`).slice(0, 240) });
+    });
+    if (action === 'install') {
+      await manager.installAndPersist(source, { local: scope === 'project' });
+    } else if (action === 'remove') {
+      const removed = await manager.removeAndPersist(source, { local: scope === 'project' });
+      if (!removed) throw new Error('No matching package was configured in that scope.');
+    } else {
+      await operationManager.update();
+    }
+    await activeSession.reload?.();
+    const message = action === 'update'
+      ? updatingUserPackagesOnly
+        ? 'User Pi packages were updated and resources reloaded. Trust this workspace to update project-scoped packages.'
+        : 'Configured Pi packages were updated and resources reloaded.'
+      : `Pi package ${action === 'install' ? 'installed' : 'removed'} and resources reloaded.`;
+    send('notice', { message });
+  } catch (error) {
+    send('notice', { message: `Could not ${action} Pi package${source ? ` ${source}` : 's'}: ${error instanceof Error ? error.message.slice(0, 500) : 'unknown error'}`, isError: true });
+  } finally {
+    operationManager.setProgressCallback(undefined);
+    reloadingResources = false;
+    busy = false;
+    send('run-finished', { aborted: false, packageOperation: true });
+    sendConfiguredPackages();
+    snapshot();
+    sendOptions();
+  }
+}
+
 async function createSession(path?: string): Promise<boolean> {
   let createdSession: SessionLike | undefined;
   let createdExtensionsBound = false;
@@ -669,6 +757,9 @@ async function createSession(path?: string): Promise<boolean> {
     await resourceLoader.reload({ resolveProjectTrust: () => resolveProjectTrust(settingsManager) });
     const result = await createAgentSession({ cwd, sessionManager: manager, settingsManager, resourceLoader });
     createdSession = result.session as unknown as SessionLike;
+    packageManager = createdSession.settingsManager
+      ? new DefaultPackageManager({ cwd, agentDir: getAgentDir(), settingsManager: createdSession.settingsManager })
+      : undefined;
     if (mcpEnabled) {
       installExtensionUi(createdSession);
       createdExtensionsBound = true;
@@ -682,6 +773,7 @@ async function createSession(path?: string): Promise<boolean> {
     watchModelConfig();
     if (result.modelFallbackMessage) send('notice', { message: result.modelFallbackMessage });
     await listSessions();
+    sendConfiguredPackages();
     return true;
   } catch (error) {
     if (createdSession && createdSession !== session) {
@@ -1132,6 +1224,12 @@ async function handle(input: WorkerInput): Promise<void> {
         }
         return;
       }
+      case 'listPackages':
+        sendConfiguredPackages();
+        return;
+      case 'managePackage':
+        await manageConfiguredPackage(input);
+        return;
       case 'reloadResources': {
         if (!session?.reload || busy) return;
         busy = true;
