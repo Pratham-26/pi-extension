@@ -628,6 +628,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case 'openSymbol':
+        await this.openWorkspaceSymbol(message.name);
+        return;
       case 'setModel':
       case 'setThinkingLevel':
       case 'setTools':
@@ -1856,6 +1859,50 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         enabled: pending.enabled,
         error: 'Could not save this choice in VS Code settings. The active session keeps the selected value until it closes.',
       });
+    }
+  }
+
+  private async openWorkspaceSymbol(value: unknown): Promise<void> {
+    if (typeof value !== 'string' || value.length > 128
+      || !/^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*){0,3}$/.test(value)) {
+      this.post({ type: 'notice', message: 'That code symbol could not be opened.', isError: true });
+      return;
+    }
+    const query = value.split('.').at(-1) || value;
+    try {
+      const results = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+        'vscode.executeWorkspaceSymbolProvider',
+        query,
+      );
+      const matches = (results ?? [])
+        .filter((symbol) => symbol.name === query || symbol.name === value)
+        .map((symbol) => ({ name: symbol.name, location: symbol.location }))
+        .filter((symbol) => Boolean(vscode.workspace.getWorkspaceFolder(symbol.location.uri)))
+        .slice(0, 40);
+      if (!matches.length) {
+        this.post({ type: 'notice', message: `No workspace definition found for “${value}”.` });
+        return;
+      }
+      const choices = matches.map((symbol) => {
+        const location = symbol.location;
+        const folder = vscode.workspace.getWorkspaceFolder(location.uri);
+        const fileName = folder && location.uri.scheme === 'file'
+          ? path.relative(folder.uri.fsPath, location.uri.fsPath).replaceAll('\\', '/')
+          : location.uri.scheme;
+        return {
+          label: `$(symbol-method) ${symbol.name}`,
+          description: `${fileName}:${location.range.start.line + 1}`,
+          location,
+        };
+      });
+      const selected = choices.length === 1
+        ? choices[0]
+        : await vscode.window.showQuickPick(choices, { placeHolder: `Open definition of ${value}`, matchOnDescription: true });
+      if (!selected) return;
+      const document = await vscode.workspace.openTextDocument(selected.location.uri);
+      await vscode.window.showTextDocument(document, { preview: true, selection: selected.location.range });
+    } catch {
+      this.post({ type: 'notice', message: 'Could not resolve that code symbol in the workspace.', isError: true });
     }
   }
 

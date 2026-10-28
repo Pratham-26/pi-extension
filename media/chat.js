@@ -483,7 +483,7 @@ function contextLabels(context) {
   return String(context || '').split('\n').map((line) => line.trim()).filter((line) => line.startsWith('@'));
 }
 
-function appendInlineText(parent, text) {
+function appendInlineText(parent, text, enableSymbolLinks = false) {
   const source = String(text);
   const tokens = /(`[^`\n]+`|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*[^*\n]+\*|\[([^\]\n]{1,500})\]\(([^)\s]{1,2048})\))/g;
   let cursor = 0;
@@ -492,9 +492,21 @@ function appendInlineText(parent, text) {
     const start = match.index ?? cursor;
     if (start > cursor) parent.append(document.createTextNode(source.slice(cursor, start)));
     if (token.startsWith('`') && token.endsWith('`')) {
-      const code = document.createElement('code');
-      code.textContent = token.slice(1, -1);
-      parent.append(code);
+      const source = token.slice(1, -1);
+      const symbol = enableSymbolLinks ? source.replace(/\(\)$/, '') : '';
+      if (symbol && source.length <= 132 && /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*){0,3}(?:\(\))?$/.test(source)) {
+        const link = document.createElement('button');
+        link.type = 'button';
+        link.className = 'symbol-link';
+        link.textContent = source;
+        link.setAttribute('aria-label', `Open definition of ${symbol}`);
+        link.addEventListener('click', () => post('openSymbol', { name: symbol }));
+        parent.append(link);
+      } else {
+        const code = document.createElement('code');
+        code.textContent = source;
+        parent.append(code);
+      }
     } else if (token.startsWith('**') && token.endsWith('**')) {
       const strong = document.createElement('strong');
       strong.textContent = token.slice(2, -2);
@@ -573,14 +585,14 @@ function isMarkdownTableDelimiter(line, columnCount) {
   return cells.length === columnCount && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
-function createMarkdownTable(headers, rows) {
+function createMarkdownTable(headers, rows, enableSymbolLinks = false) {
   const table = document.createElement('table');
   table.className = 'markdown-table';
   const head = document.createElement('thead');
   const headerRow = document.createElement('tr');
   for (const value of headers) {
     const cell = document.createElement('th');
-    appendInlineText(cell, value);
+    appendInlineText(cell, value, enableSymbolLinks);
     headerRow.append(cell);
   }
   head.append(headerRow);
@@ -589,7 +601,7 @@ function createMarkdownTable(headers, rows) {
     const row = document.createElement('tr');
     headers.forEach((_, index) => {
       const cell = document.createElement('td');
-      appendInlineText(cell, values[index] || '');
+      appendInlineText(cell, values[index] || '', enableSymbolLinks);
       row.append(cell);
     });
     body.append(row);
@@ -622,7 +634,7 @@ function createCodeBlock(source, language = '') {
   return block;
 }
 
-function renderMarkdown(container, text) {
+function renderMarkdown(container, text, enableSymbolLinks = false) {
   container.replaceChildren();
   const lines = String(text || '').split('\n');
   let paragraph = [];
@@ -634,7 +646,7 @@ function renderMarkdown(container, text) {
   const flushParagraph = () => {
     if (!paragraph.length) return;
     const p = document.createElement('p');
-    appendInlineText(p, paragraph.join('\n'));
+    appendInlineText(p, paragraph.join('\n'), enableSymbolLinks);
     container.append(p);
     paragraph = [];
   };
@@ -646,7 +658,7 @@ function renderMarkdown(container, text) {
     if (!quoteLines.length) return;
     const quote = document.createElement('blockquote');
     const p = document.createElement('p');
-    appendInlineText(p, quoteLines.join('\n'));
+    appendInlineText(p, quoteLines.join('\n'), enableSymbolLinks);
     quote.append(p);
     container.append(quote);
     quoteLines = [];
@@ -692,7 +704,7 @@ function renderMarkdown(container, text) {
         rows.push(splitMarkdownTableRow(lines[rowIndex]).slice(0, tableHeaders.length));
         rowIndex += 1;
       }
-      container.append(createMarkdownTable(tableHeaders, rows));
+      container.append(createMarkdownTable(tableHeaders, rows, enableSymbolLinks));
       lineIndex = rowIndex - 1;
       continue;
     }
@@ -703,7 +715,7 @@ function renderMarkdown(container, text) {
       flushList();
       flushQuote();
       const h = document.createElement(heading[1].length === 1 ? 'h2' : 'h3');
-      appendInlineText(h, heading[2]);
+      appendInlineText(h, heading[2], enableSymbolLinks);
       container.append(h);
       continue;
     }
@@ -743,7 +755,7 @@ function renderMarkdown(container, text) {
       checkbox.checked = task[1].toLowerCase() === 'x';
       checkbox.setAttribute('aria-label', checkbox.checked ? 'Completed task' : 'Incomplete task');
       const content = document.createElement('span');
-      appendInlineText(content, task[2]);
+      appendInlineText(content, task[2], enableSymbolLinks);
       item.append(checkbox, content);
       list.append(item);
       continue;
@@ -759,7 +771,7 @@ function renderMarkdown(container, text) {
         list = document.createElement(tag);
       }
       const item = document.createElement('li');
-      appendInlineText(item, (unordered || ordered)[1]);
+      appendInlineText(item, (unordered || ordered)[1], enableSymbolLinks);
       list.append(item);
       continue;
     }
@@ -878,7 +890,7 @@ function renderMessages(shouldFollow = true) {
 
     const body = document.createElement('div');
     body.className = 'message-content';
-    if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text);
+    if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text, true);
     else body.textContent = message.text;
     if (message.role === 'user' && message.hasImages) {
       const imageSummary = document.createElement('div');
