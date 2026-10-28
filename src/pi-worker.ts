@@ -94,7 +94,7 @@ type SessionLike = {
   getActiveToolNames?: () => string[];
   setActiveToolsByName?: (toolNames: string[]) => void;
   sessionManager?: {
-    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    getEntries: () => Array<{ id?: string; type?: string; customType?: string; data?: unknown; message?: { role?: string; customType?: string; content?: unknown; display?: boolean; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
     getBranch: () => Array<{ id: string; type?: string; targetId?: string; replacement?: { content?: unknown } | null; message?: { role?: string; content?: unknown } }>;
     getLeafId: () => string | null;
     appendCustomEntry: (customType: string, data?: unknown) => string;
@@ -102,7 +102,7 @@ type SessionLike = {
     appendSessionInfo: (name: string) => string;
     appendUsage?: (kind: string, provider: string, model: string, usage: unknown, note?: string) => unknown;
     appendContextEdit?: (targetId: string, replacement: { content: unknown } | null) => string;
-    buildContextEntries: () => Array<{ type?: string; id: string; timestamp?: string; customType?: string; data?: unknown; message?: { role?: string; content?: unknown; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
+    buildContextEntries: () => Array<{ type?: string; id: string; timestamp?: string; customType?: string; content?: unknown; display?: boolean; details?: unknown; data?: unknown; message?: { role?: string; customType?: string; content?: unknown; display?: boolean; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean; details?: unknown }; targetId?: string; replacement?: { content?: unknown } | null }>;
   };
   sessionName?: string;
   setSessionName?: (name: string) => void;
@@ -119,6 +119,8 @@ type SessionLike = {
   extensionRunner?: {
     setUIContext: (ui: any, mode?: 'tui' | 'rpc' | 'json' | 'print') => void;
     emit?: (event: { type: 'session_shutdown'; reason: 'quit' | 'reload' }) => Promise<unknown>;
+    getMessageRenderer?: (customType: string) => ((message: unknown, options: { expanded: boolean; outputPad: number }, theme: unknown) => unknown) | undefined;
+    getEntryRenderer?: (customType: string) => ((entry: unknown, options: { expanded: boolean }, theme: unknown) => unknown) | undefined;
     getRegisteredCommands?: () => Array<{
       invocationName: string;
       description?: string;
@@ -718,6 +720,32 @@ function toolRendererFor(current: SessionLike, toolName: string): PiToolRenderer
   }
 }
 
+function renderPiCustomMessage(current: SessionLike, message: unknown): SafeTuiLine[] | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const customType = (message as Record<string, unknown>).customType;
+  if (typeof customType !== 'string' || !customType || customType.length > 128) return undefined;
+  try {
+    const renderer = current.extensionRunner?.getMessageRenderer?.(customType);
+    if (!renderer) return undefined;
+    return safeTuiLines(renderer(message, { expanded: false, outputPad: 1 }, getCurrentToolRendererTheme(current)));
+  } catch {
+    return undefined;
+  }
+}
+
+function renderPiCustomEntry(current: SessionLike, entry: unknown): SafeTuiLine[] | undefined {
+  if (!entry || typeof entry !== 'object') return undefined;
+  const customType = (entry as Record<string, unknown>).customType;
+  if (typeof customType !== 'string' || !customType || customType.length > 128) return undefined;
+  try {
+    const renderer = current.extensionRunner?.getEntryRenderer?.(customType);
+    if (!renderer) return undefined;
+    return safeTuiLines(renderer(entry, { expanded: false }, getCurrentToolRendererTheme(current)));
+  } catch {
+    return undefined;
+  }
+}
+
 function toolRendererState(toolCallId: string, args: unknown): ToolRendererState {
   let current = toolRendererStates.get(toolCallId);
   if (current) return current;
@@ -1136,6 +1164,10 @@ function snapshot(): void {
     }
   }
   const renderableToolCallIds = new Set([...toolCalls.keys()].slice(-50));
+  const renderableCustomEntryIds = new Set(branchEntries
+    .filter((entry) => entry.type === 'custom' || entry.type === 'custom_message' || entry.message?.role === 'custom')
+    .slice(-50)
+    .map((entry) => entry.id));
   type SnapshotMessage = { role: string; text?: string; imageContent?: unknown; [key: string]: unknown };
   const userAssistantSnapshot = (
     display: NonNullable<ReturnType<typeof toUiMessage>>,
@@ -1147,7 +1179,66 @@ function snapshot(): void {
     ...(display.hasImages ? { imageContent: content } : {}),
   });
   const messages: SnapshotMessage[] = branchEntries.flatMap((entry): SnapshotMessage[] => {
+    if (entry.type === 'custom') {
+      if (!renderableCustomEntryIds.has(entry.id)) return [];
+      const rendererLines = renderPiCustomEntry(activeSession, entry);
+      if (!rendererLines?.length) return [];
+      return [{
+        role: 'custom-entry',
+        entryId: entry.id,
+        customType: (typeof entry.customType === 'string' ? entry.customType : 'extension').slice(0, 128),
+        text: '',
+        rendererLines,
+      }];
+    }
+    if (entry.type === 'custom_message') {
+      const parsedTimestamp = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : Number.NaN;
+      const customMessage = {
+        role: 'custom',
+        customType: (typeof entry.customType === 'string' ? entry.customType : 'extension').slice(0, 128),
+        content: entry.content ?? [],
+        display: entry.display === true,
+        details: entry.details,
+        timestamp: Number.isFinite(parsedTimestamp) ? parsedTimestamp : Date.now(),
+      };
+      if (!customMessage.display) return [];
+      const rendererLines = renderableCustomEntryIds.has(entry.id)
+        ? renderPiCustomMessage(activeSession, customMessage)
+        : undefined;
+      const text = contentText(customMessage.content).slice(0, MAX_TOOL_UI_CHARS);
+      if (!rendererLines?.length && !text.trim()) return [];
+      return [{
+        role: 'custom-message',
+        entryId: entry.id,
+        customType: customMessage.customType,
+        text,
+        ...(rendererLines?.length ? { rendererLines } : {}),
+        ...(Array.isArray(customMessage.content) ? {
+          imageContent: customMessage.content,
+          imageCount: customMessage.content.filter((part: any) => part?.type === 'image').length,
+        } : {}),
+      }];
+    }
     if (entry.type !== 'message' || !entry.message) return [];
+    if (entry.message.role === 'custom') {
+      if (entry.message.display === false) return [];
+      const rendererLines = renderableCustomEntryIds.has(entry.id)
+        ? renderPiCustomMessage(activeSession, entry.message)
+        : undefined;
+      const text = contentText(entry.message.content).slice(0, MAX_TOOL_UI_CHARS);
+      if (!rendererLines?.length && !text.trim()) return [];
+      return [{
+        role: 'custom-message',
+        entryId: entry.id,
+        customType: (typeof entry.message.customType === 'string' ? entry.message.customType : 'extension').slice(0, 128),
+        text,
+        ...(rendererLines?.length ? { rendererLines } : {}),
+        ...(Array.isArray(entry.message.content) ? {
+          imageContent: entry.message.content,
+          imageCount: entry.message.content.filter((part: any) => part?.type === 'image').length,
+        } : {}),
+      }];
+    }
     if (entry.message.role === 'toolResult') {
       const toolCallId = typeof entry.message.toolCallId === 'string' ? entry.message.toolCallId.slice(0, 256) : '';
       const call = toolCalls.get(toolCallId);

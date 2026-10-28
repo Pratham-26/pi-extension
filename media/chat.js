@@ -1219,6 +1219,26 @@ function renderMessages(shouldFollow = true) {
       }
       continue;
     }
+    if (message.role === 'custom-message' || message.role === 'custom-entry') {
+      const row = document.createElement('article');
+      row.className = `message-row ${message.role}`;
+      row.dataset.messageIndex = String(messageIndex);
+      if (typeof message.entryId === 'string') row.dataset.entryId = message.entryId;
+      const role = document.createElement('div');
+      role.className = 'message-role';
+      const customType = typeof message.customType === 'string' ? message.customType.slice(0, 80) : 'extension';
+      role.textContent = `${message.role === 'custom-entry' ? 'ENTRY' : 'EXT'} · ${customType}`;
+      row.append(role);
+      const body = document.createElement('div');
+      body.className = 'message-content';
+      const rendered = createTuiOutput(message.rendererLines, 'extension-renderer-output');
+      if (rendered) body.append(rendered);
+      else if (typeof message.text === 'string' && message.text) renderMarkdown(body, message.text);
+      const hasImages = appendTranscriptImages(body, message);
+      if (rendered || message.text || hasImages) row.append(body);
+      ui.messageList.append(row);
+      continue;
+    }
     if (message.role !== 'user' && message.role !== 'assistant') continue;
     const row = document.createElement('article');
     row.className = `message-row ${message.role}`;
