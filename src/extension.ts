@@ -3292,8 +3292,22 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       { label: 'Anthropic Messages', description: 'anthropic-messages', api: 'anthropic-messages' },
       { label: 'Google Generative AI', description: 'google-generative-ai', api: 'google-generative-ai' },
       { label: 'Mistral Conversations', description: 'mistral-conversations', api: 'mistral-conversations' },
+      { label: 'Other registered Pi API', description: 'Use an API identifier registered by a loaded Pi extension', api: '__custom__' },
     ], { title: 'Add custom Pi endpoint · 4/9', placeHolder: 'Choose the API format supported by the endpoint' });
     if (!apiChoice) return;
+    let api = apiChoice.api;
+    if (api === '__custom__') {
+      const apiInput = await vscode.window.showInputBox({
+        title: 'Registered Pi API identifier',
+        prompt: 'Enter the identifier registered by a loaded Pi extension. This is not an arbitrary URL or code entry.',
+        placeHolder: 'my-custom-api',
+        validateInput: (value) => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.trim())
+          ? undefined
+          : 'Use 1–128 letters, numbers, dots, underscores, or hyphens.',
+      });
+      if (apiInput === undefined) return;
+      api = apiInput.trim();
+    }
 
     const modelIdInput = await vscode.window.showInputBox({
       title: 'Add custom Pi endpoint · 5/9',
@@ -3390,7 +3404,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     const confirmation = [
       `Add ${providerName} (${providerId}) to Pi’s machine-level models.json?`,
       `Endpoint: ${baseUrl}`,
-      `API format: ${apiChoice.api}`,
+      `API format: ${api}`,
       `Model: ${modelName} (${modelId})`,
       'No provider request is made during setup. Prompts and attached context will be sent to this endpoint only when you later use this model.',
       secretStorageKey
@@ -3412,7 +3426,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       await this.writeCustomProviderToModelsConfig(this.modelsConfigPath, providerId, {
         name: providerName,
         baseUrl,
-        api: apiChoice.api,
+        api,
         ...(environmentName ? { apiKey: `$${environmentName}` } : {}),
         models: [{
           id: modelId,
