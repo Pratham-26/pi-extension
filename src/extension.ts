@@ -1678,6 +1678,39 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'stop':
         this.worker?.postMessage({ type: 'stop' });
         return;
+      case 'stopSubagentChild': {
+        const worker = this.worker;
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : '';
+        const runId = typeof message.runId === 'string' ? message.runId : '';
+        const childId = typeof message.childId === 'string' ? message.childId : '';
+        const sessionPath = typeof message.sessionPath === 'string' ? message.sessionPath : '';
+        const validRequestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId);
+        const safeId = (value: string, maxLength: number) => value.length > 0 && value.length <= maxLength
+          && !/[\u0000-\u001f\u007f]/.test(value);
+        const valid = Boolean(worker && validRequestId
+          && safeId(toolCallId, 256) && safeId(runId, 256)
+          && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(childId)
+          && safeId(sessionPath, 4096) && safeId(this.activeSessionPath, 4096)
+          && (() => {
+            try {
+              return this.normalizeSessionPath(sessionPath) === this.normalizeSessionPath(this.activeSessionPath);
+            } catch {
+              return false;
+            }
+          })());
+        if (!valid || !worker) {
+          if (validRequestId) this.post({
+            type: 'subagent-child-stop-result',
+            requestId,
+            success: false,
+            message: 'This child task is no longer available to stop. Refresh the chat and try again.',
+          });
+          return;
+        }
+        worker.postMessage({ type: 'stopSubagentChild', requestId, toolCallId, runId, childId, sessionPath });
+        return;
+      }
       case 'send': {
         this.sessionInteractionStarted = true;
         if (typeof message.text !== 'string') return;

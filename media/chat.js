@@ -20,6 +20,8 @@ const state = {
     .filter(([name, open]) => typeof name === 'string' && name.length > 0 && name.length <= 128 && typeof open === 'boolean')
     .slice(-200)),
   promptSuggestions: undefined,
+  subagentRpcAvailable: false,
+  stoppingSubagentChildren: new Set(),
   focusedTranscript: persistedWebviewState.focusedTranscript === true,
   promptHistoryIndex: -1,
   promptHistoryDraft: '',
@@ -116,6 +118,7 @@ const state = {
   sessionStats: undefined,
   noticeTimer: undefined,
 };
+const pendingSubagentStopRequests = new Map();
 
 const el = (id) => document.getElementById(id);
 const ui = {
@@ -1727,7 +1730,7 @@ function createHistoricalToolCard(message) {
   detail.append(summary);
   updateToolRendererCard(detail, message, `${message.isError ? 'Failed' : 'Finished'} ${toolName}`);
   renderToolImages(detail, message);
-  appendStructuredToolDetails(detail, message.details);
+  appendStructuredToolDetails(detail, message.details, false, message.stoppableChildren);
   if (detail.open) requestDeferredToolRenderer(message);
   return detail;
 }
@@ -1770,6 +1773,151 @@ function subagentDetails(details) {
   if (results.length && !results.some((run) => typeof run.agent === 'string' && Array.isArray(run.messages))) return undefined;
   const omittedResults = Number.isFinite(details.omittedResults) ? Math.max(0, Math.floor(details.omittedResults)) : 0;
   return { mode: details.mode, results, omittedResults };
+}
+
+function workflowSubagentDetails(card, details) {
+  if (card.dataset.toolName !== 'subagent' || !details || typeof details !== 'object' || Array.isArray(details)
+    || details.mode !== 'workflow' || typeof details.runId !== 'string' || !details.runId
+    || details.runId.length > 256 || /[\u0000-\u001f\u007f]/.test(details.runId)) return undefined;
+  const summary = details.workflowChildren;
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)
+    || summary.version !== 1 || summary.parentToolCallId !== card.dataset.toolId
+    || summary.workflowRunId !== details.runId || !Array.isArray(summary.children)) return undefined;
+  const workflowStates = new Set(['queued', 'running', 'completed', 'failed', 'paused', 'stopped']);
+  const allowedStates = new Set(['pending', 'running', 'completed', 'failed', 'paused', 'stopped', 'rejected', 'detached']);
+  const children = summary.children.slice(0, 32).flatMap((child) => {
+    if (!child || typeof child !== 'object' || Array.isArray(child)
+      || typeof child.childId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(child.childId)
+      || !allowedStates.has(child.state)) return [];
+    return [{
+      childId: child.childId,
+      agent: typeof child.agent === 'string' ? child.agent.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 128) : '',
+      model: typeof child.model === 'string' ? child.model.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 128) : '',
+      state: child.state,
+    }];
+  });
+  return {
+    runId: details.runId,
+    workflowState: workflowStates.has(summary.workflowState) ? summary.workflowState : 'running',
+    children,
+  };
+}
+
+function appendWorkflowSubagentDetails(card, details, stoppableChildren = []) {
+  const workflow = workflowSubagentDetails(card, details);
+  if (!workflow) return false;
+  const stoppable = new Set(Array.isArray(stoppableChildren) ? stoppableChildren.filter((id) =>
+    typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)).slice(0, 32) : []);
+  const section = document.createElement('section');
+  section.className = 'tool-structured-result workflow-subagent-results';
+  const heading = document.createElement('div');
+  heading.className = 'tool-checklist-heading';
+  const title = document.createElement('strong');
+  title.textContent = 'Workflow children';
+  const count = document.createElement('span');
+  count.textContent = `${workflow.children.length} child${workflow.children.length === 1 ? '' : 'ren'} · ${workflow.workflowState || 'in progress'}`;
+  heading.append(title, count);
+  section.append(heading);
+  if (!workflow.children.length) {
+    const empty = document.createElement('p');
+    empty.className = 'tool-checklist-empty';
+    empty.textContent = 'Waiting for child tasks.';
+    section.append(empty);
+    card.append(section);
+    return true;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'workflow-child-list';
+  for (const child of workflow.children) {
+    const row = document.createElement('div');
+    row.className = `workflow-child-row workflow-child-${child.state}`;
+    const name = document.createElement('span');
+    name.className = 'workflow-child-name';
+    name.textContent = child.agent || child.childId;
+    name.title = child.model ? `${child.childId} · ${child.model}` : child.childId;
+    const status = document.createElement('span');
+    status.className = 'workflow-child-status';
+    status.textContent = child.state === 'pending' ? 'Queued' : child.state[0].toUpperCase() + child.state.slice(1);
+    row.append(name, status);
+
+    const stopKey = `${state.sessionPath}\u0000${card.dataset.toolId}\u0000${workflow.runId}\u0000${child.childId}`;
+    const stopPending = state.stoppingSubagentChildren.has(stopKey);
+    if (child.state !== 'pending' && child.state !== 'running') state.stoppingSubagentChildren.delete(stopKey);
+    else if (state.subagentRpcAvailable && (stoppable.has(child.childId) || stopPending)) {
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'subagent-child-stop';
+      stop.dataset.toolCallId = card.dataset.toolId;
+      stop.dataset.runId = workflow.runId;
+      stop.dataset.childId = child.childId;
+      stop.disabled = stopPending;
+      stop.textContent = stopPending ? 'Stop requested' : 'Stop';
+      stop.setAttribute('aria-label', `Stop ${child.agent || child.childId}`);
+      row.append(stop);
+    }
+    list.append(row);
+  }
+  section.append(list);
+  card.append(section);
+  return true;
+}
+
+function workflowStopKey(sessionPath, toolCallId, runId, childId) {
+  return `${sessionPath}\u0000${toolCallId}\u0000${runId}\u0000${childId}`;
+}
+
+function refreshWorkflowStopControls() {
+  for (const message of state.messages) {
+    if (message.role !== 'tool' || message.toolName !== 'subagent') continue;
+    const card = message.node instanceof HTMLElement ? message.node
+      : [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === message.toolCallId);
+    if (card instanceof HTMLElement) appendStructuredToolDetails(card, message.details, message.toolPartial === true, message.stoppableChildren);
+  }
+}
+
+function requestSubagentChildStop(button) {
+  const toolCallId = button.dataset.toolCallId || '';
+  const runId = button.dataset.runId || '';
+  const childId = button.dataset.childId || '';
+  if (!state.subagentRpcAvailable || !state.sessionPath || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(childId)
+    || !toolCallId || toolCallId.length > 256 || /[\u0000-\u001f\u007f]/.test(toolCallId)
+    || !runId || runId.length > 256 || /[\u0000-\u001f\u007f]/.test(runId)
+    || typeof globalThis.crypto?.randomUUID !== 'function' || pendingSubagentStopRequests.size >= 32) {
+    showNotice('This child task cannot be stopped right now. Refresh the chat and try again.', true);
+    return;
+  }
+  const requestId = globalThis.crypto.randomUUID();
+  const stopKey = workflowStopKey(state.sessionPath, toolCallId, runId, childId);
+  state.stoppingSubagentChildren.add(stopKey);
+  const request = { sessionPath: state.sessionPath, toolCallId, runId, childId, stopKey, timer: undefined };
+  request.timer = window.setTimeout(() => {
+    if (pendingSubagentStopRequests.get(requestId) !== request) return;
+    pendingSubagentStopRequests.delete(requestId);
+    state.stoppingSubagentChildren.delete(stopKey);
+    showNotice('Pi did not respond to the stop request. Try again if the child is still running.', true);
+    refreshWorkflowStopControls();
+  }, 12_000);
+  pendingSubagentStopRequests.set(requestId, request);
+  refreshWorkflowStopControls();
+  post('stopSubagentChild', { requestId, toolCallId, runId, childId, sessionPath: state.sessionPath });
+}
+
+function handleSubagentChildStopResult(data) {
+  const requestId = typeof data.requestId === 'string' ? data.requestId : '';
+  const request = pendingSubagentStopRequests.get(requestId);
+  if (!request) return;
+  window.clearTimeout(request.timer);
+  pendingSubagentStopRequests.delete(requestId);
+  if (request.sessionPath !== state.sessionPath) return;
+  if (data.success === true) {
+    state.stoppingSubagentChildren.add(request.stopKey);
+    showNotice(typeof data.message === 'string' ? data.message.slice(0, 300) : 'Stop requested.', false);
+  } else {
+    state.stoppingSubagentChildren.delete(request.stopKey);
+    showNotice(typeof data.message === 'string' ? data.message.slice(0, 300) : 'Pi could not stop this child task.', true);
+  }
+  refreshWorkflowStopControls();
 }
 
 function appendSubagentDetails(card, details, partial) {
@@ -1884,7 +2032,7 @@ function appendSubagentDetails(card, details, partial) {
   card.append(section);
 }
 
-function appendStructuredToolDetails(card, details, partial = false) {
+function appendStructuredToolDetails(card, details, partial = false, stoppableChildren = []) {
   card.querySelector('.tool-structured-result')?.remove();
   if (details === undefined || details === null) return;
   let serialized;
@@ -1894,6 +2042,8 @@ function appendStructuredToolDetails(card, details, partial = false) {
     return;
   }
   if (typeof serialized !== 'string' || serialized === '{}' || serialized === '[]' || serialized.length > 24000) return;
+
+  if (appendWorkflowSubagentDetails(card, details, stoppableChildren)) return;
 
   const subagents = subagentDetails(details);
   if (subagents) {
@@ -1963,6 +2113,13 @@ function appendStructuredToolDetails(card, details, partial = false) {
 
 ui.messageList.addEventListener('click', (event) => {
   if (!(event.target instanceof Element)) return;
+  const stopButton = event.target.closest('button.subagent-child-stop');
+  if (stopButton instanceof HTMLButtonElement) {
+    event.preventDefault();
+    event.stopPropagation();
+    requestSubagentChildStop(stopButton);
+    return;
+  }
   const groupSummary = event.target.closest('.tool-exploration-group > summary');
   const group = groupSummary?.parentElement;
   if (group instanceof HTMLDetailsElement) {
@@ -4502,6 +4659,8 @@ window.addEventListener('message', (event) => {
         argsPreview: typeof data.argsPreview === 'string' ? data.argsPreview.slice(0, 100000) : '{}',
         result: '',
         details: undefined,
+        stoppableChildren: [],
+        toolPartial: false,
         isError: false,
         rendererCall: Array.isArray(data.rendererCall) ? data.rendererCall : undefined,
         rendererResult: undefined,
@@ -4516,9 +4675,24 @@ window.addEventListener('message', (event) => {
       setBusy(true, `Running ${data.name || 'tool'}`);
       break;
     }
+    case 'subagent-rpc-capability':
+      state.subagentRpcAvailable = data.available === true;
+      if (!state.subagentRpcAvailable) {
+        for (const request of pendingSubagentStopRequests.values()) window.clearTimeout(request.timer);
+        pendingSubagentStopRequests.clear();
+        state.stoppingSubagentChildren.clear();
+      }
+      refreshWorkflowStopControls();
+      break;
+    case 'subagent-child-stop-result':
+      handleSubagentChildStopResult(data);
+      break;
     case 'tool-update':
     case 'tool-end': {
       const toolId = String(data.id || '').slice(0, 256);
+      const stoppableChildren = data.type === 'tool-update' && Array.isArray(data.stoppableChildren)
+        ? data.stoppableChildren.filter((id) => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)).slice(0, 32)
+        : [];
       const toolMessage = [...state.messages].reverse().find((message) => message.role === 'tool' && message.toolCallId === toolId);
       const card = [...ui.messageList.querySelectorAll('.tool-card')].find((item) => item.dataset.toolId === toolId)
         || (toolMessage?.node instanceof HTMLElement ? toolMessage.node : undefined);
@@ -4528,6 +4702,8 @@ window.addEventListener('message', (event) => {
       if (toolMessage) {
         toolMessage.result = text.slice(-12000);
         toolMessage.details = data.details;
+        toolMessage.stoppableChildren = stoppableChildren;
+        toolMessage.toolPartial = data.type === 'tool-update';
         if (Object.prototype.hasOwnProperty.call(data, 'rendererResult')) {
           toolMessage.rendererResult = data.rendererResult && typeof data.rendererResult === 'object' ? data.rendererResult : undefined;
         }
@@ -4551,6 +4727,8 @@ window.addEventListener('message', (event) => {
           argsPreview: '',
           result: text.slice(-12000),
           details: data.details,
+          stoppableChildren,
+          toolPartial: data.type === 'tool-update',
           isError: Boolean(data.isError),
           rendererCall: Array.isArray(data.rendererCall) ? data.rendererCall : undefined,
           rendererResult: data.rendererResult && typeof data.rendererResult === 'object' ? data.rendererResult : undefined,
@@ -4563,7 +4741,7 @@ window.addEventListener('message', (event) => {
           ? `${data.isError ? 'Failed' : 'Finished'} ${currentTool.toolName}`
           : `Running ${currentTool.toolName}`);
         if (data.type === 'tool-end') renderToolImages(card, currentTool);
-        appendStructuredToolDetails(card, data.details, data.type === 'tool-update');
+        appendStructuredToolDetails(card, data.details, data.type === 'tool-update', currentTool.stoppableChildren);
         if (data.type === 'tool-end') {
           card.classList.toggle('tool-error', Boolean(data.isError));
           const toolName = String(data.name || card.dataset.toolName || 'tool').slice(0, 128);
@@ -4855,9 +5033,9 @@ function dismissComposerPopoversFromOutside(event) {
 document.addEventListener('pointerdown', dismissComposerPopoversFromOutside, true);
 document.addEventListener('click', dismissComposerPopoversFromOutside, true);
 document.addEventListener('focusin', dismissComposerPopoversFromOutside, true);
-document.documentElement.addEventListener('pointerleave', (event) => {
-  if (event.relatedTarget === null) closeComposerPopovers();
-});
+// Leaving the webview for the VS Code workbench can still provide a relatedTarget.
+// Any pointer exit from this document is outside the composer controls.
+document.documentElement.addEventListener('pointerleave', closeComposerPopovers);
 window.addEventListener('blur', closeComposerPopovers);
 
 ui.modelToggle.addEventListener('click', () => {

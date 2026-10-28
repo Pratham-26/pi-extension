@@ -64,7 +64,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Show and open extension load-error sources and reload Pi resources.
 - [~] Browse registered Pi extension commands and request their argument suggestions; completion code runs only after a user click, and suggestions only fill the composer.
 - [x] Opt-in connections from Pi's MCP configuration; list servers and manage enablement and per-server tool exposure in user settings or trusted workspace overrides; status, login, and reconnect through `/mcp`; generic MCP tool cards.
-- [~] Recognize structured single/parallel/chain subagent results; show bounded run metadata, task text, assistant text/tool-call transcripts, usage, and errors. Partial results identify each child as running, finished, or failed while the parent tool streams; independent per-child stop controls remain unavailable.
+- [x] Recognize structured single/parallel/chain subagent results and streamed workflow child inventories. Show bounded run metadata, task text, assistant text/tool-call transcripts, usage, errors, and workflow child states. Active workflow children expose individual stop controls through the supported Pi subagent RPC, gated by live session and child identity checks.
 
 ## Git review, notifications, and privacy
 

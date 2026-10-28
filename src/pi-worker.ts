@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { existsSync, lstatSync, mkdirSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isPiPackageSource } from './package-source';
@@ -13,6 +13,8 @@ import {
   createToolSearchExtension,
   DefaultResourceLoader,
   DefaultPackageManager,
+  type ExtensionAPI,
+  type InlineExtension,
   getAgentDir,
   hasTrustRequiringProjectResources,
   ProjectTrustStore,
@@ -35,6 +37,8 @@ type WorkerInput = {
   argumentPrefix?: string;
   requestId?: string;
   toolCallId?: string;
+  runId?: string;
+  childId?: string;
   sessionPath?: string;
   gitBranch?: string | null;
   data?: unknown;
@@ -207,6 +211,12 @@ type ConfiguredPiResource = {
 let session: SessionLike | undefined;
 let sessionCreationPromise: Promise<boolean> | undefined;
 let packageManager: DefaultPackageManager | undefined;
+type SubagentRpcEventBus = ExtensionAPI['events'];
+type SubagentWorkflowStopTarget = { runId: string; sessionPath: string; childIds: Set<string> };
+let subagentRpcEvents: SubagentRpcEventBus | undefined;
+const subagentWorkflowStopTargets = new Map<string, SubagentWorkflowStopTarget>();
+const subagentWorkflowStopsPending = new Set<string>();
+const subagentWorkflowStopsAccepted = new Set<string>();
 let configuredPiResources = new Map<string, ConfiguredPiResource>();
 let unsubscribe: (() => void) | undefined;
 let busy = false;
@@ -346,6 +356,190 @@ const pendingProviderAuthRequests = new Set<string>();
 
 function send(type: string, payload: Record<string, unknown> = {}): void {
   parentPort?.postMessage({ type, ...payload });
+}
+
+function createSubagentRpcExtension(): InlineExtension {
+  return {
+    name: 'pi-chat-subagent-rpc',
+    hidden: true,
+    factory: (pi: ExtensionAPI) => {
+      const events = pi.events;
+      const unsubscribe = events.on('subagents:rpc:v1:ready', (value) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+        const ready = value as Record<string, unknown>;
+        const rpcEvents = ready.events && typeof ready.events === 'object' && !Array.isArray(ready.events)
+          ? ready.events as Record<string, unknown>
+          : undefined;
+        if (ready.version !== 1 || !Array.isArray(ready.methods) || !ready.methods.includes('stop')
+          || rpcEvents?.request !== 'subagents:rpc:v1:request'
+          || rpcEvents.replyPrefix !== 'subagents:rpc:v1:reply:') return;
+        subagentRpcEvents = events;
+        send('subagent-rpc-capability', { available: true });
+      });
+      pi.on('session_shutdown', () => {
+        unsubscribe();
+        if (subagentRpcEvents === events) {
+          subagentRpcEvents = undefined;
+          subagentWorkflowStopTargets.clear();
+          subagentWorkflowStopsPending.clear();
+          subagentWorkflowStopsAccepted.clear();
+          send('subagent-rpc-capability', { available: false });
+        }
+      });
+    },
+  };
+}
+
+const SUBAGENT_CHILD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SUBAGENT_STOP_REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
+const MAX_SUBAGENT_STOP_PARENTS = 200;
+const MAX_SUBAGENT_STOP_CHILDREN = 32;
+const MAX_ACCEPTED_SUBAGENT_STOPS = 1024;
+const MAX_PENDING_SUBAGENT_STOPS = 64;
+
+function isSubagentRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function validSubagentId(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function subagentStopTargetKey(sessionPath: string, toolCallId: string, runId: string, childId: string): string {
+  return `${sessionPath}\u0000${toolCallId}\u0000${runId}\u0000${childId}`;
+}
+
+function clearAcceptedSubagentStops(toolCallId: string): void {
+  const sessionPath = session?.sessionFile;
+  if (!validSubagentId(sessionPath, 4096) || !validSubagentId(toolCallId, 256)) return;
+  const prefix = `${sessionPath}\u0000${toolCallId}\u0000`;
+  for (const key of subagentWorkflowStopsAccepted) if (key.startsWith(prefix)) subagentWorkflowStopsAccepted.delete(key);
+}
+
+function observeSubagentWorkflowStopTargets(
+  toolCallId: string,
+  toolName: string,
+  details: unknown,
+  final = false,
+): string[] {
+  if (toolName !== 'subagent' || !validSubagentId(toolCallId, 256) || final) {
+    subagentWorkflowStopTargets.delete(toolCallId);
+    if (final) clearAcceptedSubagentStops(toolCallId);
+    return [];
+  }
+  const current = session;
+  const detailRecord = isSubagentRecord(details) ? details : undefined;
+  const summary = detailRecord && isSubagentRecord(detailRecord.workflowChildren) ? detailRecord.workflowChildren : undefined;
+  const runId = detailRecord?.mode === 'workflow' && validSubagentId(detailRecord.runId, 256) ? detailRecord.runId : '';
+  if (!current || !validSubagentId(current.sessionFile, 4096) || !runId
+    || summary?.version !== 1 || summary.parentToolCallId !== toolCallId || summary.workflowRunId !== runId
+    || !Array.isArray(summary.children)) {
+    subagentWorkflowStopTargets.delete(toolCallId);
+    return [];
+  }
+
+  const childIds = new Set<string>();
+  for (const child of summary.children.slice(0, MAX_SUBAGENT_STOP_CHILDREN)) {
+    if (!isSubagentRecord(child) || !validSubagentId(child.childId, 128)) continue;
+    if (child.state !== 'pending' && child.state !== 'running') continue;
+    const key = subagentStopTargetKey(current.sessionFile, toolCallId, runId, child.childId);
+    if (!subagentWorkflowStopsAccepted.has(key)) childIds.add(child.childId);
+  }
+  for (const child of summary.children.slice(0, MAX_SUBAGENT_STOP_CHILDREN)) {
+    if (!isSubagentRecord(child) || !validSubagentId(child.childId, 128) || child.state === 'pending' || child.state === 'running') continue;
+    subagentWorkflowStopsAccepted.delete(subagentStopTargetKey(current.sessionFile, toolCallId, runId, child.childId));
+  }
+  subagentWorkflowStopTargets.delete(toolCallId);
+  if (!childIds.size) return [];
+  subagentWorkflowStopTargets.set(toolCallId, { runId, sessionPath: current.sessionFile, childIds });
+  while (subagentWorkflowStopTargets.size > MAX_SUBAGENT_STOP_PARENTS) {
+    const oldest = subagentWorkflowStopTargets.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    subagentWorkflowStopTargets.delete(oldest);
+  }
+  return [...childIds];
+}
+
+async function requestSubagentChildStop(input: WorkerInput): Promise<void> {
+  const requestId = input.requestId ?? '';
+  const toolCallId = input.toolCallId ?? '';
+  const runId = input.runId ?? '';
+  const childId = input.childId ?? '';
+  const sessionPath = input.sessionPath ?? '';
+  const target = subagentWorkflowStopTargets.get(toolCallId);
+  const current = session;
+  const failure = (message: string) => send('subagent-child-stop-result', { requestId, success: false, message });
+  if (!SUBAGENT_STOP_REQUEST_ID_PATTERN.test(requestId) || !validSubagentId(toolCallId, 256)
+    || !validSubagentId(runId, 256) || !SUBAGENT_CHILD_ID_PATTERN.test(childId)
+    || !validSubagentId(sessionPath, 4096) || !current || sessionPath !== current.sessionFile
+    || !target || target.runId !== runId || target.sessionPath !== sessionPath || !target.childIds.has(childId)) {
+    failure('This child task is no longer available to stop. Refresh the chat and try again.');
+    return;
+  }
+  const events = subagentRpcEvents;
+  if (!events) {
+    failure('Pi subagent controls are not available in this session.');
+    return;
+  }
+  const stopKey = subagentStopTargetKey(sessionPath, toolCallId, runId, childId);
+  if (subagentWorkflowStopsPending.has(stopKey) || subagentWorkflowStopsAccepted.has(stopKey)) {
+    failure('A stop request for this child is already in progress.');
+    return;
+  }
+  if (subagentWorkflowStopsPending.size >= MAX_PENDING_SUBAGENT_STOPS) {
+    failure('Too many child stop requests are in progress. Wait for one to finish and try again.');
+    return;
+  }
+  subagentWorkflowStopsPending.add(stopKey);
+  const rpcRequestId = randomUUID();
+  const replyEvent = `subagents:rpc:v1:reply:${rpcRequestId}`;
+  let settled = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let unsubscribeReply: (() => void) | undefined;
+  const finish = (result: { success: boolean; message: string }) => {
+    if (settled) return;
+    settled = true;
+    if (timeout) clearTimeout(timeout);
+    unsubscribeReply?.();
+    subagentWorkflowStopsPending.delete(stopKey);
+    if (result.success) {
+      subagentWorkflowStopsAccepted.add(stopKey);
+      while (subagentWorkflowStopsAccepted.size > MAX_ACCEPTED_SUBAGENT_STOPS) {
+        const oldest = subagentWorkflowStopsAccepted.values().next().value;
+        if (typeof oldest !== 'string') break;
+        subagentWorkflowStopsAccepted.delete(oldest);
+      }
+    }
+    send('subagent-child-stop-result', { requestId, ...result, toolCallId, runId, childId, sessionPath });
+  };
+  try {
+    unsubscribeReply = events.on(replyEvent, (value) => {
+      if (!isSubagentRecord(value) || value.version !== 1 || value.requestId !== rpcRequestId) return;
+      if (value.success !== true) {
+        const error = isSubagentRecord(value.error) ? value.error : undefined;
+        const message = typeof error?.message === 'string' ? error.message : 'Pi could not stop this child task.';
+        finish({ success: false, message: message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300) });
+        return;
+      }
+      const data = isSubagentRecord(value.data) ? value.data : undefined;
+      if (value.method !== 'stop' || data?.runId !== runId || data.childId !== childId || data.state !== 'stopping') {
+        finish({ success: false, message: 'Pi returned an invalid stop confirmation.' });
+        return;
+      }
+      finish({ success: true, message: `Stop requested for ${childId}.` });
+    });
+    timeout = setTimeout(() => finish({ success: false, message: 'Pi did not confirm the stop request in time.' }), 10_000);
+    events.emit('subagents:rpc:v1:request', {
+      version: 1,
+      requestId: rpcRequestId,
+      method: 'stop',
+      params: { runId, childId },
+      source: { extension: 'pi-chat-vscode' },
+    });
+  } catch {
+    finish({ success: false, message: 'Pi could not stop this child task.' });
+  }
 }
 
 function contentText(content: unknown): string {
@@ -2516,6 +2710,11 @@ function sendOptions(): void {
 }
 
 async function bindSession(next: SessionLike, extensionsBound = false): Promise<void> {
+  subagentRpcEvents = undefined;
+  subagentWorkflowStopTargets.clear();
+  subagentWorkflowStopsPending.clear();
+  subagentWorkflowStopsAccepted.clear();
+  send('subagent-rpc-capability', { available: false });
   if (activePromptSuggestion) activePromptSuggestion.controller.abort();
   sessionListController?.abort();
   sessionListController = undefined;
@@ -2627,6 +2826,8 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
     } else if (event.type === 'tool_execution_update') {
       const toolCallId = String(event.toolCallId ?? '').slice(0, 256);
       const toolName = String(event.toolName ?? 'tool').slice(0, 128);
+      const details = toolDetails(event.partialResult);
+      const stoppableChildren = observeSubagentWorkflowStopTargets(toolCallId, toolName, details);
       const rendererResult = renderPiToolResult(next, toolCallId, toolName, event.args, event.partialResult, getCurrentToolRendererTheme(next), {
         isPartial: true,
         isError: event.partialResult?.isError === true,
@@ -2635,12 +2836,15 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
         id: toolCallId,
         name: toolName,
         result: toolOutput(event.partialResult),
-        details: toolDetails(event.partialResult),
+        details,
+        stoppableChildren,
         rendererResult: rendererResult ?? null,
       });
     } else if (event.type === 'tool_execution_end') {
       const toolCallId = String(event.toolCallId ?? '').slice(0, 256);
       const toolName = String(event.toolName ?? 'tool').slice(0, 128);
+      const details = toolDetails(event.result);
+      observeSubagentWorkflowStopTargets(toolCallId, toolName, details, true);
       const rendererResult = renderPiToolResult(next, toolCallId, toolName, undefined, event.result, getCurrentToolRendererTheme(next), {
         isPartial: false,
         isError: Boolean(event.isError),
@@ -2650,7 +2854,8 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
         id: toolCallId,
         name: toolName,
         result: toolOutput(event.result),
-        details: toolDetails(event.result),
+        details,
+        stoppableChildren: [],
         isError: Boolean(event.isError),
         rendererResult: rendererResult ?? null,
         ...boundedTranscriptImageFields(event.result?.content),
@@ -3385,6 +3590,7 @@ async function createSessionInternal(path?: string): Promise<boolean> {
     const manager = path ? SessionManager.open(path) : SessionManager.create(cwd);
     const settingsManager = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
     const extensionFactories = [
+      createSubagentRpcExtension(),
       createCodemodeExtension(),
       createToolSearchExtension(),
       ...(mcpEnabled ? [createMcpExtension({
@@ -3644,6 +3850,9 @@ async function handle(input: WorkerInput): Promise<void> {
       }
       case 'renderSavedToolCall':
         renderSavedToolCall(input);
+        return;
+      case 'stopSubagentChild':
+        await requestSubagentChildStop(input);
         return;
       case 'setGitBranch': {
         if (input.gitBranch !== null && (typeof input.gitBranch !== 'string' || input.gitBranch.length > 200

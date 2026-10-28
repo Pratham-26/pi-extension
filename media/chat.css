@@ -648,6 +648,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tool-structured-disclosure[open] > summary { margin: 0 8px; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
 .tool-structured-disclosure .tool-output { max-height: 180px; }
 .subagent-results { display: grid; gap: 5px; }
+.workflow-subagent-results { display: grid; gap: 5px; }
+.workflow-child-list { display: grid; gap: 2px; }
+.workflow-child-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 2px; border-top: 1px solid var(--line); }
+.workflow-child-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.workflow-child-status { flex: 0 0 auto; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 9px; }
+.workflow-child-running .workflow-child-status { color: var(--accent); }
+.workflow-child-failed .workflow-child-status, .workflow-child-rejected .workflow-child-status { color: var(--danger); }
+.subagent-child-stop { flex: 0 0 auto; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: transparent; font: inherit; font-size: 9px; cursor: pointer; }
+.subagent-child-stop:hover:not(:disabled) { color: var(--text); border-color: var(--focus); background: var(--surface-raised); }
+.subagent-child-stop:disabled { color: var(--vscode-descriptionForeground, var(--muted)); cursor: default; }
 .subagent-run { border-top: 1px solid var(--line); padding-top: 5px; }
 .subagent-run > summary, .subagent-transcript > summary { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; cursor: pointer; }
 .subagent-run[open] > summary { margin-bottom: 6px; color: var(--text); }
