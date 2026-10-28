@@ -329,14 +329,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .package-row .session-action { flex: 0 0 auto; }
 .package-empty { padding: 5px 6px; color: var(--muted); font-size: 9px; }
 .package-gallery { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
-.package-gallery-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 6px; color: var(--text); font-size: 10px; }
+.package-gallery-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 6px; color: var(--text); font-size: 10px; }
+.package-gallery-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 2px; min-width: 0; }
 .package-gallery-heading .text-button { flex: 0 0 auto; padding: 3px 5px; }
 .package-search-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; padding: 0 6px; }
 .package-search-form input { min-width: 0; padding: 5px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--surface-input); font: inherit; font-size: 10px; }
 .package-search-form button { padding: 4px 6px; }
 .package-search-result { align-items: flex-start; }
 .package-search-result .package-details small { overflow-wrap: anywhere; white-space: normal; line-height: 1.35; }
-.package-search-result .session-action { flex: 0 0 auto; }
+.package-result-actions { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 3px; }
+.package-result-actions .session-action { flex: 0 0 auto; padding: 3px 5px; font-size: 9px; }
 .prompt-template-dialog { max-height: 90%; }
 .prompt-template-fields { display: flex; flex-direction: column; gap: 7px; max-height: 34vh; overflow: auto; }
 .prompt-template-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 10px; }

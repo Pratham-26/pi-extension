@@ -2,6 +2,7 @@
 const vscode = acquireVsCodeApi();
 const draftStore = window.PiChatDraftStore;
 const persistedWebviewState = vscode.getState() || {};
+const recommendedPackageNames = new Set(['pi-subagents', '@inobit/pi-todo', '@plannotator/pi-extension']);
 const state = {
   hasWorkspace: false,
   workspaceName: '',
@@ -16,6 +17,10 @@ const state = {
   sessions: [],
   sessionQuery: '',
   sessionSearchAllWorkspaces: persistedWebviewState.sessionSearchAllWorkspaces === true,
+  dismissedPackageRecommendations: Array.isArray(persistedWebviewState.dismissedPackageRecommendations)
+    ? [...new Set(persistedWebviewState.dismissedPackageRecommendations.filter((name) => typeof name === 'string' && recommendedPackageNames.has(name)))].slice(0, 3)
+    : [],
+  showDismissedPackageRecommendations: false,
   groupRunningSessions: false,
   sessionSortOrder: 'manual',
   drafts: persistedWebviewState.drafts && typeof persistedWebviewState.drafts === 'object' ? persistedWebviewState.drafts : {},
@@ -102,6 +107,7 @@ const state = {
   packageSearchResults: [],
   packageSearchStatus: '',
   packageSearchBusy: false,
+  packageSearchMode: 'search',
   projectTrusted: false,
   packageStatus: '',
   promptTemplateForm: undefined,
@@ -301,6 +307,8 @@ const ui = {
   packageStatus: el('package-status'),
   packageSearch: el('package-search'),
   packageSearchButton: el('package-search-button'),
+  recommendedPackagesButton: el('recommended-packages'),
+  showDismissedRecommendationsButton: el('show-dismissed-recommendations'),
   popularPackagesButton: el('popular-packages'),
   packageSearchStatus: el('package-search-status'),
   packageSearchResults: el('package-search-results'),
@@ -369,7 +377,7 @@ function createRequestId() {
 }
 
 function persistWebviewState() {
-  vscode.setState({ sessionPath: state.sessionPath, drafts: state.drafts, promptHistory: state.promptHistoryEnabled ? state.promptHistory : {}, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces });
+  vscode.setState({ sessionPath: state.sessionPath, drafts: state.drafts, promptHistory: state.promptHistoryEnabled ? state.promptHistory : {}, toolExpansion: state.toolExpansion, focusedTranscript: state.focusedTranscript, sessionSearchAllWorkspaces: state.sessionSearchAllWorkspaces, dismissedPackageRecommendations: state.dismissedPackageRecommendations });
 }
 
 function persistSavedDrafts() {
@@ -792,6 +800,9 @@ function updateControls() {
   ui.packageSearch.disabled = false;
   ui.packageSearchButton.disabled = !state.packageSearchBusy && !ui.packageSearch.value.trim();
   ui.packageSearchButton.textContent = state.packageSearchBusy ? 'Cancel' : 'Search';
+  ui.recommendedPackagesButton.disabled = state.packageSearchBusy;
+  ui.showDismissedRecommendationsButton.disabled = state.packageSearchBusy;
+  ui.showDismissedRecommendationsButton.hidden = state.dismissedPackageRecommendations.length === 0;
   ui.popularPackagesButton.disabled = state.packageSearchBusy;
   ui.packageSearchResults.querySelectorAll('button').forEach((button) => { button.disabled = state.busy; });
   ui.toolsToggle.disabled = !state.hasSession || state.busy;
@@ -3701,9 +3712,20 @@ function renderPackages() {
 function renderPackageSearchResults() {
   ui.packageSearchStatus.textContent = state.packageSearchStatus;
   ui.packageSearchResults.replaceChildren();
+  const recommendationMode = state.packageSearchMode === 'recommended';
+  const installedNpmPackages = new Set(state.packages.flatMap((item) => {
+    if (typeof item?.source !== 'string' || !item.source.startsWith('npm:')) return [];
+    const match = item.source.slice(4).match(/^(@[^/]+\/[^@]+|[^@/]+)(?:@.+)?$/);
+    return match ? [match[1]] : [];
+  }));
+  let visibleResults = 0;
   for (const item of state.packageSearchResults) {
     if (!item || typeof item.name !== 'string' || typeof item.version !== 'string'
       || typeof item.source !== 'string' || typeof item.description !== 'string') continue;
+    const isRecommendation = recommendationMode && recommendedPackageNames.has(item.name);
+    if (recommendationMode && !isRecommendation) continue;
+    if (isRecommendation && (installedNpmPackages.has(item.name)
+      || (!state.showDismissedPackageRecommendations && state.dismissedPackageRecommendations.includes(item.name)))) continue;
     const row = document.createElement('div');
     row.className = 'package-row package-search-result';
     const details = document.createElement('div');
@@ -3712,7 +3734,9 @@ function renderPackageSearchResults() {
     name.textContent = `${item.name}@${item.version}`.slice(0, 260);
     name.title = name.textContent;
     const description = document.createElement('small');
-    description.textContent = item.description.slice(0, 240) || 'No description provided.';
+    description.textContent = (isRecommendation && typeof item.recommendation === 'string'
+      ? item.recommendation
+      : item.description).slice(0, 240) || 'No description provided.';
     details.append(name, description);
     const use = document.createElement('button');
     use.type = 'button';
@@ -3724,19 +3748,48 @@ function renderPackageSearchResults() {
       updateControls();
       ui.packageSource.focus();
     });
-    row.append(details, use);
+    const actions = document.createElement('div');
+    actions.className = 'package-result-actions';
+    actions.append(use);
+    if (isRecommendation) {
+      const dismiss = document.createElement('button');
+      dismiss.type = 'button';
+      dismiss.className = 'session-action package-recommendation-dismiss';
+      const isDismissed = state.dismissedPackageRecommendations.includes(item.name);
+      dismiss.textContent = isDismissed ? 'Restore' : 'Hide';
+      dismiss.title = isDismissed ? 'Show this suggestion again' : 'Hide this suggestion';
+      dismiss.addEventListener('click', () => {
+        state.dismissedPackageRecommendations = isDismissed
+          ? state.dismissedPackageRecommendations.filter((name) => name !== item.name)
+          : [...state.dismissedPackageRecommendations, item.name].slice(-3);
+        persistWebviewState();
+        renderPackageSearchResults();
+        updateControls();
+      });
+      actions.append(dismiss);
+    }
+    row.append(details, actions);
     ui.packageSearchResults.append(row);
+    visibleResults++;
+  }
+  if (recommendationMode && state.packageSearchResults.length && visibleResults === 0) {
+    ui.packageSearchStatus.textContent = 'All suggestions are already installed or hidden. Use Show hidden to restore a suggestion.';
   }
 }
 
-function startPackageSearch(query, popular = false) {
-  if (state.packageSearchBusy || (!popular && !query)) return;
+function startPackageSearch(query, mode = 'search') {
+  if (state.packageSearchBusy || (mode === 'search' && !query)) return;
   state.packageSearchBusy = true;
-  state.packageSearchStatus = popular ? 'Loading popular Pi packages from npm…' : 'Searching the public npm registry…';
+  state.packageSearchMode = mode;
+  state.packageSearchStatus = mode === 'recommended'
+    ? 'Checking suggested Pi packages on npm…'
+    : mode === 'popular' ? 'Loading popular Pi packages from npm…' : 'Searching the public npm registry…';
   state.packageSearchResults = [];
   renderPackageSearchResults();
   updateControls();
-  post('searchPiPackages', popular ? { popular: true } : { query: query.slice(0, 128) });
+  post('searchPiPackages', mode === 'recommended'
+    ? { recommended: true }
+    : mode === 'popular' ? { popular: true } : { query: query.slice(0, 128) });
 }
 
 function addPromptOption(parent, prompt) {
@@ -4878,6 +4931,7 @@ window.addEventListener('message', (event) => {
       state.packageSearchBusy = false;
       state.packageSearchStatus = String(data.status || '').slice(0, 240);
       state.packageSearchResults = Array.isArray(data.results) ? data.results.slice(0, 20) : [];
+      if (data.mode === 'recommended' || data.mode === 'popular' || data.mode === 'search') state.packageSearchMode = data.mode;
       renderPackageSearchResults();
       updateControls();
       break;
@@ -5567,7 +5621,14 @@ ui.packageSearchButton.addEventListener('click', () => {
   const query = ui.packageSearch.value.trim().slice(0, 128);
   startPackageSearch(query);
 });
-ui.popularPackagesButton.addEventListener('click', () => startPackageSearch('', true));
+ui.recommendedPackagesButton.addEventListener('click', () => startPackageSearch('', 'recommended'));
+ui.showDismissedRecommendationsButton.addEventListener('click', () => {
+  state.showDismissedPackageRecommendations = !state.showDismissedPackageRecommendations;
+  ui.showDismissedRecommendationsButton.textContent = state.showDismissedPackageRecommendations ? 'Hide hidden' : 'Show hidden';
+  if (state.packageSearchMode !== 'recommended') startPackageSearch('', 'recommended');
+  else renderPackageSearchResults();
+});
+ui.popularPackagesButton.addEventListener('click', () => startPackageSearch('', 'popular'));
 el('prompt-template-cancel').addEventListener('click', closePromptTemplateForm);
 el('prompt-template-use').addEventListener('click', usePromptTemplate);
 ui.draftsToggle.addEventListener('click', () => {
@@ -5676,7 +5737,14 @@ function dismissComposerPopoversFromOutside(event) {
 }
 
 function dismissComposerPopoversWhenPointerLeavesWebview(event) {
-  if (event.relatedTarget == null) closeComposerPopovers();
+  const relatedTarget = event.relatedTarget;
+  // A VS Code workbench element can be reported when the pointer crosses out
+  // of the webview, so the target is not always null. Treat any target outside
+  // this document as leaving the webview while preserving transitions between
+  // elements inside it.
+  if (!(relatedTarget instanceof Node) || !document.documentElement.contains(relatedTarget)) {
+    closeComposerPopovers();
+  }
 }
 
 // Dismiss at the window capture boundary before a nested control can intercept

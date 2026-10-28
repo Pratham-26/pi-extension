@@ -6,6 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { isPiPackageSource } from './package-source';
+import { loadRecommendedPiPackages } from './package-recommendations';
 import * as draftStore from './draft-store';
 import {
   boundTurnFileDiff,
@@ -320,7 +321,7 @@ function readPiExtensionStatusPreferences(): PiExtensionStatusPreferences {
   };
 }
 
-type PiPackageSearchResult = { name: string; version: string; description: string; source: string };
+type PiPackageSearchResult = { name: string; version: string; description: string; source: string; recommendation?: string };
 
 async function readBoundedJsonResponse(response: Response, maximumBytes: number): Promise<unknown> {
   const contentLength = response.headers.get('content-length');
@@ -5192,8 +5193,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   private async searchPiPackages(message: RuntimeMessage): Promise<void> {
     const popular = message.popular === true;
+    const recommended = message.recommended === true;
     const query = popular ? 'keywords:pi-package' : typeof message.query === 'string' ? message.query.trim() : '';
-    if (!query || query.length > 128 || /[\u0000-\u001f\u007f]/.test(query)) {
+    if ((!query && !recommended) || query.length > 128 || /[\u0000-\u001f\u007f]/.test(query)) {
       this.post({ type: 'package-search-results', status: 'Enter a search term up to 128 characters.', results: [] });
       return;
     }
@@ -5210,9 +5212,24 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.pendingPackageSearch = { controller, timer };
     this.post({
       type: 'package-search-state',
-      status: popular ? 'Loading popular Pi packages from npm…' : 'Searching the public npm registry…',
+      status: recommended ? 'Checking suggested Pi packages on npm…' : popular ? 'Loading popular Pi packages from npm…' : 'Searching the public npm registry…',
     });
     try {
+      if (recommended) {
+        const results = await loadRecommendedPiPackages(fetch, controller.signal);
+        if (this.pendingPackageSearch?.controller !== controller) return;
+        this.post({
+          type: 'package-search-results',
+          status: results.length
+            ? `${results.length} suggestions. Community packages are not security-reviewed; inspect each source before installing.`
+            : controller.signal.aborted
+              ? 'Checking suggestions timed out. Try again.'
+              : 'Could not load suggestions from npm. Check your connection and try again.',
+          results,
+          mode: 'recommended',
+        });
+        return;
+      }
       const url = new URL('https://registry.npmjs.org/-/v1/search');
       url.searchParams.set('text', query);
       url.searchParams.set('size', popular ? '20' : '50');
@@ -5252,6 +5269,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
             : `${results.length} results. Select Use to fill a version-pinned source.`
           : 'No eligible Pi packages were found.',
         results,
+        mode: popular ? 'popular' : 'search',
       });
     } catch {
       if (this.pendingPackageSearch?.controller !== controller) return;
@@ -6470,9 +6488,9 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
               <div id="package-list" class="package-list"></div>
               <div id="package-empty" class="package-empty">Package manager is unavailable until a Pi session is ready.</div>
               <div class="package-gallery">
-                <div class="package-gallery-heading"><strong>Discover packages</strong><button id="popular-packages" class="text-button" type="button" title="Browse Pi packages ranked by npm popularity">Popular</button></div>
+              <div class="package-gallery-heading"><strong>Discover packages</strong><div class="package-gallery-actions"><button id="recommended-packages" class="text-button" type="button" title="Browse a short list of suggested Pi packages">Recommended</button><button id="show-dismissed-recommendations" class="text-button" type="button" title="Show hidden package suggestions" hidden>Show hidden</button><button id="popular-packages" class="text-button" type="button" title="Browse Pi packages ranked by npm popularity">Popular</button></div></div>
                 <div class="package-search-form"><input id="package-search" type="search" maxlength="128" autocomplete="off" aria-label="Search Pi packages on npm" placeholder="Search Pi packages on npm"><button id="package-search-button" class="text-button" type="button" disabled>Search</button></div>
-                <p class="package-safety-note">Search sends your terms to npm. Popular shows packages tagged for Pi, sorted by npm's popularity signal; popularity is not a safety review. Review sources before installing.</p>
+                <p class="package-safety-note">Search sends your terms to npm. Recommendations are community suggestions, not a security review. Popular shows Pi-tagged packages ranked by npm's popularity signal. Review sources before installing.</p>
                 <div id="package-search-status" class="package-status" aria-live="polite"></div>
                 <div id="package-search-results" class="package-list"></div>
               </div>
