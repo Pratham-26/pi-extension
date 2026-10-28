@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -66,6 +66,11 @@
       {
         "command": "piChat.exportDiagnostics",
         "title": "Pi Chat: Export Redacted Diagnostic Report",
+        "category": "Pi Chat"
+      },
+      {
+        "command": "piChat.openLogs",
+        "title": "Pi Chat: Open Local Diagnostic Log",
         "category": "Pi Chat"
       }
     ],

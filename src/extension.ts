@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { access, lstat, open as openFile, realpath } from 'node:fs/promises';
+import { access, lstat, mkdir, open as openFile, realpath, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 import { isPiPackageSource } from './package-source';
+import { appendDiagnosticLog, DIAGNOSTIC_LOG_FILENAME, type DiagnosticCategory } from './diagnostic-log';
 
 type Attachment = {
   id: string;
@@ -110,6 +111,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piChat.cloneSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piChat.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:local.pi-chat-vscode')),
     vscode.commands.registerCommand('piChat.exportDiagnostics', () => provider.exportDiagnostics()),
+    vscode.commands.registerCommand('piChat.openLogs', () => provider.openLogs()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.restartRuntime()),
     provider,
   );
@@ -143,10 +145,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private selectionSubscription: vscode.Disposable;
   private pinnedActiveFileEnabled: boolean;
   private diagnosticEvents: Array<{ at: string; category: string }> = [];
+  private readonly outputChannel: vscode.OutputChannel;
+  private logWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
     this.openLatestSessionOnStart = vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('openLatestOnStart', false);
+    this.outputChannel = vscode.window.createOutputChannel('Pi Chat');
     this.activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (this.pinnedActiveFileEnabled && editor) this.publishPinnedActiveFile(editor);
     });
@@ -157,6 +162,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
 
   dispose(): void {
     this.cancelProviderAuthPrompts();
+    this.outputChannel.dispose();
     this.activeEditorSubscription.dispose();
     this.selectionSubscription.dispose();
     this.webviewMessageSubscription?.dispose();
@@ -245,6 +251,25 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       void vscode.window.showInformationMessage('Redacted Pi Chat diagnostic report saved.');
     } catch (error) {
       void vscode.window.showErrorMessage(`Could not save the diagnostic report. ${error instanceof Error ? error.message.slice(0, 240) : ''}`);
+    }
+  }
+
+  async openLogs(): Promise<void> {
+    try {
+      await this.logWriteQueue;
+      const logPath = path.join(this.context.globalStorageUri.fsPath, DIAGNOSTIC_LOG_FILENAME);
+      await mkdir(path.dirname(logPath), { recursive: true });
+      try {
+        const logStats = await lstat(logPath);
+        if (!logStats.isFile() || logStats.isSymbolicLink()) throw new Error('Diagnostic log path is not a regular file.');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await writeFile(logPath, '', { encoding: 'utf8', mode: 0o600 });
+      }
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(logPath));
+      await vscode.window.showTextDocument(document, { preview: true });
+    } catch {
+      void vscode.window.showErrorMessage('Could not open the local Pi Chat diagnostic log.');
     }
   }
 
@@ -1928,9 +1953,15 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     worker.postMessage({ type: 'setMcpEnabled', enabled: message.enabled, requestId });
   }
 
-  private recordDiagnostic(category: string): void {
-    this.diagnosticEvents.push({ at: new Date().toISOString(), category });
+  private recordDiagnostic(category: DiagnosticCategory): void {
+    const at = new Date().toISOString();
+    this.diagnosticEvents.push({ at, category });
     if (this.diagnosticEvents.length > 50) this.diagnosticEvents.splice(0, this.diagnosticEvents.length - 50);
+    const line = `${at} ${category}`;
+    this.outputChannel.appendLine(line);
+    this.logWriteQueue = this.logWriteQueue
+      .then(() => appendDiagnosticLog(this.context.globalStorageUri.fsPath, at, category))
+      .catch(() => this.outputChannel.appendLine('Could not write the local diagnostic log.'));
   }
 
   private async handleMcpSettingResult(message: RuntimeMessage, worker: Worker): Promise<void> {

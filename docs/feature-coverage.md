@@ -69,7 +69,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [~] Show branch and changed-file summaries, open bounded Git diffs, and discard confirmed tracked unstaged changes by restoring from the index; Pi edit-history review and untracked-file deletion are unavailable.
 - [~] Prepare editable commit-message and pull-request prompts with bounded Git change context; Pi generates the draft in the active chat after the user reviews and submits it.
 - [x] Show VS Code notifications for a finished run or extension input request while the chat view is hidden.
-- [ ] Notification sound, user-defined command hooks, and local diagnostic logs.
+- [~] A bounded local diagnostic log records timestamps and generic runtime/operation error categories; notification sound and user-defined command hooks remain unavailable.
 - [x] Keep session/model traffic local to Pi and the selected provider; the extension adds no account, proxy, or telemetry.
 - [ ] Optional OS sandbox for Pi tools.
 
