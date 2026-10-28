@@ -73,11 +73,21 @@ type WorkerInput = {
   autoNameSessions?: boolean;
   steering?: string[];
   followUp?: string[];
+  operations?: unknown[];
+  instructions?: string;
   deliverAs?: 'steer' | 'followUp';
   images?: Array<{ data: string; mimeType: string }>;
 };
 
 type PiBashResult = Extract<UserBashEventResult, { result: unknown }>['result'];
+
+type QueuedSessionOperation =
+  | { id: string; type: 'prompt'; text: string; images: Array<{ type: 'image'; data: string; mimeType: string }> }
+  | { id: string; type: 'compact'; instructions: string };
+
+type QueuedSessionOperationView =
+  | { id: string; type: 'prompt'; text: string }
+  | { id: string; type: 'compact'; instructions: string };
 
 type SessionLike = {
   sessionId?: string;
@@ -328,6 +338,10 @@ let busy = false;
 let shellCommandRunning = false;
 let sessionOpening = false;
 let compacting = false;
+let managedPromptRun = false;
+let cancelQueuedOperations = false;
+let queuedSessionOperations: QueuedSessionOperation[] = [];
+let piQueuedWork: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 let reloadingResources = false;
 let authenticatingProvider = false;
 let providerAuthController: AbortController | undefined;
@@ -466,6 +480,17 @@ const pendingProviderAuthRequests = new Set<string>();
 
 function send(type: string, payload: Record<string, unknown> = {}): void {
   parentPort?.postMessage({ type, ...payload });
+}
+
+function sendSessionQueue(): void {
+  const operations: QueuedSessionOperationView[] = queuedSessionOperations.slice(0, 100).map((operation) => operation.type === 'prompt'
+    ? { id: operation.id, type: 'prompt', text: operation.text.slice(0, 100_000) }
+    : { id: operation.id, type: 'compact', instructions: operation.instructions.slice(0, 16_000) });
+  send('queue', {
+    steering: piQueuedWork.steering,
+    followUp: piQueuedWork.followUp,
+    operations,
+  });
 }
 
 function parseSavedToolNames(value: unknown): string[] | undefined {
@@ -2920,6 +2945,10 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   unsubscribe?.();
   session?.dispose();
   session = next;
+  managedPromptRun = false;
+  cancelQueuedOperations = false;
+  queuedSessionOperations = [];
+  piQueuedWork = { steering: [], followUp: [] };
   disposeExtensionWidgetComponents();
   extensionWidgetKeys.clear();
   extensionStatusValues.clear();
@@ -2936,6 +2965,7 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
   sessionExtensionsBound = extensionsBound;
   busy = false;
   compacting = false;
+  sendSessionQueue();
   reloadingResources = false;
   authenticatingProvider = false;
   defaultTools = next.getActiveToolNames?.() ?? [];
@@ -3059,19 +3089,26 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
       sendOptions();
       snapshot();
     } else if (event.type === 'queue_update') {
-      send('queue', {
-        steering: event.steering ?? [],
-        followUp: event.followUp ?? [],
-      });
+      piQueuedWork = {
+        steering: Array.isArray(event.steering)
+          ? (event.steering as unknown[]).filter((text): text is string => typeof text === 'string').slice(0, 100).map((text) => text.slice(0, 100_000))
+          : [],
+        followUp: Array.isArray(event.followUp)
+          ? (event.followUp as unknown[]).filter((text): text is string => typeof text === 'string').slice(0, 100).map((text) => text.slice(0, 100_000))
+          : [],
+      };
+      sendSessionQueue();
     } else if (event.type === 'agent_settled') {
-      busy = false;
-      send('run-finished', {
-        aborted: Boolean(event.aborted),
-        agentRun: true,
-        sessionTitle: typeof next.sessionName === 'string' ? next.sessionName : '',
-      });
+      if (!managedPromptRun) {
+        busy = false;
+        send('run-finished', {
+          aborted: Boolean(event.aborted),
+          agentRun: true,
+          sessionTitle: typeof next.sessionName === 'string' ? next.sessionName : '',
+        });
+      }
       snapshot();
-      void listSessions();
+      if (!managedPromptRun) void listSessions();
     }
   });
   snapshot();
@@ -4088,6 +4125,35 @@ async function setContextFileSelection(input: WorkerInput): Promise<void> {
   }
 }
 
+async function drainQueuedSessionOperations(activeSession: SessionLike): Promise<void> {
+  while (busy && !cancelQueuedOperations && queuedSessionOperations.length > 0) {
+    const operation = queuedSessionOperations.shift();
+    if (!operation) break;
+    sendSessionQueue();
+    try {
+      if (operation.type === 'compact') {
+        if (!activeSession.compact) throw new Error('This Pi runtime does not support session compaction.');
+        compacting = true;
+        send('activity', { message: 'Compacting session context' });
+        await activeSession.compact(operation.instructions || undefined);
+        send('notice', { message: 'Pi compacted the queued session context.' });
+      } else {
+        if (!activeSession.prompt) throw new Error('The Pi session is not ready to accept a queued prompt.');
+        applySavedSessionToolNames(activeSession);
+        send('activity', { message: 'Sending queued message to Pi' });
+        await activeSession.prompt(operation.text, { images: operation.images });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 1000) : 'The queued operation failed.';
+      send('notice', { message: `${operation.type === 'compact' ? 'Queued compaction' : 'Queued message'} failed: ${message}`, isError: true });
+    } finally {
+      if (operation.type === 'compact') compacting = false;
+    }
+  }
+  if (cancelQueuedOperations) queuedSessionOperations = [];
+  sendSessionQueue();
+}
+
 async function handle(input: WorkerInput): Promise<void> {
   if (disposing && input.type !== 'dispose') return;
   try {
@@ -4648,6 +4714,56 @@ async function handle(input: WorkerInput): Promise<void> {
         }
         return;
       }
+      case 'queueCompaction': {
+        if (!session?.compact) {
+          send('notice', { message: 'This Pi runtime does not support session compaction.', isError: true });
+          return;
+        }
+        if (!busy || !managedPromptRun) {
+          send('notice', { message: 'Compaction can be queued while Pi is working.' });
+          return;
+        }
+        if (queuedSessionOperations.length >= 100) {
+          send('notice', { message: 'The session queue is full. Remove an item before adding compaction.', isError: true });
+          return;
+        }
+        const instructions = typeof input.instructions === 'string' ? input.instructions.trim().slice(0, 16_000) : '';
+        if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(instructions)) {
+          send('notice', { message: 'Compaction instructions contain unsupported control characters.', isError: true });
+          return;
+        }
+        queuedSessionOperations.push({ id: randomUUID(), type: 'compact', instructions });
+        sendSessionQueue();
+        return;
+      }
+      case 'replaceManualQueue': {
+        if (!session || !busy || !Array.isArray(input.operations)) return;
+        const existing = new Map(queuedSessionOperations.map((operation) => [operation.id, operation]));
+        const seen = new Set<string>();
+        const next: QueuedSessionOperation[] = [];
+        for (const candidate of input.operations.slice(0, 100)) {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+          const view = candidate as Record<string, unknown>;
+          const id = typeof view.id === 'string' && /^[0-9a-f-]{36}$/i.test(view.id) ? view.id : '';
+          const current = existing.get(id);
+          if (!current || seen.has(id) || view.type !== current.type) continue;
+          seen.add(id);
+          if (current.type === 'prompt') {
+            const text = typeof view.text === 'string' ? view.text.trim().slice(0, 100_000) : current.text;
+            if (text && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
+              next.push({ ...current, text });
+            }
+          } else {
+            const instructions = typeof view.instructions === 'string' ? view.instructions.trim().slice(0, 16_000) : current.instructions;
+            if (!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(instructions)) {
+              next.push({ ...current, instructions });
+            }
+          }
+        }
+        queuedSessionOperations = next;
+        sendSessionQueue();
+        return;
+      }
       case 'setSkills': {
         if (!session || busy || !Array.isArray(input.disabledSkills)) return;
         const loadedSkills = session.resourceLoader?.getSkills().skills ?? [];
@@ -4776,11 +4892,16 @@ async function handle(input: WorkerInput): Promise<void> {
       }
       case 'compactSession': {
         if (!session?.compact || busy) return;
+        const instructions = typeof input.instructions === 'string' ? input.instructions.trim().slice(0, 16_000) : '';
+        if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(instructions)) {
+          send('notice', { message: 'Compaction instructions contain unsupported control characters.', isError: true });
+          return;
+        }
         busy = true;
         compacting = true;
-        send('run-started');
+        send('run-started', { activity: 'Compacting session context' });
         try {
-          await session.compact();
+          await session.compact(instructions || undefined);
           send('notice', { message: 'Pi compacted the session context.' });
         } finally {
           compacting = false;
@@ -4953,8 +5074,16 @@ async function handle(input: WorkerInput): Promise<void> {
           .map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }));
         if (busy) {
           if (input.deliverAs === 'steer' && session.steer) await session.steer(input.text, images);
-          else if (session.followUp) await session.followUp(input.text, images);
-          else throw new Error('This Pi runtime cannot queue messages while a turn is running.');
+          else if (!managedPromptRun && session.followUp) await session.followUp(input.text, images);
+          else {
+            if (!managedPromptRun) throw new Error('This Pi runtime cannot queue messages during the current operation.');
+            if (queuedSessionOperations.length >= 100) {
+              send('notice', { message: 'The session queue is full. Remove an item before adding another message.', isError: true });
+              return;
+            }
+            queuedSessionOperations.push({ id: randomUUID(), type: 'prompt', text: input.text.slice(0, 100_000), images });
+            sendSessionQueue();
+          }
           return;
         }
         if (!session.prompt) {
@@ -4963,17 +5092,35 @@ async function handle(input: WorkerInput): Promise<void> {
         }
         if (activePromptSuggestion) activePromptSuggestion.controller.abort();
         busy = true;
-        send('run-started');
-        await session.prompt(input.text, { images });
-        if (busy) {
-          busy = false;
-          send('run-finished', { aborted: false });
+        managedPromptRun = true;
+        cancelQueuedOperations = false;
+        send('run-started', { agentRun: true });
+        try {
+          await session.prompt(input.text, { images });
+          await drainQueuedSessionOperations(session);
+          if (busy) {
+            const aborted = cancelQueuedOperations;
+            busy = false;
+            send('run-finished', { aborted, agentRun: true, sessionTitle: typeof session.sessionName === 'string' ? session.sessionName : '' });
+            cancelQueuedOperations = false;
+          }
+        } catch (error) {
+          queuedSessionOperations = [];
+          sendSessionQueue();
+          throw error;
+        } finally {
+          managedPromptRun = false;
         }
         snapshot();
         await listSessions();
         return;
       case 'stop':
         if (compacting) {
+          if (managedPromptRun) {
+            cancelQueuedOperations = true;
+            queuedSessionOperations = [];
+            sendSessionQueue();
+          }
           session?.abortCompaction?.();
           return;
         }
@@ -4983,8 +5130,13 @@ async function handle(input: WorkerInput): Promise<void> {
           session?.abortBash?.();
           return;
         }
+        if (managedPromptRun) {
+          cancelQueuedOperations = true;
+          queuedSessionOperations = [];
+          sendSessionQueue();
+        }
         if (session && busy) await session.abort();
-        if (busy) {
+        if (busy && !managedPromptRun) {
           busy = false;
           send('run-finished', { aborted: true });
           snapshot();
@@ -4994,7 +5146,9 @@ async function handle(input: WorkerInput): Promise<void> {
   } catch (error) {
     if (busy) {
       busy = false;
-      send('run-finished', { aborted: false });
+      const aborted = cancelQueuedOperations;
+      send('run-finished', { aborted });
+      cancelQueuedOperations = false;
     }
     send('runtime-error', { message: error instanceof Error ? error.message : 'The Pi request failed.' });
     snapshot();

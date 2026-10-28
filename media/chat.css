@@ -194,6 +194,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .turn-file-summary-open { justify-self: start; }
 .turn-file-summary-note { margin: 2px 0; color: var(--muted); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
 .history-heading { min-height: 42px; padding: 0 10px 0 13px; display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
+.queue-panel .history-heading { gap: 6px; }
+.queue-panel .history-heading > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-heading-actions { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.queue-heading-actions .text-button { padding: 4px 5px; font-size: 10px; }
 .session-search-row { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 7px 5px; }
 .session-search-row .session-search { flex: 1 1 auto; margin: 0; }
 .session-search-scope { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; color: var(--muted); cursor: pointer; font-size: 10px; white-space: nowrap; }

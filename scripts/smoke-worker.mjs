@@ -108,8 +108,8 @@ export default function (pi) {
     apiKey: 'pi-chat-local-smoke-key',
     api: 'openai-completions',
     models: [
-      { id: 'smoke-model', name: 'Local Smoke Model', reasoning: false, input: ['text'], contextWindow: 4096, maxTokens: 64 },
-      { id: 'smoke-model-alt', name: 'Alternate Smoke Model', reasoning: true, input: ['text'], contextWindow: 4096, maxTokens: 64 },
+      { id: 'smoke-model', name: 'Local Smoke Model', reasoning: false, input: ['text'], contextWindow: 2048, maxTokens: 64 },
+      { id: 'smoke-model-alt', name: 'Alternate Smoke Model', reasoning: true, input: ['text'], contextWindow: 2048, maxTokens: 64 },
     ],
     streamSimple(model, context) {
       const systemText = [context.systemPrompt, ...context.messages.filter((message) => message.role === 'system').flatMap((message) => [
@@ -117,17 +117,29 @@ export default function (pi) {
         ...(message.sections && typeof message.sections === 'object' ? Object.values(message.sections).filter((section) => typeof section === 'string') : []),
       ])]
         .filter((value) => typeof value === 'string').join('\\n');
-      const userText = context.messages.filter((message) => message.role === 'user').map((message) => textOf(message.content)).join('\\n');
-      const kind = systemText.includes('Create exactly three concise') ? 'suggestion-recovery'
-        : systemText.includes('Suggest three concise') ? 'suggestion-primary' : 'main';
-      const text = kind === 'main' ? 'LOCAL_SMOKE_OK'
-        : kind === 'suggestion-primary' ? '1. Identify one missing edge case in the implementation.'
-          : '2. Suggest a focused regression test for the behavior.';
+      const userMessages = context.messages.filter((message) => message.role === 'user').map((message) => textOf(message.content));
+      const userHistoryText = userMessages.join('\\n');
+      const userText = userMessages.at(-1) || '';
+      const kind = systemText.includes('context summarization assistant') ? 'summarization'
+        : systemText.includes('Create exactly three concise') ? 'suggestion-recovery'
+          : systemText.includes('Suggest three concise') ? 'suggestion-primary'
+            : userText.includes('LOCAL_QUEUE_BLOCKER') ? 'queue-blocker'
+              : userText.includes('LOCAL_QUEUE_BEFORE_COMPACTION') ? 'queue-before-compaction'
+                  : userText.includes('LOCAL_QUEUE_AFTER_COMPACTION') ? 'queue-after-compaction'
+                    : userText.includes('LOCAL_QUEUE_AFTER_FAILURE') ? 'queue-after-failure' : 'main';
+      const text = kind === 'summarization'
+        ? '## Goal\\nVerify ordered Pi session operations.\\n\\n## Constraints & Preferences\\n- Preserve queued order.\\n\\n## Progress\\n### Done\\n- [x] Ran the initial request.\\n\\n### In Progress\\n- [ ] Continue the queued request.\\n\\n## Key Decisions\\n- Compaction stays in the session queue.\\n\\n## Critical Information\\n- This is isolated smoke data.\\n\\n## Files\\n- None.'
+        : kind === 'queue-blocker' ? 'QUEUE_BLOCKER_DONE'
+          : kind === 'queue-before-compaction' ? 'QUEUE_BEFORE_COMPACTION_DONE'
+            : kind === 'queue-after-compaction' ? 'QUEUE_AFTER_COMPACTION_DONE'
+              : kind === 'queue-after-failure' ? 'QUEUE_AFTER_FAILURE_DONE'
+              : kind === 'suggestion-primary' ? '1. Identify one missing edge case in the implementation.'
+                : kind === 'suggestion-recovery' ? '2. Suggest a focused regression test for the behavior.' : 'LOCAL_SMOKE_OK';
       appendFileSync(callLogPath, JSON.stringify({
         kind,
-        hasSmokePrompt: userText.includes('LOCAL_SMOKE_REQUEST'),
-        includedBashOutputCount: userText.split('USER_BASH_RESULT:included').length - 1,
-        excludedBashOutputCount: userText.split('USER_BASH_RESULT:excluded').length - 1,
+        hasSmokePrompt: userHistoryText.includes('LOCAL_SMOKE_REQUEST'),
+        includedBashOutputCount: userHistoryText.split('USER_BASH_RESULT:included').length - 1,
+        excludedBashOutputCount: userHistoryText.split('USER_BASH_RESULT:excluded').length - 1,
         hasCustomSystemPrompt: systemText.includes('CUSTOM_SYSTEM_PROMPT_MARKER'),
         hasAppendedPromptText: systemText.includes('APPENDED_SYSTEM_PROMPT_TEXT_MARKER'),
         hasAppendedPromptFile: systemText.includes('APPENDED_SYSTEM_PROMPT_FILE_MARKER'),
@@ -136,11 +148,21 @@ export default function (pi) {
       const message = { role: 'assistant', content: [{ type: 'text', text: '' }], api: model.api, provider: model.provider, model: model.id, usage: usage(), stopReason: 'pending', timestamp: Date.now() };
       stream.push({ type: 'start', partial: message });
       stream.push({ type: 'text_start', contentIndex: 0, partial: message });
-      message.content[0].text = text;
-      stream.push({ type: 'text_delta', contentIndex: 0, delta: text, partial: message });
-      stream.push({ type: 'text_end', contentIndex: 0, content: text, partial: message });
-      message.stopReason = 'stop';
-      stream.push({ type: 'done', reason: 'stop', message });
+      const finish = () => {
+        if (kind === 'summarization' && userText.includes('FORCE_COMPACTION_FAILURE')) {
+          message.stopReason = 'error';
+          message.errorMessage = 'SMOKE_COMPACTION_FAILURE';
+          stream.push({ type: 'done', reason: 'error', message });
+          return;
+        }
+        message.content[0].text = text;
+        stream.push({ type: 'text_delta', contentIndex: 0, delta: text, partial: message });
+        stream.push({ type: 'text_end', contentIndex: 0, content: text, partial: message });
+        message.stopReason = 'stop';
+        stream.push({ type: 'done', reason: 'stop', message });
+      };
+      if (kind === 'queue-blocker') setTimeout(finish, 800);
+      else finish();
       return stream;
     },
   });
@@ -176,7 +198,7 @@ export default function (pi) {
             name: 'Local Smoke Model',
             reasoning: false,
             input: ['text'],
-            contextWindow: 4096,
+            contextWindow: 2048,
             maxTokens: 64,
           },
           {
@@ -184,7 +206,7 @@ export default function (pi) {
             name: 'Alternate Smoke Model',
             reasoning: true,
             input: ['text'],
-            contextWindow: 4096,
+            contextWindow: 2048,
             maxTokens: 64,
           },
         ],
@@ -197,6 +219,7 @@ export default function (pi) {
     defaultThinkingLevel: 'off',
     defaultProjectTrust: 'never',
     defaultTools: [],
+    compaction: { reserveTokens: 256, keepRecentTokens: 128 },
   }, null, 2));
 
   const environment = {};
@@ -391,6 +414,76 @@ export default function (pi) {
   assert.deepEqual(providerCalls.map((call) => call.kind), ['main', 'suggestion-primary', 'suggestion-recovery'],
     'the follow-up feature should retry partial model output once through Pi’s provider runtime');
 
+  const queueRunStartedPromise = waitForWorkerMessage((message) => message?.type === 'run-started' && message.agentRun === true,
+    'managed Pi run for ordered queue operations');
+  const queueBlockerStreamingPromise = waitForWorkerMessage((message) => message?.type === 'assistant-start', 'queue blocker streaming start');
+  worker.postMessage({ type: 'prompt', text: `LOCAL_QUEUE_BLOCKER ${'blocker '.repeat(80)}` });
+  await Promise.all([queueRunStartedPromise, queueBlockerStreamingPromise]);
+  const orderedQueuePromise = waitForWorkerMessage((message) => message?.type === 'queue'
+    && Array.isArray(message.operations) && message.operations.length === 3, 'three ordered queued operations');
+  const queuedCompactionNoticePromise = waitForWorkerMessage((message) => message?.type === 'notice'
+    && String(message.message).includes('compacted the queued session context'), 'queued Pi compaction completion');
+  const queuedTranscriptPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
+    && Array.isArray(message.messages)
+    && message.messages.some((entry) => entry.role === 'assistant' && String(entry.text || '').includes('QUEUE_AFTER_COMPACTION_DONE')),
+  'queued assistant reply after compaction');
+  const queueRunFinishedPromise = waitForWorkerMessage((message) => message?.type === 'run-finished'
+    && message.agentRun === true && message.aborted === false, 'ordered Pi queue completion');
+  worker.postMessage({ type: 'prompt', text: `LOCAL_QUEUE_BEFORE_COMPACTION ${'preserve prior details '.repeat(250)}`, deliverAs: 'followUp' });
+  worker.postMessage({ type: 'queueCompaction', instructions: 'Retain the exact verification goal and decisions.' });
+  worker.postMessage({ type: 'prompt', text: 'LOCAL_QUEUE_AFTER_COMPACTION continue the verification.', deliverAs: 'followUp' });
+  const [orderedQueue, queuedCompactionNotice, queuedTranscript, queueRunFinished] = await Promise.all([
+    orderedQueuePromise,
+    queuedCompactionNoticePromise,
+    queuedTranscriptPromise,
+    queueRunFinishedPromise,
+  ]);
+  assert.deepEqual(orderedQueue.operations.map((operation) => operation.type), ['prompt', 'compact', 'prompt'],
+    'queued prompts and compaction should be kept in the requested order');
+  assert.match(orderedQueue.operations[1].instructions, /exact verification goal/,
+    'custom compaction instructions should stay attached to their queue item');
+  assert.ok(queuedCompactionNotice && queuedTranscript && queueRunFinished,
+    'queued compaction should finish and allow the following prompt to run');
+  providerCalls = (await readFile(providerCallsPath, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(providerCalls.map((call) => call.kind).filter((kind) => kind.startsWith('queue-') || kind === 'summarization'), [
+    'queue-blocker', 'queue-before-compaction', 'summarization', 'queue-after-compaction',
+  ], 'the worker should run queued prompts around compaction in order');
+
+  const failureRunStartedPromise = waitForWorkerMessage((message) => message?.type === 'run-started' && message.agentRun === true,
+    'Pi run for compaction failure recovery');
+  const failureBlockerStreamingPromise = waitForWorkerMessage((message) => message?.type === 'assistant-start', 'failure blocker streaming start');
+  worker.postMessage({ type: 'prompt', text: 'LOCAL_QUEUE_BLOCKER before compaction failure recovery.' });
+  await Promise.all([failureRunStartedPromise, failureBlockerStreamingPromise]);
+  const failedQueuePromise = waitForWorkerMessage((message) => message?.type === 'queue'
+    && Array.isArray(message.operations) && message.operations.length === 2, 'compaction and prompt queued after the blocker');
+  const failedCompactionNoticePromise = waitForWorkerMessage((message) => message?.type === 'notice'
+    && /compaction/i.test(String(message.message)), 'queued compaction result');
+  const failureTranscriptPromise = waitForWorkerMessage((message) => message?.type === 'snapshot'
+    && Array.isArray(message.messages)
+    && message.messages.some((entry) => entry.role === 'assistant' && String(entry.text || '').includes('QUEUE_AFTER_FAILURE_DONE')),
+  'queued prompt after compaction failure');
+  const failureRunFinishedPromise = waitForWorkerMessage((message) => message?.type === 'run-finished'
+    && message.agentRun === true && message.aborted === false, 'queue completion after compaction failure');
+  worker.postMessage({ type: 'queueCompaction', instructions: 'FORCE_COMPACTION_FAILURE' });
+  worker.postMessage({ type: 'prompt', text: 'LOCAL_QUEUE_AFTER_FAILURE continue after the failed compaction.', deliverAs: 'followUp' });
+  const [failedQueue, failedCompactionNotice, failureTranscript, failureRunFinished] = await Promise.all([
+    failedQueuePromise,
+    failedCompactionNoticePromise,
+    failureTranscriptPromise,
+    failureRunFinishedPromise,
+  ]);
+  assert.deepEqual(failedQueue.operations.map((operation) => operation.type), ['compact', 'prompt'],
+    'a queued compaction failure should leave later queued prompts intact');
+  assert.match(String(failedCompactionNotice.message), /Queued compaction failed:/,
+    'the deliberately failed compaction should be reported without stopping the queue');
+  assert.ok(failureTranscript && failureRunFinished,
+    'the queue should report compaction failure and continue with the next prompt');
+  providerCalls = (await readFile(providerCallsPath, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(providerCalls.map((call) => call.kind).filter((kind) => kind.startsWith('queue-') || kind === 'summarization'), [
+    'queue-blocker', 'queue-before-compaction', 'summarization', 'queue-after-compaction',
+    'queue-blocker', 'queue-after-failure',
+  ], 'the worker should continue ordered work after a compaction error');
+
   const sessionFile = savedTranscript.sessionFile;
   assert.equal(typeof sessionFile, 'string', 'the smoke session should expose its persisted path');
   assert.ok(resolve(sessionFile).startsWith(resolve(temporaryRoot) + sep), 'the persisted session should stay inside temporary smoke data');
@@ -468,7 +561,7 @@ export default function (pi) {
   const [fallbackNotice, fallbackOptions] = await Promise.all([fallbackNoticePromise, fallbackOptionsPromise]);
   assert.ok(fallbackNotice && fallbackOptions, 'an unavailable preset model should leave the new chat on Pi’s configured model default');
 
-  console.log('Worker smoke check passed: prompt overrides, explicit resources, and theme discovery controls worked; the in-process Pi provider streamed and persisted a reply; follow-up recovery ran; user shell hooks streamed and persisted output with both context modes; session tool choices survived a restart; new-chat tool and model preset defaults applied only to new sessions.');
+  console.log('Worker smoke check passed: prompt overrides, resource discovery, model selection, follow-up recovery, shell hooks, ordered prompt-compaction queues, post-compaction continuation, compaction-failure recovery, and session preference restoration.');
 } finally {
   if (worker) await worker.terminate().catch(() => undefined);
   const resolvedTemporaryRoot = resolve(temporaryRoot);

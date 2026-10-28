@@ -24,6 +24,7 @@ This checklist tracks implemented and pending product capabilities as of 29 Octo
 
 - [x] Stream Pi replies; stop a run; show live tool start, update, and result cards.
 - [x] Queue follow-ups or steer a running turn; reorder, edit, and remove queued text messages. Choose the default send action in VS Code settings and switch it from the composer during a run.
+- [x] Queue `/compact` or an “Add compaction” action among follow-up messages while Pi is working. Reorder, edit, and remove queued operations; failed compaction reports an error and later operations continue.
 - [x] Search the current transcript and step through matches in messages and visible tool output.
 - [x] Persist the active text draft and prompt history by Pi session; prompt history can be disabled and cleared independently of Pi's transcript. Save up to 20 drafts per session, including bounded text/file/image attachments, in local VS Code extension storage. Restore removes a saved item when the composer is empty or swaps it with the current composer; deleted drafts can be restored for 8 seconds. The saved-draft store is validated on load and capped at 16 MiB. Quote a message or selected passage into the next prompt.
 - [x] Bookmark transcript messages with persistent branch-local bookmarks and jump back to bookmarked messages.

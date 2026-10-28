@@ -632,6 +632,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private notificationHookSavePending = false;
   private logWriteQueue: Promise<void> = Promise.resolve();
   private savedDraftsWrite: Promise<void> = Promise.resolve();
+  private sessionInputDispatchQueue: Promise<void> = Promise.resolve();
+  private sessionInputDispatchEpoch = 0;
 
   constructor(private readonly context: vscode.ExtensionContext, private readonly extensionStatusBarItem?: vscode.StatusBarItem) {
     this.pinnedActiveFileEnabled = context.workspaceState.get<boolean>('piChat.context.pinnedActiveFile', false);
@@ -664,6 +666,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose(): void {
+    this.sessionInputDispatchEpoch += 1;
     clearInterval(this.runningSessionPoller);
     this.cancelPendingSessionListRequests();
     this.clearRunningSessionLease();
@@ -1409,6 +1412,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   restartRuntime(): void {
+    this.sessionInputDispatchEpoch += 1;
     this.runtimeStartGeneration += 1;
     const previous = this.worker;
     this.discardQueuedShellCommands('the Pi runtime restarted');
@@ -1701,7 +1705,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       if (message.type === 'queue') {
         const steering = Array.isArray(message.steering) ? message.steering.length : 0;
         const followUp = Array.isArray(message.followUp) ? message.followUp.length : 0;
-        this.queuedWorkCount = Math.min(5000, steering + followUp);
+        const operations = Array.isArray(message.operations) ? message.operations.length : 0;
+        this.queuedWorkCount = Math.min(5000, steering + followUp + operations);
         if (!this.runtimeBusy) this.runtimeActivity = this.queuedWorkCount > 0 ? `Queued work (${this.queuedWorkCount})` : '';
         this.refreshRunningSessionLease();
         void this.drainQueuedShellCommand(worker);
@@ -2011,6 +2016,14 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       && key.length > 0 && key.length <= 128 && !/[\u0000-\u001f\u007f]/.test(key)))].slice(0, MAX_PINNED_EXTENSION_WIDGETS);
   }
 
+  private enqueueSessionInputDispatch(operation: () => Promise<void> | void): Promise<void> {
+    const next = this.sessionInputDispatchQueue.then(operation);
+    this.sessionInputDispatchQueue = next.catch(() => {
+      this.post({ type: 'notice', message: 'Could not dispatch work to the Pi session.', isError: true });
+    });
+    return this.sessionInputDispatchQueue;
+  }
+
   private async handleWebviewMessage(message: RuntimeMessage): Promise<void> {
     switch (message.type) {
       case 'togglePinActiveFile':
@@ -2085,11 +2098,13 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'newSession':
         this.sessionInteractionStarted = true;
+        this.sessionInputDispatchEpoch += 1;
         this.clearTurnFileCapture();
         await this.newSession();
         return;
       case 'cloneSession':
         this.sessionInteractionStarted = true;
+        this.sessionInputDispatchEpoch += 1;
         this.clearTurnFileCapture();
         if (this.worker) this.worker.postMessage({ type: 'cloneSession' });
         return;
@@ -2239,6 +2254,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'openSession':
         this.sessionInteractionStarted = true;
+        this.sessionInputDispatchEpoch += 1;
         this.clearTurnFileCapture();
         if (!this.isKnownSessionPath(message.path)) {
           this.post({ type: 'notice', message: 'That session is no longer in the session list. Refresh history and try again.', isError: true });
@@ -2261,6 +2277,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'stop':
+        this.sessionInputDispatchEpoch += 1;
         this.worker?.postMessage({ type: 'stop' });
         return;
       case 'stopSubagentChild': {
@@ -2344,31 +2361,52 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           ? 'Please inspect the attached image.'
           : attachments.some((item) => item.context) ? 'Please inspect the attached context.' : '');
         if (!promptText) return;
-        const promptWorker = this.worker;
-        const fileCapture = promptWorker ? this.reserveTurnFileCapture(promptWorker) : undefined;
+        const expectedWorker = this.worker;
+        const expectedSessionPath = this.activeSessionPath;
+        const dispatchEpoch = this.sessionInputDispatchEpoch;
         const attachedPaths = new Set(attachments.map((item) => {
           const relative = item.path.replaceAll('\\', '/');
           return process.platform === 'win32' ? relative.toLocaleLowerCase() : relative;
         }));
-        let automaticContext: Attachment[];
-        try {
-          automaticContext = await this.collectAutomaticContext(attachedPaths);
-        } catch {
-          this.clearTurnFileCapture(promptWorker);
-          this.post({ type: 'notice', message: 'Could not prepare workspace context for this prompt.', isError: true });
-          return;
-        }
-        const prompt = this.composePrompt(promptText, [...attachments, ...automaticContext]);
-        if (promptWorker && promptWorker !== this.worker) return;
-        if (fileCapture && !(await this.waitForTurnFileBaseline(fileCapture))) this.clearTurnFileCapture(promptWorker);
-        this.worker?.postMessage({
-          type: 'prompt',
-          text: prompt,
-          deliverAs: message.deliverAs === 'steer' ? 'steer' : 'followUp',
-          images: attachments
-            .map((item) => item?.image)
-            .filter((image): image is { data: string; mimeType: string } => Boolean(image && typeof image.data === 'string' && typeof image.mimeType === 'string'))
-            .slice(0, 5),
+        await this.enqueueSessionInputDispatch(async () => {
+            if (dispatchEpoch !== this.sessionInputDispatchEpoch
+              || (expectedWorker && expectedWorker !== this.worker)
+              || (expectedSessionPath && expectedSessionPath !== this.activeSessionPath)) return;
+            const promptWorker = expectedWorker ?? this.worker;
+            const fileCapture = promptWorker ? this.reserveTurnFileCapture(promptWorker) : undefined;
+            let automaticContext: Attachment[];
+            try {
+              automaticContext = await this.collectAutomaticContext(attachedPaths);
+            } catch {
+              this.clearTurnFileCapture(promptWorker);
+              if (dispatchEpoch === this.sessionInputDispatchEpoch) {
+                this.post({ type: 'notice', message: 'Could not prepare workspace context for this prompt.', isError: true });
+              }
+              return;
+            }
+            const prompt = this.composePrompt(promptText, [...attachments, ...automaticContext]);
+            if (dispatchEpoch !== this.sessionInputDispatchEpoch
+              || (expectedWorker && expectedWorker !== this.worker)
+              || (expectedSessionPath && expectedSessionPath !== this.activeSessionPath)) {
+              this.clearTurnFileCapture(promptWorker);
+              return;
+            }
+            if (fileCapture && !(await this.waitForTurnFileBaseline(fileCapture))) this.clearTurnFileCapture(promptWorker);
+            if (dispatchEpoch !== this.sessionInputDispatchEpoch
+              || (expectedWorker && expectedWorker !== this.worker)
+              || (expectedSessionPath && expectedSessionPath !== this.activeSessionPath)) {
+              this.clearTurnFileCapture(promptWorker);
+              return;
+            }
+            (promptWorker ?? this.worker)?.postMessage({
+              type: 'prompt',
+              text: prompt,
+              deliverAs: message.deliverAs === 'steer' ? 'steer' : 'followUp',
+              images: attachments
+                .map((item) => item?.image)
+                .filter((image): image is { data: string; mimeType: string } => Boolean(image && typeof image.data === 'string' && typeof image.mimeType === 'string'))
+                .slice(0, 5),
+            });
         });
         return;
       }
@@ -2446,6 +2484,17 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
       case 'replaceQueue':
         this.worker?.postMessage(message);
         return;
+      case 'replaceManualQueue':
+      case 'queueCompaction': {
+        const inputWorker = this.worker;
+        const dispatchEpoch = this.sessionInputDispatchEpoch;
+        await this.enqueueSessionInputDispatch(() => {
+          if (inputWorker && inputWorker === this.worker && dispatchEpoch === this.sessionInputDispatchEpoch) {
+            inputWorker.postMessage(message);
+          }
+        });
+        return;
+      }
       case 'extensionUiResponse':
         if (typeof message.requestId !== 'string' || !this.pendingExtensionUiRequestIds.delete(message.requestId)) return;
         this.worker?.postMessage(message);
@@ -2653,12 +2702,21 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       case 'compactSession': {
-        const answer = await vscode.window.showWarningMessage(
-          'Pi will summarize older context and update the active session. Continue?',
-          { modal: true },
-          'Compact session',
-        );
-        if (answer === 'Compact session') this.worker?.postMessage({ type: 'compactSession' });
+        const inputWorker = this.worker;
+        const dispatchEpoch = this.sessionInputDispatchEpoch;
+        await this.enqueueSessionInputDispatch(async () => {
+          if (!inputWorker || inputWorker !== this.worker || dispatchEpoch !== this.sessionInputDispatchEpoch) return;
+          const answer = await vscode.window.showWarningMessage(
+            'Pi will summarize older context and update the active session. Continue?',
+            { modal: true },
+            'Compact session',
+          );
+          if (answer === 'Compact session' && inputWorker === this.worker
+            && dispatchEpoch === this.sessionInputDispatchEpoch) inputWorker.postMessage({
+              type: 'compactSession',
+              ...(typeof message.instructions === 'string' ? { instructions: message.instructions.slice(0, 16_000) } : {}),
+            });
+        });
         return;
       }
       case 'reloadResources': {
@@ -7091,7 +7149,7 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
         <div id="branch-empty" class="session-empty" hidden>No user messages to branch from.</div>
       </aside>
       <aside id="queue-panel" class="history-panel queue-panel" aria-label="Queued work" hidden>
-        <div class="history-heading"><span>Queued work</span><button id="clear-queue" class="text-button" type="button">Clear all</button><button id="close-queue" class="icon-button small" type="button" title="Close" aria-label="Close queued work">×</button></div>
+        <div class="history-heading"><span>Queued work</span><div class="queue-heading-actions"><button id="add-queue-compaction" class="text-button" type="button" title="Add a context compaction to the session queue" hidden>Add compaction</button><button id="clear-queue" class="text-button" type="button">Clear all</button><button id="close-queue" class="icon-button small" type="button" title="Close" aria-label="Close queued work">×</button></div></div>
         <div id="queue-list" class="session-list"></div>
         <div id="queue-empty" class="session-empty">No queued work.</div>
       </aside>

@@ -59,6 +59,8 @@ const state = {
   hasSession: false,
   switchingSession: false,
   busy: false,
+  queueableRun: false,
+  activityDetail: '',
   shellCommandPending: false,
   liveShellMessage: undefined,
   shellQueue: [],
@@ -131,7 +133,7 @@ const state = {
   gitReviewAvailable: false,
   gitChangesTruncated: false,
   deliverAs: 'followUp',
-  queue: { steering: [], followUp: [] },
+  queue: { steering: [], followUp: [], operations: [] },
   toolMessagesBySession: new Map(),
   thinkingExpansion: new Map(),
   extensionWidgets: new Map(),
@@ -191,6 +193,7 @@ const ui = {
   queuePanel: el('queue-panel'),
   queueList: el('queue-list'),
   queueEmpty: el('queue-empty'),
+  addQueueCompaction: el('add-queue-compaction'),
   notice: el('notice'),
   extensionCustomLayer: el('extension-custom-layer'),
   extensionCustomTitle: el('extension-custom-title'),
@@ -730,7 +733,7 @@ function scrollTranscriptTarget(target, block = 'center') {
 
 function updateControls() {
   const hasText = Boolean(ui.prompt.value.trim() || state.attachments.length || state.pinnedFile);
-  const hasQueuedWork = state.queue.steering.length + state.queue.followUp.length > 0;
+  const hasQueuedWork = state.queue.steering.length + state.queue.followUp.length + state.queue.operations.length > 0;
   ui.draftsToggle.disabled = !state.savedDraftsReady;
   ui.send.disabled = !state.hasWorkspace || !hasText || state.shellCommandPending;
   ui.saveDraft.disabled = !state.savedDraftsReady || Boolean(state.savedDraftSaveRequestId) || (!ui.prompt.value.trim() && !state.attachments.length);
@@ -2973,9 +2976,13 @@ function restoreImageAttachments(value) {
 
 function setBusy(busy, activityText, stopAllowed = true) {
   state.busy = Boolean(busy);
+  if (!state.busy) state.queueableRun = false;
+  state.activityDetail = state.busy
+    ? String(activityText || state.activityDetail || 'Pi is working').slice(0, 128)
+    : '';
   state.stopAllowed = state.busy && stopAllowed;
-  if (activityText) ui.activityText.textContent = activityText;
   updateControls();
+  renderQueue();
 }
 
 function focusComposer() {
@@ -2998,6 +3005,7 @@ function closeHistory() {
 
 function sendPrompt(value = ui.prompt.value) {
   const text = String(value || '').trim();
+  const compactCommand = /^\/compact(?:\s+([\s\S]*))?$/i.exec(text);
   const shellPrefix = text.startsWith('!');
   const shellCommand = shellPrefix ? {
     command: text.slice(text.startsWith('!!') ? 2 : 1).trim(),
@@ -3006,6 +3014,34 @@ function sendPrompt(value = ui.prompt.value) {
   const attachments = [...state.attachments, ...(state.pinnedFile ? [{ ...state.pinnedFile }] : [])];
   if ((!text && !attachments.length) || !state.hasWorkspace) return;
   if (state.shellCommandPending) return;
+  if (compactCommand) {
+    if (!state.hasSession) {
+      showNotice('Start a Pi chat before requesting compaction.', true);
+      return;
+    }
+    if (state.busy && !state.queueableRun) {
+      showNotice('Wait for the current Pi operation to finish before compacting.', true);
+      return;
+    }
+    if (state.busy && state.queue.operations.length >= 100) {
+      showNotice('The session queue is full. Remove an item before adding compaction.', true);
+      return;
+    }
+    if (attachments.length) {
+      showNotice('Remove attached context before requesting compaction.', true);
+      return;
+    }
+    const instructions = String(compactCommand[1] || '').trim().slice(0, 16_000);
+    rememberPrompt(text);
+    ui.prompt.value = '';
+    ui.prompt.style.height = 'auto';
+    syncPromptToWorker();
+    rememberDraft();
+    if (state.busy) post('queueCompaction', { instructions });
+    else post('compactSession', { instructions });
+    focusComposer();
+    return;
+  }
   if (shellCommand) {
     if (!shellCommand.command) {
       showNotice('Enter a command after !.', true);
@@ -3036,6 +3072,10 @@ function sendPrompt(value = ui.prompt.value) {
   if (text) rememberPrompt(text);
   const context = attachments.map((item) => item.context).join('\n');
   if (state.busy) {
+    if (state.queueableRun && state.deliverAs !== 'steer' && state.queue.operations.length >= 100) {
+      showNotice('The session queue is full. Remove an item before adding another message.', true);
+      return;
+    }
     ui.prompt.value = '';
     ui.prompt.style.height = 'auto';
     syncPromptToWorker();
@@ -3043,9 +3083,11 @@ function sendPrompt(value = ui.prompt.value) {
     state.attachments = [];
     renderAttachments();
     post('send', { text: promptText, attachments, deliverAs: state.deliverAs });
-    const queueKey = state.deliverAs === 'steer' ? 'steering' : 'followUp';
-    state.queue[queueKey].push(promptText);
-    renderQueue();
+    if (state.deliverAs === 'steer' || !state.queueableRun) {
+      const queueKey = state.deliverAs === 'steer' ? 'steering' : 'followUp';
+      state.queue[queueKey].push(promptText);
+      renderQueue();
+    }
     return;
   }
   state.messages.push({ role: 'user', text: promptText, context });
@@ -4088,15 +4130,17 @@ function renderExtensionCommandCompletions(data) {
 function renderQueue() {
   ui.queueList.replaceChildren();
   const piQueueCount = state.queue.steering.length + state.queue.followUp.length;
+  const operationQueueCount = state.queue.operations.length;
   const shellQueueCount = state.shellQueue.length;
-  const total = piQueueCount + shellQueueCount;
+  const total = piQueueCount + operationQueueCount + shellQueueCount;
   ui.activityText.textContent = state.busy
-    ? (total ? `Pi is working · ${total} queued` : 'Pi is working')
+    ? (total ? `${state.activityDetail || 'Pi is working'} · ${total} queued` : (state.activityDetail || 'Pi is working'))
     : (total ? `${total} queued for this session` : '');
   ui.queueToggle.textContent = `Queue${total ? ` · ${total}` : ''}`;
-  ui.queueToggle.hidden = total === 0;
+  ui.queueToggle.hidden = total === 0 && !state.queueableRun;
+  ui.addQueueCompaction.hidden = !state.queueableRun;
   ui.queueEmpty.hidden = total > 0;
-  if (total === 0 && !ui.queuePanel.hidden) {
+  if (total === 0 && !state.busy && !ui.queuePanel.hidden) {
     ui.queuePanel.hidden = true;
     ui.queueToggle.setAttribute('aria-expanded', 'false');
   }
@@ -4157,6 +4201,63 @@ function renderQueue() {
       ui.queueList.append(row);
     });
   }
+  if (operationQueueCount) {
+    const heading = document.createElement('div');
+    heading.className = 'queue-group-heading';
+    heading.textContent = 'Run after the current Pi work';
+    ui.queueList.append(heading);
+    state.queue.operations.forEach((operation, index) => {
+      const row = document.createElement('div');
+      row.className = `queued-item ${operation.type === 'compact' ? 'queued-compaction' : ''}`;
+      const content = document.createElement('div');
+      content.className = 'queued-item-text';
+      content.textContent = operation.type === 'compact'
+        ? `Compact session context${operation.instructions ? ` · ${operation.instructions}` : ''}`
+        : operation.text;
+      const actions = document.createElement('div');
+      actions.className = 'queued-item-actions';
+      const move = (delta) => {
+        const next = [...state.queue.operations];
+        const target = index + delta;
+        if (target < 0 || target >= next.length) return;
+        [next[index], next[target]] = [next[target], next[index]];
+        replaceManualQueue(next);
+      };
+      const up = document.createElement('button');
+      up.type = 'button'; up.className = 'session-action'; up.textContent = '↑'; up.title = 'Move up'; up.disabled = index === 0;
+      up.addEventListener('click', () => move(-1));
+      const down = document.createElement('button');
+      down.type = 'button'; down.className = 'session-action'; down.textContent = '↓'; down.title = 'Move down'; down.disabled = index === operationQueueCount - 1;
+      down.addEventListener('click', () => move(1));
+      const edit = document.createElement('button');
+      edit.type = 'button'; edit.className = 'session-action'; edit.textContent = 'Edit'; edit.title = operation.type === 'compact' ? 'Edit compaction instructions' : 'Edit queued message';
+      edit.addEventListener('click', () => {
+        const input = document.createElement('textarea');
+        input.className = 'queue-edit-input';
+        input.value = operation.type === 'compact' ? operation.instructions : operation.text;
+        input.rows = 3;
+        input.setAttribute('aria-label', operation.type === 'compact' ? 'Compaction instructions' : 'Queued message');
+        const save = document.createElement('button');
+        save.type = 'button'; save.className = 'session-action'; save.textContent = 'Save';
+        save.addEventListener('click', () => {
+          const next = [...state.queue.operations];
+          const value = input.value.trim();
+          next[index] = operation.type === 'compact'
+            ? { ...operation, instructions: value.slice(0, 16_000) }
+            : { ...operation, text: value.slice(0, 100_000) };
+          replaceManualQueue(next);
+        });
+        content.replaceChildren(input, save);
+        input.focus();
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'session-action danger-action'; remove.textContent = 'Remove'; remove.title = 'Remove queued item';
+      remove.addEventListener('click', () => replaceManualQueue(state.queue.operations.filter((_, itemIndex) => itemIndex !== index)));
+      actions.append(up, down, edit, remove);
+      row.append(content, actions);
+      ui.queueList.append(row);
+    });
+  }
   if (state.shellQueue.length) {
     const heading = document.createElement('div');
     heading.className = 'queue-group-heading';
@@ -4188,9 +4289,20 @@ function replaceQueue(next) {
   state.queue = {
     steering: next.steering.filter((text) => String(text).trim()),
     followUp: next.followUp.filter((text) => String(text).trim()),
+    operations: state.queue.operations,
   };
   renderQueue();
-  post('replaceQueue', state.queue);
+  post('replaceQueue', { steering: state.queue.steering, followUp: state.queue.followUp });
+}
+
+function replaceManualQueue(operations) {
+  state.queue.operations = operations.slice(0, 100);
+  renderQueue();
+  post('replaceManualQueue', {
+    operations: state.queue.operations.map((operation) => operation.type === 'compact'
+      ? { id: operation.id, type: 'compact', instructions: operation.instructions }
+      : { id: operation.id, type: 'prompt', text: operation.text }),
+  });
 }
 
 function extensionWidgetMouseFromEvent(event, output, type, lines) {
@@ -5268,6 +5380,16 @@ window.addEventListener('message', (event) => {
       state.queue = {
         steering: Array.isArray(data.steering) ? data.steering : [],
         followUp: Array.isArray(data.followUp) ? data.followUp : [],
+        operations: Array.isArray(data.operations) ? data.operations.slice(0, 100).flatMap((operation) => {
+          if (!operation || typeof operation !== 'object' || typeof operation.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(operation.id)) return [];
+          if (operation.type === 'compact' && typeof operation.instructions === 'string') {
+            return [{ id: operation.id, type: 'compact', instructions: operation.instructions.slice(0, 16_000) }];
+          }
+          if (operation.type === 'prompt' && typeof operation.text === 'string' && operation.text.trim()) {
+            return [{ id: operation.id, type: 'prompt', text: operation.text.slice(0, 100_000) }];
+          }
+          return [];
+        }) : [],
       };
       renderQueue();
       break;
@@ -5656,6 +5778,7 @@ window.addEventListener('message', (event) => {
       break;
     }
     case 'run-started':
+      state.queueableRun = data.agentRun === true;
       if (data.shellCommand === true && typeof data.command === 'string') {
         state.shellCommandPending = false;
         state.liveShellMessage = {
@@ -5684,7 +5807,7 @@ window.addEventListener('message', (event) => {
       state.streamIndex = -1;
       setBusy(false);
       if (data.packageOperation) state.packageStatus = '';
-      state.queue = { steering: [], followUp: [] };
+      state.queue = { steering: [], followUp: [], operations: [] };
       renderQueue();
       renderMessages();
       break;
@@ -5782,7 +5905,16 @@ el('close-queue').addEventListener('click', () => {
 });
 el('clear-queue').addEventListener('click', () => {
   replaceQueue({ steering: [], followUp: [] });
+  replaceManualQueue([]);
   post('clearShellCommandQueue');
+});
+ui.addQueueCompaction.addEventListener('click', () => {
+  if (!state.queueableRun) return;
+  if (state.queue.operations.length >= 100) {
+    showNotice('The session queue is full. Remove an item before adding compaction.', true);
+    return;
+  }
+  post('queueCompaction');
 });
 ui.branchHistoryToggle.addEventListener('click', () => {
   const open = ui.branchPanel.hidden;
