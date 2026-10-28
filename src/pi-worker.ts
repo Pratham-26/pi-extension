@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isPiPackageSource } from './package-source';
 import { resolveModelScopePatterns } from './model-scope';
-import { parsePromptSuggestions } from './prompt-suggestions';
+import { fillPromptSuggestionFallback, parsePromptSuggestions } from './prompt-suggestions';
 import {
   createAgentSession,
   createCodemodeExtension,
@@ -3414,7 +3414,7 @@ async function suggestFollowUps(input: WorkerInput): Promise<void> {
       transcript,
       'Prompt suggestions',
     );
-    let suggestions = controller.signal.aborted ? [] : first.suggestions;
+    let suggestions = controller.signal.aborted || first.failed ? [] : first.suggestions;
     if (!controller.signal.aborted && !first.failed && suggestions.length < 3) {
       const recoveryContent = [
         'Untrusted coding conversation:',
@@ -3429,7 +3429,7 @@ async function suggestFollowUps(input: WorkerInput): Promise<void> {
         'Prompt suggestions recovery',
         240,
       );
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && !recovered.failed) {
         if (recovered.suggestions.length >= 3) {
           suggestions = recovered.suggestions;
         } else {
@@ -3440,22 +3440,30 @@ async function suggestFollowUps(input: WorkerInput): Promise<void> {
         }
       }
     }
-    if (suggestions.length === 0) {
+    if (controller.signal.aborted) {
       send('prompt-suggestions-result', {
         requestId,
         entryId,
-        suggestions,
-        ...(controller.signal.aborted ? { cancelled: true } : { error: 'Pi could not produce usable follow-up prompts.' }),
+        suggestions: [],
+        cancelled: true,
       });
     } else {
-      send('prompt-suggestions-result', { requestId, entryId, suggestions });
+      const completed = fillPromptSuggestionFallback(suggestions);
+      send('prompt-suggestions-result', {
+        requestId,
+        entryId,
+        suggestions: completed.suggestions,
+        ...(completed.usedFallback ? { fallback: true } : {}),
+      });
     }
   } catch {
+    const fallback = fillPromptSuggestionFallback([]);
     send('prompt-suggestions-result', {
       requestId,
       entryId,
-      suggestions: [],
-      ...(controller.signal.aborted ? { cancelled: true } : { error: 'Could not generate prompt suggestions with the current Pi model.' }),
+      ...(controller.signal.aborted
+        ? { suggestions: [], cancelled: true }
+        : { suggestions: fallback.suggestions, fallback: true }),
     });
   } finally {
     if (activePromptSuggestion?.controller === controller) activePromptSuggestion = undefined;

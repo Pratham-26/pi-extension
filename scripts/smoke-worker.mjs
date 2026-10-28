@@ -257,6 +257,17 @@ try {
   assert.equal(requestStream, true, 'the worker should request a streaming model response');
   assert.equal(requestModel, 'smoke-model', 'the selected Pi model should reach the local endpoint');
 
+  const latestAssistant = savedTranscript.messages.findLast((entry) => entry.role === 'assistant' && typeof entry.entryId === 'string');
+  assert.ok(latestAssistant, 'the saved assistant reply should expose an entry ID for follow-up suggestions');
+  const suggestionRequestId = 'a'.repeat(24);
+  const suggestionResultPromise = waitForWorkerMessage((message) => message?.type === 'prompt-suggestions-result'
+    && message.requestId === suggestionRequestId, 'follow-up suggestion result');
+  worker.postMessage({ type: 'suggestFollowUps', entryId: latestAssistant.entryId, requestId: suggestionRequestId });
+  const suggestionResult = await suggestionResultPromise;
+  assert.equal(suggestionResult.fallback, true, 'malformed local model output should be identified as a fallback');
+  assert.equal(suggestionResult.suggestions.length, 3, 'partial model output should be completed with usable general prompts');
+  assert.equal(requestCount, 3, 'follow-up generation should make a primary request and one recovery request');
+
   const sessionFile = savedTranscript.sessionFile;
   assert.equal(typeof sessionFile, 'string', 'the smoke session should expose its persisted path');
   assert.ok(resolve(sessionFile).startsWith(resolve(temporaryRoot) + sep), 'the persisted session should stay inside temporary smoke data');

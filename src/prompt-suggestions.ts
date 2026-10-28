@@ -1,6 +1,11 @@
 const MAX_RESPONSE_CHARS = 8_000;
 const MAX_SUGGESTION_CHARS = 240;
 const MAX_SUGGESTIONS = 3;
+const GENERIC_FOLLOW_UPS = [
+  'Review the answer for missing edge cases, risks, or assumptions.',
+  'Summarize the key changes and the next steps to validate them.',
+  'Explain the main trade-offs and any reasonable alternatives.',
+];
 
 function structuredSuggestions(value: unknown, depth = 0): unknown[] {
   if (depth > 5) return [];
@@ -105,4 +110,22 @@ export function parsePromptSuggestions(value: string): string[] {
     if (suggestions.length === MAX_SUGGESTIONS) break;
   }
   return suggestions;
+}
+
+/** Fill missing model suggestions with safe, directly usable general prompts. */
+export function fillPromptSuggestionFallback(suggestions: string[]): { suggestions: string[]; usedFallback: boolean } {
+  const output: string[] = [];
+  for (const value of suggestions) {
+    const cleaned = cleanSuggestion(value);
+    if (!cleaned || output.some((item) => item.toLocaleLowerCase() === cleaned.toLocaleLowerCase())) continue;
+    output.push(cleaned);
+    if (output.length === MAX_SUGGESTIONS) return { suggestions: output, usedFallback: false };
+  }
+  const originalCount = output.length;
+  for (const value of GENERIC_FOLLOW_UPS) {
+    if (output.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) continue;
+    output.push(value);
+    if (output.length === MAX_SUGGESTIONS) break;
+  }
+  return { suggestions: output, usedFallback: output.length > originalCount };
 }

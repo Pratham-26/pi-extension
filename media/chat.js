@@ -1621,6 +1621,12 @@ function renderMessages(shouldFollow = true) {
         loading.textContent = 'Generating with the current model…';
         suggestions.append(loading);
       } else {
+        if (promptSuggestions.fallback) {
+          const fallbackStatus = document.createElement('span');
+          fallbackStatus.className = 'prompt-suggestions-status';
+          fallbackStatus.textContent = 'General prompts included because the model did not return enough usable suggestions.';
+          suggestions.append(fallbackStatus);
+        }
         for (const value of promptSuggestions.suggestions.slice(0, 3)) {
           const chip = document.createElement('button');
           chip.type = 'button';
@@ -4483,7 +4489,7 @@ window.addEventListener('message', (event) => {
         const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
         return text.length >= 8 && text.length <= 240 ? [text] : [];
       }) : [];
-      state.promptSuggestions = { entryId: current.entryId, requestId: '', loading: false, suggestions };
+      state.promptSuggestions = { entryId: current.entryId, requestId: '', loading: false, suggestions, fallback: data.fallback === true };
       if (typeof data.error === 'string' && data.error) showNotice(data.error.slice(0, 300), true);
       renderMessages(false);
       break;
