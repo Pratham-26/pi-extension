@@ -70,6 +70,7 @@ const state = {
   deliverAs: 'followUp',
   queue: { steering: [], followUp: [] },
   toolMessagesBySession: new Map(),
+  thinkingExpansion: new Map(),
   extensionWidgets: new Map(),
   extensionStatuses: new Map(),
   extensionRequest: undefined,
@@ -834,6 +835,31 @@ function renderMessages(shouldFollow = true) {
       row.append(context);
     }
 
+    if (message.role === 'assistant' && typeof message.thinking === 'string' && message.thinking) {
+      const thinking = document.createElement('details');
+      thinking.className = 'thinking-block';
+      const thinkingKey = `${state.sessionPath}:${messageIndex}`;
+      thinking.open = state.thinkingExpansion.get(thinkingKey) === true;
+      thinking.addEventListener('toggle', () => {
+        state.thinkingExpansion.set(thinkingKey, thinking.open);
+        if (state.thinkingExpansion.size > 200) state.thinkingExpansion.delete(state.thinkingExpansion.keys().next().value);
+      });
+      const summary = document.createElement('summary');
+      summary.textContent = 'Thinking';
+      const content = document.createElement('div');
+      content.className = 'message-content thinking-content';
+      if (message.streaming) content.textContent = message.thinking;
+      else renderMarkdown(content, message.thinking);
+      if (message.thinkingTruncated) {
+        const note = document.createElement('p');
+        note.className = 'thinking-truncated';
+        note.textContent = 'Additional thinking omitted after reaching the display limit.';
+        content.append(note);
+      }
+      thinking.append(summary, content);
+      row.append(thinking);
+    }
+
     const body = document.createElement('div');
     body.className = 'message-content';
     if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text);
@@ -845,7 +871,7 @@ function renderMessages(shouldFollow = true) {
       imageSummary.textContent = `${imageCount} image ${imageCount === 1 ? 'attachment' : 'attachments'}`;
       body.append(imageSummary);
     }
-    row.append(body);
+    if (message.text || (message.role === 'user' && message.hasImages)) row.append(body);
     if (message.contextStatus === 'edited') row.append(createContextDiff(message.text, message.contextEditText));
     const quoteIds = quoteSourceIds(message.context);
     if (quoteIds.length) {
@@ -1255,7 +1281,7 @@ function updateChatSearch(moveToCurrent = false) {
     state.messages.forEach((message, index) => {
       const content = message.role === 'tool' && message.node instanceof HTMLElement
         ? message.node.textContent || ''
-        : `${message.text || ''}\n${message.context || ''}`;
+        : `${message.text || ''}\n${message.thinking || ''}\n${message.context || ''}`;
       if (content.toLocaleLowerCase().includes(query)) state.chatSearchHits.push(index);
     });
   }
@@ -2455,7 +2481,7 @@ function showExtensionDialog(data) {
 }
 
 function beginAssistantMessage() {
-  state.messages.push({ role: 'assistant', text: '', streaming: true });
+  state.messages.push({ role: 'assistant', text: '', thinking: '', streaming: true });
   state.streamIndex = state.messages.length - 1;
   renderMessages();
 }
@@ -2673,6 +2699,17 @@ window.addEventListener('message', (event) => {
     case 'assistant-delta': {
       if (state.streamIndex < 0 || !state.messages[state.streamIndex]) beginAssistantMessage();
       state.messages[state.streamIndex].text += String(data.text || '');
+      renderMessages();
+      break;
+    }
+    case 'thinking-delta': {
+      if (state.streamIndex < 0 || !state.messages[state.streamIndex]) beginAssistantMessage();
+      const message = state.messages[state.streamIndex];
+      const current = String(message.thinking || '');
+      const delta = String(data.text || '');
+      const remaining = Math.max(0, 50_000 - current.length);
+      if (remaining > 0) message.thinking = `${current}${delta.slice(0, remaining)}`;
+      if (delta.length > remaining) message.thinkingTruncated = true;
       renderMessages();
       break;
     }

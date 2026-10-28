@@ -495,14 +495,24 @@ function installExtensionUi(current: SessionLike): void {
   current.extensionRunner?.setUIContext(ui, 'rpc');
 }
 
-function toUiMessage(message: { role?: string; content?: unknown }): { role: string; text: string; context?: string; hasImages?: boolean; imageCount?: number } | undefined {
+function toUiMessage(message: { role?: string; content?: unknown }): { role: string; text: string; thinking?: string; context?: string; hasImages?: boolean; imageCount?: number } | undefined {
   if (message.role !== 'user' && message.role !== 'assistant') return undefined;
   const raw = contentText(message.content).trim();
+  const rawThinking = message.role === 'assistant' && Array.isArray(message.content)
+    ? message.content
+      .filter((part: any) => part?.type === 'thinking' && part.redacted !== true && typeof part.thinking === 'string')
+      .map((part: any) => part.thinking as string)
+      .filter(Boolean)
+      .join('\n\n')
+    : '';
+  const thinking = rawThinking.length > 50_000
+    ? `[Earlier thinking truncated]\n${rawThinking.slice(-(50_000 - 29))}`
+    : rawThinking;
   const imageCount = Array.isArray(message.content)
     ? message.content.filter((part: any) => part?.type === 'image').length
     : 0;
   const hasImages = imageCount > 0;
-  if (!raw && !hasImages) return undefined;
+  if (!raw && !hasImages && !thinking) return undefined;
 
   const start = '--- pi-extension-context:start ---';
   const end = '--- pi-extension-context:end ---';
@@ -513,7 +523,7 @@ function toUiMessage(message: { role?: string; content?: unknown }): { role: str
     const text = `${raw.slice(0, startIndex)}\n${raw.slice(endIndex + end.length)}`.trim();
     return { role: message.role, text, context, hasImages, imageCount };
   }
-  return { role: message.role, text: raw, hasImages, imageCount };
+  return { role: message.role, text: raw, ...(thinking ? { thinking } : {}), hasImages, imageCount };
 }
 
 function withContext(text: string, context?: string): string {
@@ -767,7 +777,10 @@ async function bindSession(next: SessionLike, extensionsBound = false): Promise<
       const update = event.assistantMessageEvent;
       if (update?.type === 'text_delta' && typeof update.delta === 'string') {
         send('assistant-delta', { text: update.delta });
-      } else if (update?.type === 'thinking_start' || update?.type === 'thinking_delta') {
+      } else if (update?.type === 'thinking_delta' && typeof update.delta === 'string') {
+        send('thinking-delta', { text: update.delta.slice(0, 50_000) });
+        send('activity', { message: 'Pi is thinking' });
+      } else if (update?.type === 'thinking_start') {
         send('activity', { message: 'Pi is thinking' });
       }
     } else if (event.type === 'tool_execution_start') {

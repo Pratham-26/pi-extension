@@ -25,7 +25,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 - [x] Show estimated context usage and warn visually near the model's context limit.
 - [x] Offer Pi context compaction near the context limit, with an explicit confirmation and cancellation through Stop.
 - [x] Export the active session as HTML or JSONL.
-- [~] Render headings, emphasis, lists, task lists, quotes, tables, fenced code, and allowlisted external Markdown links without raw HTML; math, Mermaid, image output, thinking blocks, and extension renderers remain unsupported.
+- [~] Render headings, emphasis, lists, task lists, quotes, tables, fenced code, allowlisted external Markdown links without raw HTML, and collapsed thinking blocks; math, Mermaid, image output, and extension renderers remain unsupported.
 - [~] Tool cards show live activity and reconstruct persisted calls/results with bounded argument/output previews; per-tool expansion preferences and line-level Pi-context edit diffs are available, while exploration grouping and focused transcript mode remain unavailable.
 - [~] Code blocks can be copied; symbol links and model-generated prompt suggestions are missing. Message quoting, bookmarks, persistent context edits, and context compaction are available.
 - [x] Export a redacted diagnostic report with software versions and generic error categories; the report excludes prompt/transcript content, workspace/session paths, file names, provider IDs, credentials, and environment variables.
@@ -35,7 +35,7 @@ This checklist tracks implemented and pending product capabilities as of 28 Octo
 
 - [x] Create, list, search, rename, pin, color, reorder, reopen, clone, export, and delete workspace sessions.
 - [~] Fork from a user message, edit earlier text/context/image prompts into a new branch, and navigate the current branch history. Multi-tab session restore and cross-workspace search remain unavailable.
-- [~] Session search is limited to the current workspace and session name/message text; it does not index all workspaces, thinking, or tool calls.
+- [~] Transcript search includes visible thinking and tool output; session search is limited to the current workspace and session name/message text, and does not index thinking or tool calls across sessions.
 - [~] Open the latest session when the chat view starts is optional; multiple independent chat editor tabs, persisted tab restore, and new chat beside a file are unavailable.
 - [x] Save a local title from the first non-command prompt without an extra provider request; configurable through `piChat.sessions.autoName`.
 - [ ] Git worktree sessions, setup commands, ignored-file copying, and safe worktree removal.
