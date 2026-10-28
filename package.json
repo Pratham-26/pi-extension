@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"

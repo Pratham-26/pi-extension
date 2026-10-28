@@ -12,7 +12,7 @@ A local VS Code sidebar for working with Pi. This independent implementation use
 - Git branch and changed-file review, bounded diffs, and confirmation-gated discard of tracked unstaged changes while preserving staged content
 - Cumulative active-session token and cost totals from Pi's recorded usage
 - A redacted diagnostic report with versions and generic error categories only
-- Transcript search, quote-to-prompt, persistent bookmarks, branch-safe omit/edit/restore controls for model context, prompt history/drafts, and a context-usage meter with confirmed Pi compaction
+- Transcript search, quote-to-prompt with jump-back references, persistent bookmarks, branch-safe omit/edit/restore controls for model context, prompt history/drafts, and a context-usage meter with confirmed Pi compaction
 - Copy controls for assistant code blocks
 - Basic Pi extension dialogs/widgets and hidden-view VS Code notifications
 
@@ -34,10 +34,10 @@ npm run typecheck
 
 ## Install the VSIX
 
-After packaging, install `pi-chat-vscode-0.1.18.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
+After packaging, install `pi-chat-vscode-0.1.19.vsix` from VS Code's Extensions view using **… → Install from VSIX…**, or run:
 
 ```powershell
-code --install-extension .\pi-chat-vscode-0.1.18.vsix --force
+code --install-extension .\pi-chat-vscode-0.1.19.vsix --force
 ```
 
 Reload VS Code after installation. The package is built locally from this source; the extension needs a Pi provider/model already configured in your Pi setup.

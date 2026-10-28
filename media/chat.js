@@ -652,6 +652,20 @@ function renderMessages(shouldFollow = true) {
     if (message.role === 'assistant' && !message.streaming) renderMarkdown(body, message.text);
     else body.textContent = message.text;
     row.append(body);
+    const quoteIds = quoteSourceIds(message.context);
+    if (quoteIds.length) {
+      const references = document.createElement('div');
+      references.className = 'quote-references';
+      quoteIds.forEach((entryId, index) => {
+        const reference = document.createElement('button');
+        reference.type = 'button';
+        reference.className = 'quote-reference';
+        reference.textContent = quoteIds.length === 1 ? 'Jump to quoted message' : `Jump to quote ${index + 1}`;
+        reference.addEventListener('click', () => jumpToQuotedMessage(entryId));
+        references.append(reference);
+      });
+      row.append(references);
+    }
     const actions = document.createElement('div');
     actions.className = 'message-actions';
     if (message.role === 'user' && message.entryId) {
@@ -728,7 +742,8 @@ function renderMessages(shouldFollow = true) {
       const selection = window.getSelection();
       const selected = selection?.toString().trim();
       const chosen = selected && body.contains(selection.anchorNode) ? selected : message.text;
-      const source = message.entryId ? ` source="${message.entryId}"` : '';
+      const sourceId = String(message.entryId || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const source = sourceId ? ` source="${sourceId}"` : '';
       state.attachments.push({
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         label: `Quote · ${message.role === 'user' ? 'you' : 'Pi'}`,
@@ -799,6 +814,35 @@ function stepChatSearch(direction) {
   if (!state.chatSearchHits.length) return;
   state.chatSearchIndex = (state.chatSearchIndex + direction + state.chatSearchHits.length) % state.chatSearchHits.length;
   updateChatSearch(true);
+}
+
+function quoteSourceIds(context) {
+  const ids = [];
+  const blocks = /<quote-context>\s*<quote\b([^>]*)>[\s\S]*?<\/quote>\s*<\/quote-context>/g;
+  let match;
+  while ((match = blocks.exec(String(context || ''))) !== null && ids.length < 8) {
+    const source = /(?:^|\s)source="([^"\r\n<>]{1,256})"/.exec(match[1]);
+    if (!source) continue;
+    const id = source[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function jumpToQuotedMessage(entryId) {
+  const sourceIndex = state.messages.findIndex((item) => item.entryId === entryId);
+  if (sourceIndex < 0) {
+    showNotice('The quoted message is outside the active session branch.');
+    return;
+  }
+  const row = ui.messageList.querySelector(`article[data-message-index="${sourceIndex}"]`);
+  if (!row) {
+    showNotice('The quoted message is not visible in this transcript.');
+    return;
+  }
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  row.classList.add('quote-reference-target');
+  setTimeout(() => row.classList.remove('quote-reference-target'), 1800);
 }
 
 function renderAttachments() {
