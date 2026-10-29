@@ -560,6 +560,7 @@ export function activate(context: vscode.ExtensionContext): void {
         if (event.affectsConfiguration('piChat.composer.promptHistory')) activeProvider.onPromptHistoryConfigurationChanged();
         if (event.affectsConfiguration('piChat.appearance')) activeProvider.onAppearanceConfigurationChanged();
         if (event.affectsConfiguration('piChat.transcript')) activeProvider.onTranscriptConfigurationChanged();
+        if (event.affectsConfiguration('piChat.security')) activeProvider.onSandboxConfigurationChanged();
       }
     }),
     new vscode.Disposable(() => {
@@ -585,6 +586,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
   private workerExtensionUiModeSetting: PiExtensionUiMode = 'rpc';
   private workerDisableContextFiles = false;
   private workerPromptResourceSettingsKey = '';
+  private workerSandboxEnabled = false;
+  private workerSandboxAllowedDomainsKey = '[]';
   private runtimeBusy = false;
   private turnFileCapture?: TurnFileCapture;
   private turnFileUndo?: TurnFileUndoRecord;
@@ -1468,6 +1471,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.workerExtensionUiModeSetting = 'rpc';
     this.workerDisableContextFiles = false;
     this.workerPromptResourceSettingsKey = '';
+    this.workerSandboxEnabled = false;
+    this.workerSandboxAllowedDomainsKey = '[]';
     if (previous) this.cancelProviderAuthPrompts(previous);
     this.cancelPendingExtensionUiRequests(previous);
     this.worker = undefined;
@@ -1667,6 +1672,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
           autoNameSessions: vscode.workspace.getConfiguration('piChat.sessions').get<boolean>('autoName', true),
           autoRefreshModels: vscode.workspace.getConfiguration('piChat.models').get<boolean>('autoRefresh', false),
           mcpEnabled: vscode.workspace.getConfiguration('piChat').get<boolean>('mcp.enabled', false),
+          sandboxEnabled: vscode.workspace.getConfiguration('piChat.security').get<boolean>('osSandbox', false),
+          sandboxAllowedDomains: vscode.workspace.getConfiguration('piChat.security').get<unknown>('sandboxAllowedDomains', []),
           newSessionToolNames: this.readNewSessionToolNames(),
           disabledContextFiles: this.readDisabledContextFiles(),
           disableContextFiles,
@@ -1685,6 +1692,8 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.workerExtensionUiModeSetting = extensionUiMode;
     this.workerDisableContextFiles = disableContextFiles;
     this.workerPromptResourceSettingsKey = promptResourceSettingsKey;
+    this.workerSandboxEnabled = vscode.workspace.getConfiguration('piChat.security').get<boolean>('osSandbox', false);
+    this.workerSandboxAllowedDomainsKey = JSON.stringify(vscode.workspace.getConfiguration('piChat.security').get<unknown>('sandboxAllowedDomains', [])) ?? '[]';
     this.runtimeBusy = false;
     this.queuedWorkCount = 0;
     worker.on('message', (message: RuntimeMessage) => {
@@ -5840,6 +5849,17 @@ class PiChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
       ? 'Pi context-file loading changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
       : 'Pi context-file loading changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
+  }
+
+  onSandboxConfigurationChanged(): void {
+    if (!this.worker) return;
+    const configuration = vscode.workspace.getConfiguration('piChat.security');
+    const enabled = configuration.get<boolean>('osSandbox', false);
+    const allowedDomainsKey = JSON.stringify(configuration.get<unknown>('sandboxAllowedDomains', [])) ?? '';
+    if (enabled === this.workerSandboxEnabled && allowedDomainsKey === this.workerSandboxAllowedDomainsKey) return;
+    this.post({ type: 'notice', message: this.runtimeBusy || this.queuedWorkCount > 0
+      ? 'The OS sandbox setting or network allowlist changed. Finish running and queued work, then use Pi Chat: Restart Pi Runtime to apply it.'
+      : 'The OS sandbox setting or network allowlist changed. Use Pi Chat: Restart Pi Runtime to apply it.' });
   }
 
   onPiPromptResourceConfigurationChanged(): void {

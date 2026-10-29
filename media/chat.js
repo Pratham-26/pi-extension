@@ -6239,6 +6239,21 @@ function dismissComposerPopoversFromOutside(event) {
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
   const target = event.target;
   const isInside = (element) => {
+    // A control can capture the pointer while it is pressed. In that case the
+    // pointerup target and composed path still point at the control even after
+    // the user releases outside the menu. Only for an active capture, use the
+    // release position to decide whether the interaction ended inside.
+    if (event.type === 'pointerup' && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+      const pointerId = event.pointerId;
+      const hasCapturedPointer = eventPath.some((item) => item instanceof Element
+        && typeof item.hasPointerCapture === 'function'
+        && item.hasPointerCapture(pointerId));
+      if (hasCapturedPointer) {
+        const hit = document.elementFromPoint(event.clientX, event.clientY);
+        return !!hit && (hit === element || element.contains(hit));
+      }
+    }
+
     // Trust the actual DOM event path for interactions inside this webview.
     // Coordinates can be translated by VS Code's embedding layer, so testing
     // them first may incorrectly classify an outside click as inside a popup.

@@ -8,6 +8,7 @@ docs/**
 !docs/feature-coverage.md
 dist/extension-probe.js
 dist/*.cjs
+!dist/pi-sandbox-helper.cjs
 PRODUCT.md
 tsconfig.json
 package-lock.json

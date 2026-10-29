@@ -8,6 +8,12 @@ import { validatePiShellCommand } from './shell-command';
 import { resolveModelScopePatterns } from './model-scope';
 import { fillPromptSuggestionFallback, parsePromptSuggestions } from './prompt-suggestions';
 import {
+  createPiOsSandboxBashOperations,
+  createPiOsSandboxTools,
+  disposePiOsSandbox,
+  initializePiOsSandbox,
+} from './pi-sandbox';
+import {
   createAgentSession,
   createCodemodeExtension,
   createMcpExtension,
@@ -199,7 +205,7 @@ type SessionLike = {
   dispose: () => void;
 };
 
-const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; disableContextFiles?: boolean; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui'; piPromptResources?: unknown } | undefined;
+const workerOptions = workerData as { cwd?: string; mcpEnabled?: boolean; autoNameSessions?: boolean; autoRefreshModels?: boolean; disabledContextFiles?: unknown; disableContextFiles?: boolean; extensionRoot?: string; extensionUiMode?: 'rpc' | 'tui'; piPromptResources?: unknown; sandboxEnabled?: boolean; sandboxAllowedDomains?: unknown } | undefined;
 const cwd = String(workerOptions?.cwd ?? process.cwd());
 type PiPromptResourceSettings = {
   systemPromptText?: string;
@@ -286,7 +292,9 @@ const modelScopeOverrides = new WeakMap<object, string[] | null>();
 const extensionRoot = typeof workerOptions?.extensionRoot === 'string' && isAbsolute(workerOptions.extensionRoot)
   ? workerOptions.extensionRoot
   : '';
-let mcpEnabled = workerOptions?.mcpEnabled === true;
+const osSandboxEnabled = workerOptions?.sandboxEnabled === true;
+let sandboxNoticeSent = false;
+let mcpEnabled = !osSandboxEnabled && workerOptions?.mcpEnabled === true;
 let autoNameSessions = workerOptions?.autoNameSessions !== false;
 const extensionUiMode: 'rpc' | 'tui' = workerOptions?.extensionUiMode === 'tui' ? 'tui' : 'rpc';
 const autoRefreshModelsAtStartup = workerOptions?.autoRefreshModels === true && process.env.PI_OFFLINE !== '1';
@@ -3894,9 +3902,21 @@ async function createSessionInternal(path?: string, defaultPreset?: DefaultModel
   let createdSession: SessionLike | undefined;
   let createdExtensionsBound = false;
   try {
-    const manager = path ? SessionManager.open(path) : SessionManager.create(cwd);
     const settingsManager = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
-    const extensionFactories = [
+    if (osSandboxEnabled) {
+      await initializePiOsSandbox({
+        cwd,
+        extensionRoot,
+        shellPath: settingsManager.getShellPath(),
+        allowedDomains: workerOptions?.sandboxAllowedDomains,
+      });
+      if (!sandboxNoticeSent) {
+        sandboxNoticeSent = true;
+        send('notice', { message: 'The OS sandbox is active for Pi file and shell tools. User extensions, MCP, code mode, and subagents are disabled while this setting is on.' });
+      }
+    }
+    const manager = path ? SessionManager.open(path) : SessionManager.create(cwd);
+    const extensionFactories = osSandboxEnabled ? [] : [
       createSubagentRpcExtension(),
       createCodemodeExtension(),
       createToolSearchExtension(),
@@ -3920,11 +3940,11 @@ async function createSessionInternal(path?: string, defaultPreset?: DefaultModel
       agentDir: getAgentDir(),
       settingsManager,
       extensionFactories,
-      additionalExtensionPaths: piPromptResourceSettings.additionalExtensionPaths,
+      additionalExtensionPaths: osSandboxEnabled ? [] : piPromptResourceSettings.additionalExtensionPaths,
       additionalSkillPaths: piPromptResourceSettings.additionalSkillPaths,
       additionalPromptTemplatePaths: piPromptResourceSettings.additionalPromptTemplatePaths,
       additionalThemePaths: piPromptResourceSettings.additionalThemePaths,
-      noExtensions: piPromptResourceSettings.disableExtensionDiscovery,
+      noExtensions: osSandboxEnabled || piPromptResourceSettings.disableExtensionDiscovery,
       disabledBuiltinExtensions: ['mcp'],
       noSkills: piPromptResourceSettings.disableSkillDiscovery,
       noPromptTemplates: piPromptResourceSettings.disablePromptTemplateDiscovery,
@@ -3944,7 +3964,15 @@ async function createSessionInternal(path?: string, defaultPreset?: DefaultModel
       },
     });
     await resourceLoader.reload({ resolveProjectTrust: () => resolveProjectTrust(settingsManager) });
-    const result = await createAgentSession({ cwd, sessionManager: manager, settingsManager, resourceLoader });
+    const result = await createAgentSession({
+      cwd,
+      sessionManager: manager,
+      settingsManager,
+      resourceLoader,
+      ...(osSandboxEnabled
+        ? { customTools: createPiOsSandboxTools(cwd, settingsManager.getShellPath(), settingsManager.getShellCommandPrefix()) }
+        : {}),
+    });
     createdSession = result.session as unknown as SessionLike;
     if (!path && defaultPreset) {
       const model = createdSession.modelRuntime?.getModel(defaultPreset.provider, defaultPreset.modelId);
@@ -4187,6 +4215,11 @@ async function handle(input: WorkerInput): Promise<void> {
         unsubscribe = undefined;
         session?.dispose();
         session = undefined;
+        try {
+          await disposePiOsSandbox();
+        } catch {
+          send('notice', { message: 'The OS sandbox cleanup did not finish cleanly. Restart VS Code before enabling it again.', isError: true });
+        }
         parentPort?.close();
         return;
       }
@@ -4275,6 +4308,10 @@ async function handle(input: WorkerInput): Promise<void> {
       case 'setMcpEnabled': {
         const requestId = input.requestId;
         if (typeof requestId !== 'string' || requestId.length > 128 || typeof input.enabled !== 'boolean') return;
+        if (osSandboxEnabled && input.enabled) {
+          send('mcp-setting-failed', { requestId, enabled: true, message: 'MCP tools are disabled while the OS sandbox is enabled. Turn off the OS sandbox and restart Pi to use MCP.' });
+          return;
+        }
         if (busy || authenticatingProvider) {
           send('mcp-setting-failed', { requestId, enabled: input.enabled, message: 'Finish the current Pi operation before changing MCP connections.' });
           return;
@@ -5037,7 +5074,7 @@ async function handle(input: WorkerInput): Promise<void> {
             excludeFromContext,
             cwd: session.sessionManager?.getCwd() ?? cwd,
           });
-          if (eventResult && 'result' in eventResult && eventResult.result) {
+          if (!osSandboxEnabled && eventResult && 'result' in eventResult && eventResult.result) {
             const output = eventResult.result.output;
             const visibleOutput = output.length > MAX_TOOL_UI_CHARS ? output.slice(-MAX_TOOL_UI_CHARS) : output;
             if (visibleOutput) send('bash-execution-update', { id: commandId, delta: visibleOutput });
@@ -5046,7 +5083,9 @@ async function handle(input: WorkerInput): Promise<void> {
             await session.executeBash(command, undefined, {
               excludeFromContext,
               id: commandId,
-              operations: eventResult?.operations,
+              operations: osSandboxEnabled
+                ? createPiOsSandboxBashOperations(session.settingsManager?.getShellPath())
+                : eventResult?.operations,
             });
           }
         } finally {

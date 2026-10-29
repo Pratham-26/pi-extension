@@ -7,7 +7,7 @@
     "url": "https://github.com/Pratham-26/pi-extension.git"
   },
   "homepage": "https://github.com/Pratham-26/pi-extension#readme",
-  "version": "0.1.128",
+  "version": "0.1.129",
   "publisher": "local",
   "engines": {
     "vscode": "^1.109.0"
@@ -166,6 +166,20 @@
           "default": "inherit",
           "scope": "machine",
           "description": "Choose Pi's startup network behavior. Offline mode does not block model API requests. Restart the Pi runtime after changing this setting."
+        },
+        "piChat.security.osSandbox": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Run Pi's built-in shell and file tools inside the OS sandbox. This disables user Pi extensions, MCP tools, code mode, and subagents while enabled. Tool network access is blocked unless a domain is listed in piChat.security.sandboxAllowedDomains. Windows requires the one-time sandbox setup; the extension never performs it automatically."
+        },
+        "piChat.security.sandboxAllowedDomains": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 256 },
+          "maxItems": 128,
+          "default": [],
+          "scope": "machine",
+          "description": "Machine-wide network destinations that sandboxed Pi tools may contact. Accepts domain patterns supported by the OS sandbox runtime. An empty list blocks tool network access."
         },
         "piChat.extensionUiMode": {
           "type": "string",
@@ -564,14 +578,16 @@
     }
   },
   "scripts": {
-    "compile": "npm run compile:extension && npm run compile:worker && npm run compile:webview && npm run compile:draft-store",
+    "compile": "npm run compile:extension && npm run compile:worker && npm run compile:sandbox-helper && npm run compile:webview && npm run compile:draft-store",
     "compile:extension": "esbuild src/extension.ts --bundle --platform=node --target=node22 --external:vscode --main-fields=module,main --outfile=dist/extension.js",
-    "compile:worker": "esbuild src/pi-worker.ts --bundle --platform=node --target=node22 --format=esm --external:@earendil-works/pi-coding-agent --outfile=dist/pi-worker.mjs",
+    "compile:worker": "esbuild src/pi-worker.ts --bundle --platform=node --target=node22 --format=esm --external:@earendil-works/pi-coding-agent --external:@anthropic-ai/sandbox-runtime --outfile=dist/pi-worker.mjs",
+    "compile:sandbox-helper": "esbuild src/pi-sandbox-helper.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/pi-sandbox-helper.cjs",
     "compile:webview": "esbuild src/webview-renderers.js --bundle --platform=browser --target=es2022 --format=iife --minify --legal-comments=linked --outfile=dist/webview-renderers.js",
     "compile:draft-store": "esbuild src/draft-store.js --bundle --platform=browser --target=es2022 --format=iife --global-name=PiChatDraftStore --outfile=dist/draft-store.js",
     "typecheck": "tsc --noEmit",
     "smoke:drafts": "npm run compile:draft-store && node scripts/smoke-drafts.mjs",
     "smoke:worker": "npm run compile:worker && node scripts/smoke-worker.mjs",
+    "smoke:sandbox-helper": "npm run compile:sandbox-helper && node scripts/smoke-pi-sandbox-helper.mjs",
     "smoke:shell-command": "esbuild src/shell-command.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/shell-command.cjs && esbuild src/shell-command-queue.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/shell-command-queue.cjs && node scripts/smoke-shell-command.mjs",
     "smoke:runtime-settings": "npm run compile:worker && node scripts/smoke-runtime-settings.mjs",
     "smoke:sessions": "node scripts/smoke-session-order.mjs",
@@ -583,6 +599,7 @@
     "package": "npm run compile && vsce package"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "diff": "8.0.4",
     "jsonc-parser": "3.3.1",
@@ -594,6 +611,9 @@
     },
     "@azure/identity": {
       "@azure/msal-node": "7.1.2"
+    },
+    "@anthropic-ai/sandbox-runtime": {
+      "zod": "4.6.6"
     }
   },
   "devDependencies": {
