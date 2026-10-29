@@ -24,6 +24,16 @@ assert.deepEqual(
   ['Check edge cases in the parser.', 'Summarize the validation steps.'],
   'fenced structured output should yield the model prompts',
 );
+assert.deepEqual(
+  parsePromptSuggestions('Here are three follow-up prompts: 1. Check edge cases in the parser. 2. Add focused coverage for empty input. 3. Summarize the validation steps.'),
+  ['Check edge cases in the parser.', 'Add focused coverage for empty input.', 'Summarize the validation steps.'],
+  'a flattened numbered response should discard its heading and split into usable prompts',
+);
+assert.deepEqual(
+  parsePromptSuggestions('• Check edge cases in the parser. • Add focused coverage for empty input. • Summarize the validation steps.'),
+  ['Check edge cases in the parser.', 'Add focused coverage for empty input.', 'Summarize the validation steps.'],
+  'inline bullet responses should split into usable prompts',
+);
 
 const completed = fillPromptSuggestionFallback(['Review the error handling paths.']);
 assert.equal(completed.suggestions.length, 3, 'unusable or partial model output should still offer three prompts');

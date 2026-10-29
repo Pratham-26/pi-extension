@@ -75,6 +75,38 @@ function parseStructuredResponse(source: string): unknown[] {
   return [];
 }
 
+function splitPlainSuggestions(source: string): string[] {
+  const plain = source.replace(/```(?:json|text)?/gi, '').trim();
+  const lines = plain.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 1) return lines;
+
+  // Some providers flatten a numbered list into one line. Split only a clear
+  // sequential list so ordinary prose, decimals, and file names stay intact.
+  const markers = [...plain.matchAll(/(^|\s)(\d{1,2}[.)]|\(\d{1,2}\))\s+/g)];
+  if (markers.length >= 2) {
+    const numbers = markers.map((match) => Number(match[2].match(/\d+/)?.[0]));
+    const isSequential = numbers.every((number, index) => number === index + 1);
+    if (isSequential) {
+      return markers.map((match, index) => {
+        const start = (match.index ?? 0) + match[0].length;
+        const end = index + 1 < markers.length ? markers[index + 1].index ?? plain.length : plain.length;
+        return plain.slice(start, end).trim();
+      });
+    }
+  }
+
+  const bullets = [...plain.matchAll(/(^|\s)([-*•])\s+/g)];
+  if (bullets.length >= 2) {
+    return bullets.map((match, index) => {
+      const start = (match.index ?? 0) + match[0].length;
+      const end = index + 1 < bullets.length ? bullets[index + 1].index ?? plain.length : plain.length;
+      return plain.slice(start, end).trim();
+    });
+  }
+
+  return lines;
+}
+
 function cleanSuggestion(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const cleaned = value
@@ -89,7 +121,7 @@ function cleanSuggestion(value: unknown): string | undefined {
     .replace(/^\*(.*?)\*$/, '$1')
     .trim();
   if (cleaned.length < 8 || cleaned.length > MAX_SUGGESTION_CHARS) return undefined;
-  if (/^(?:here are (?:three|some|a few) )?(?:follow[- ]?up )?suggestions:?$/i.test(cleaned)) return undefined;
+  if (/^(?:here (?:are|is) )?(?:(?:three|some|a few) )?(?:possible )?(?:follow[- ]?up )?(?:suggestions?|prompts?|questions?)(?:\s+for .{1,80})?:?$/i.test(cleaned)) return undefined;
   return cleaned;
 }
 
@@ -99,9 +131,7 @@ export function parsePromptSuggestions(value: string): string[] {
   if (!source) return [];
 
   const structured = parseStructuredResponse(source);
-  const candidates = structured.length ? structured : source
-    .replace(/```(?:json|text)?/gi, '')
-    .split(/\r?\n/);
+  const candidates = structured.length ? structured : splitPlainSuggestions(source);
   const suggestions: string[] = [];
   for (const candidate of candidates) {
     const cleaned = cleanSuggestion(candidate);
